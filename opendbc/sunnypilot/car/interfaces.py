@@ -33,14 +33,80 @@ TorqueFromLateralAccelCallbackTypeTorqueSpace = Callable[[LatControlInputs, stru
 
 
 class CarInterfaceBaseSP:
+  def _ensure_speed_dep_init(self):
+    """Lazy init: load speed-dep config on first access."""
+    if hasattr(self, '_speed_dep'):
+      return
+    from opendbc.car.interfaces import get_speed_dependent_torque_params
+    self._speed_dep = False
+    self._speed_dep_v_ego = 0.0
+    cfg = get_speed_dependent_torque_params().get(self.CP.carFingerprint)
+    if cfg is not None:
+      self._speed_dep = True
+      self._speed_dep_speed_bp = list(cfg['speed_bp'])
+      self._speed_dep_laf_v = list(cfg['laf_bp'])
+      self._speed_dep_friction_v = list(cfg.get('friction_bp', [0.1] * len(cfg['speed_bp'])))
+      self._speed_dep_original_laf_v = list(cfg['laf_bp'])
+
+  @property
+  def v_ego(self):
+    self._ensure_speed_dep_init()
+    return self._speed_dep_v_ego
+
+  @v_ego.setter
+  def v_ego(self, value):
+    self._ensure_speed_dep_init()
+    self._speed_dep_v_ego = value
+
   @staticmethod
   def torque_from_lateral_accel_linear_in_torque_space(latcontrol_inputs: LatControlInputs, torque_params: structs.CarParams.LateralTorqueTuning,
                                                         gravity_adjusted: bool) -> float:
     # The default is a linear relationship between torque and lateral acceleration (accounting for road roll and steering friction)
     return latcontrol_inputs.lateral_acceleration / float(torque_params.latAccelFactor)
 
+  def _torque_from_lateral_accel_speed_dep_closure(self, lateral_acceleration, torque_params):
+    laf = float(np.interp(self._speed_dep_v_ego, self._speed_dep_speed_bp, self._speed_dep_laf_v))
+    return lateral_acceleration / laf
+
+  def _lateral_accel_from_torque_speed_dep_closure(self, torque, torque_params):
+    laf = float(np.interp(self._speed_dep_v_ego, self._speed_dep_speed_bp, self._speed_dep_laf_v))
+    return torque * laf
+
+  def _torque_from_lateral_accel_speed_dep_torque_space(self, latcontrol_inputs, torque_params, gravity_adjusted):
+    laf = float(np.interp(latcontrol_inputs.vego, self._speed_dep_speed_bp, self._speed_dep_laf_v))
+    return latcontrol_inputs.lateral_acceleration / laf
+
+  def torque_from_lateral_accel(self):
+    self._ensure_speed_dep_init()
+    if self._speed_dep:
+      return self._torque_from_lateral_accel_speed_dep_closure
+    return self.torque_from_lateral_accel_linear
+
+  def lateral_accel_from_torque(self):
+    self._ensure_speed_dep_init()
+    if self._speed_dep:
+      return self._lateral_accel_from_torque_speed_dep_closure
+    return self.lateral_accel_from_torque_linear
+
   def torque_from_lateral_accel_in_torque_space(self) -> TorqueFromLateralAccelCallbackTypeTorqueSpace:
+    self._ensure_speed_dep_init()
+    if self._speed_dep:
+      return self._torque_from_lateral_accel_speed_dep_torque_space
     return self.torque_from_lateral_accel_linear_in_torque_space
+
+  def update_speed_dep_laf(self, speed_bp, laf_bp, friction_bp, valid_bp):
+    self._ensure_speed_dep_init()
+    if not self._speed_dep:
+      return
+    n = len(self._speed_dep_laf_v)
+    if len(laf_bp) != n or len(valid_bp) != n:
+      return
+    for i in range(n):
+      if valid_bp[i]:
+        lo = self._speed_dep_original_laf_v[i] * 0.7
+        hi = self._speed_dep_original_laf_v[i] * 1.3
+        if lo <= laf_bp[i] <= hi:
+          self._speed_dep_laf_v[i] = laf_bp[i]
 
 
 class NanoFFModel:
