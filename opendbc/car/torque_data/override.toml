@@ -101,13 +101,12 @@ legend = ["LAT_ACCEL_FACTOR", "MAX_LAT_ACCEL_MEASURED", "FRICTION"]
 # Dashcam or fallback configured as ideal car
 "MOCK" = [10.0, 10, 0.0]
 
-# Mazda CX-5 2022 — representative values from speed-dep learner (100% cal)
-# LAF @ 20 m/s from per-bin interp, MAX_LAT_ACCEL from device data, friction @ 20 m/s
-"MAZDA_CX5_2022" = [1.856, 2.0, 0.127]
-
 # Manually checked
 "HONDA_CIVIC_2022" = [2.5, 1.2, 0.15]
 "HONDA_HRV_3G" = [2.5, 1.2, 0.2]
+
+# Mazda CX-5 2022 (STEER_MAX=1200, learned from torqued)
+"MAZDA_CX5_2022" = [1.685, 1.76, 0.111]
 
 # port extensions
 "HONDA_CLARITY" = [0.96, 0.4018518740819229, 0.19]
