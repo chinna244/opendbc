@@ -60,8 +60,13 @@ class CarInterfaceExt:
   def update_speed_dep_laf(self, speed_bp, laf_bp, friction_bp, valid_bp):
     """Apply live-learned LAF values with +/-30% sanity bounds per bin.
     Only bins marked valid (cal% >= threshold in torqued) are updated."""
-    for i in range(len(self.speed_dep_laf_v)):
-      if i < len(valid_bp) and valid_bp[i]:
+    if not self.speed_dep:
+      return
+    n = len(self.speed_dep_laf_v)
+    if len(laf_bp) != n or len(valid_bp) != n:
+      return
+    for i in range(n):
+      if valid_bp[i]:
         lo = self._original_laf_v[i] * 0.7
         hi = self._original_laf_v[i] * 1.3
         if lo <= laf_bp[i] <= hi:
