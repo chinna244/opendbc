@@ -31,6 +31,7 @@ ACCEL_MIN = -3.5
 TORQUE_PARAMS_PATH = os.path.join(BASEDIR, 'torque_data/params.toml')
 TORQUE_OVERRIDE_PATH = os.path.join(BASEDIR, 'torque_data/override.toml')
 TORQUE_SUBSTITUTE_PATH = os.path.join(BASEDIR, 'torque_data/substitute.toml')
+SPEED_DEPENDENT_TORQUE_PATH = os.path.join(BASEDIR, 'torque_data/speed_dependent.toml')
 
 GEAR_SHIFTER_MAP: dict[str, structs.CarState.GearShifter] = {
   'P': GearShifter.park, 'PARK': GearShifter.park,
@@ -76,6 +77,13 @@ def get_torque_params():
       torque_params[candidate] = torque_params[sub_candidate]
 
   return torque_params
+
+
+@cache
+def get_speed_dependent_torque_params():
+  with open(SPEED_DEPENDENT_TORQUE_PATH, 'rb') as f:
+    return tomllib.load(f)
+
 
 # generic car and radar interfaces
 
