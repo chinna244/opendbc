@@ -57,6 +57,7 @@ class CarInterfaceBaseSP:
       self._speed_dep_laf_v = list(cfg['laf_bp'])
       self._speed_dep_friction_v = list(cfg.get('friction_bp', [0.1] * len(cfg['speed_bp'])))
       self._speed_dep_original_laf_v = list(cfg['laf_bp'])
+      self._speed_dep_original_friction_v = list(self._speed_dep_friction_v)
 
   @staticmethod
   def torque_from_lateral_accel_linear_in_torque_space(latcontrol_inputs: LatControlInputs, torque_params: structs.CarParams.LateralTorqueTuning,
@@ -79,14 +80,18 @@ class CarInterfaceBaseSP:
     if not self._speed_dep:
       return
     n = len(self._speed_dep_laf_v)
-    if len(laf_bp) != n or len(valid_bp) != n:
+    if len(laf_bp) != n or len(valid_bp) != n or len(friction_bp) != n:
       return
     for i in range(n):
       if valid_bp[i]:
-        lo = self._speed_dep_original_laf_v[i] * 0.7
-        hi = self._speed_dep_original_laf_v[i] * 1.3
-        if lo <= laf_bp[i] <= hi:
+        laf_lo = self._speed_dep_original_laf_v[i] * 0.7
+        laf_hi = self._speed_dep_original_laf_v[i] * 1.3
+        if laf_lo <= laf_bp[i] <= laf_hi:
           self._speed_dep_laf_v[i] = laf_bp[i]
+        fric_lo = self._speed_dep_original_friction_v[i] * 0.7
+        fric_hi = self._speed_dep_original_friction_v[i] * 1.3
+        if fric_lo <= friction_bp[i] <= fric_hi:
+          self._speed_dep_friction_v[i] = friction_bp[i]
 
 
 class NanoFFModel:
