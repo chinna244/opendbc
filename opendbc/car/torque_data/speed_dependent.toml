@@ -8,9 +8,9 @@
 # The online learner (torque estimator) runs independent SVD fits per speed bin.
 # laf_bp/friction_bp provide starting values and define +/-30% sanity bounds.
 #
-# Values interpolated from comma 4 device-learned data (bins 0-3 at 100% cal).
+# Values from comma 4 device-learned data.
 
 [MAZDA_CX5_2022]
 speed_bp    = [6.5, 10.0, 15.0, 21.0, 26.5, 32.0, 37.5]
-laf_bp      = [2.390, 2.522, 2.710, 2.386, 2.281, 2.220, 2.209]
-friction_bp = [0.177, 0.158, 0.131, 0.118, 0.113, 0.100, 0.080]
+laf_bp      = [2.390, 3.152, 2.294, 2.386, 2.281, 2.543, 2.209]
+friction_bp = [0.177, 0.157, 0.149, 0.118, 0.113, 0.104, 0.080]
