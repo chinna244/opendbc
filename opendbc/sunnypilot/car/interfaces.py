@@ -45,54 +45,14 @@ def get_speed_dep_config():
 
 
 class CarInterfaceBaseSP:
-  def _ensure_speed_dep_init(self):
-    """Lazy init: load speed-dep config on first access."""
-    if hasattr(self, '_speed_dep'):
-      return
-    self._speed_dep = False
-    cfg = get_speed_dep_config().get(self.CP.carFingerprint)
-    if cfg is not None:
-      self._speed_dep = True
-      self._speed_dep_speed_bp = list(cfg['speed_bp'])
-      self._speed_dep_laf_v = list(cfg['laf_bp'])
-      self._speed_dep_friction_v = list(cfg.get('friction_bp', [0.1] * len(cfg['speed_bp'])))
-      self._speed_dep_original_laf_v = list(cfg['laf_bp'])
-      self._speed_dep_original_friction_v = list(self._speed_dep_friction_v)
-
   @staticmethod
   def torque_from_lateral_accel_linear_in_torque_space(latcontrol_inputs: LatControlInputs, torque_params: structs.CarParams.LateralTorqueTuning,
                                                         gravity_adjusted: bool) -> float:
     # The default is a linear relationship between torque and lateral acceleration (accounting for road roll and steering friction)
     return latcontrol_inputs.lateral_acceleration / float(torque_params.latAccelFactor)
 
-  def _torque_from_lateral_accel_speed_dep_torque_space(self, latcontrol_inputs, torque_params, gravity_adjusted):
-    laf = float(np.interp(latcontrol_inputs.vego, self._speed_dep_speed_bp, self._speed_dep_laf_v))
-    return latcontrol_inputs.lateral_acceleration / laf
-
   def torque_from_lateral_accel_in_torque_space(self) -> TorqueFromLateralAccelCallbackTypeTorqueSpace:
-    self._ensure_speed_dep_init()
-    if self._speed_dep:
-      return self._torque_from_lateral_accel_speed_dep_torque_space
     return self.torque_from_lateral_accel_linear_in_torque_space
-
-  def update_speed_dep_laf(self, speed_bp, laf_bp, friction_bp, valid_bp):
-    self._ensure_speed_dep_init()
-    if not self._speed_dep:
-      return
-    n = len(self._speed_dep_laf_v)
-    if len(laf_bp) != n or len(valid_bp) != n or len(friction_bp) != n:
-      return
-    for i in range(n):
-      if valid_bp[i]:
-        laf_lo = self._speed_dep_original_laf_v[i] * 0.7
-        laf_hi = self._speed_dep_original_laf_v[i] * 1.3
-        if laf_lo <= laf_bp[i] <= laf_hi:
-          self._speed_dep_laf_v[i] = laf_bp[i]
-        fric_lo = self._speed_dep_original_friction_v[i] * 0.7
-        fric_hi = self._speed_dep_original_friction_v[i] * 1.3
-        if fric_lo <= friction_bp[i] <= fric_hi:
-          self._speed_dep_friction_v[i] = friction_bp[i]
-
 
 class NanoFFModel:
   def __init__(self, weights_loc: str, platform: str):
