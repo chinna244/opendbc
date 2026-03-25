@@ -4,6 +4,7 @@ Copyright (c) 2021-, Haibin Wen, sunnypilot, and a number of other contributors.
 This file is part of sunnypilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
+import functools
 import json
 import numpy as np
 from typing import NamedTuple
@@ -32,16 +33,15 @@ class LatControlInputs(NamedTuple):
 TorqueFromLateralAccelCallbackTypeTorqueSpace = Callable[[LatControlInputs, structs.CarParams.LateralTorqueTuning, bool], float]
 
 
-def _get_speed_dep_config():
+@functools.cache
+def get_speed_dep_config():
   """Load speed-dependent torque config from toml. Cached after first call."""
-  if not hasattr(_get_speed_dep_config, '_cache'):
-    import os
-    import tomllib
-    from opendbc.car.common.basedir import BASEDIR
-    path = os.path.join(BASEDIR, 'torque_data/speed_dependent.toml')
-    with open(path, 'rb') as f:
-      _get_speed_dep_config._cache = tomllib.load(f)
-  return _get_speed_dep_config._cache
+  import tomllib
+  from pathlib import Path
+  from opendbc.car.common.basedir import BASEDIR
+  path = Path(BASEDIR) / 'torque_data/speed_dependent.toml'
+  with open(path, 'rb') as f:
+    return tomllib.load(f)
 
 
 class CarInterfaceBaseSP:
@@ -50,7 +50,7 @@ class CarInterfaceBaseSP:
     if hasattr(self, '_speed_dep'):
       return
     self._speed_dep = False
-    cfg = _get_speed_dep_config().get(self.CP.carFingerprint)
+    cfg = get_speed_dep_config().get(self.CP.carFingerprint)
     if cfg is not None:
       self._speed_dep = True
       self._speed_dep_speed_bp = list(cfg['speed_bp'])

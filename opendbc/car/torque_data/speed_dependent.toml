@@ -5,7 +5,7 @@
 #   laf_bp      — latAccelFactor at each speed
 #   friction_bp — friction coefficient at each speed
 #
-# The online learner in torqued.py runs independent SVD fits per speed bin.
+# The online learner (torque estimator) runs independent SVD fits per speed bin.
 # laf_bp/friction_bp provide starting values and define +/-30% sanity bounds.
 #
 # Values interpolated from comma 4 device-learned data (bins 0-3 at 100% cal).
