@@ -1,6 +1,4 @@
 VERSION ""
-
-
 NS_ :
     NS_DESC_
     CM_
@@ -34,8 +32,6 @@ NS_ :
 BS_:
 
 BU_: XXX
-
-
 BO_ 117 STEER_RELATED: 8 XXX
  SG_ CTR : 7|8@0+ (1,0) [0|255] "" XXX
  SG_ NEW_SIGNAL_1 : 48|1@0+ (1,0) [0|1] "" XXX
@@ -325,27 +321,6 @@ BO_ 1034 MSG_07: 8 XXX
  SG_ NEW_SIGNAL_7 : 47|8@0+ (1,0) [0|255] "" XXX
  SG_ NEW_SIGNAL_8 : 39|8@0+ (1,0) [0|255] "" XXX
  SG_ NEW_SIGNAL_9 : 31|8@0+ (1,0) [0|255] "" XXX
-
-BO_ 870 RADAR_366_STATIC: 8 XXX
- SG_ NEW_SIGNAL_1 : 7|8@0+ (1,0) [0|255] "" XXX
- SG_ NEW_SIGNAL_2 : 15|8@0+ (1,0) [0|255] "" XXX
- SG_ NEW_SIGNAL_3 : 23|8@0+ (1,0) [0|255] "" XXX
- SG_ NEW_SIGNAL_4 : 31|8@0+ (1,0) [0|255] "" XXX
- SG_ NEW_SIGNAL_5 : 39|8@0+ (1,0) [0|255] "" XXX
- SG_ NEW_SIGNAL_6 : 47|8@0+ (1,0) [0|255] "" XXX
- SG_ NEW_SIGNAL_7 : 55|8@0+ (1,0) [0|255] "" XXX
-
-BO_ 867 RADAR_363: 8 XXX
- SG_ CTR : 59|4@0+ (1,0) [0|255] "" XXX
- SG_ STATIC_4 : 43|16@0+ (1,0) [0|255] "" XXX
- SG_ FLIPPY_1 : 31|3@0+ (1,0) [0|7] "" XXX
- SG_ FLIPPY_2 : 47|1@0+ (1,0) [0|15] "" XXX
- SG_ FLIPPY_4 : 44|1@0+ (1,0) [0|3] "" XXX
- SG_ FLIPPY_3 : 46|1@0+ (1,0) [0|3] "" XXX
- SG_ CURVE_1 : 7|12@0+ (1,0) [0|255] "" XXX
- SG_ CURVE_2 : 11|12@0+ (1,0) [0|255] "" XXX
- SG_ CURVE_3 : 28|13@0+ (1,0) [0|255] "" XXX
-
 BO_ 130 STEER: 8 XXX
  SG_ NEW_SIGNAL_5 : 55|8@0+ (1,0) [0|255] "" XXX
  SG_ NEW_SIGNAL_6 : 63|8@0+ (1,0) [0|255] "" XXX
@@ -362,15 +337,6 @@ BO_ 120 BRAKE: 8 XXX
 BO_ 304 GEAR_RELATED: 8 XXX
  SG_ NEW_SIGNAL_1 : 55|8@0+ (1,0) [0|255] "" XXX
  SG_ NEW_SIGNAL_2 : 47|8@0+ (1,0) [0|255] "" XXX
-
-BO_ 865 RADAR_DISTANCE: 8 XXX
- SG_ CTR : 56|4@1+ (1,0) [0|15] "" XXX
- SG_ STATIC : 36|3@0+ (1,0) [0|31] "" XXX
- SG_ DISTANCE_RELATED : 33|4@0+ (1,0) [0|3] "" XXX
- SG_ SPEED_INVERSE : 43|12@0- (-0.225,0) [0|255] "kph" XXX
- SG_ DISTANCE_LEAD : 7|24@0+ (1,0) [0|31] "" XXX
- SG_ RELATIVE_VEL_LEAD : 31|11@0- (1,0) [0|255] "" XXX
-
 BO_ 836 NEW_MSG_19: 8 XXX
  SG_ CTR : 48|4@1+ (1,0) [0|15] "" XXX
  SG_ CTR2 : 63|8@0+ (1,0) [0|255] "" XXX
@@ -382,18 +348,6 @@ BO_ 832 SEATBELT: 8 XXX
  SG_ CTR2 : 23|4@0+ (1,0) [0|255] "" XXX
  SG_ NEW_SIGNAL_4 : 8|4@1+ (1,0) [0|3] "" XXX
  SG_ DRIVER_SEATBELT : 27|1@0+ (1,0) [0|1] "" XXX
-
-BO_ 866 RADAR_TURN: 8 XXX
- SG_ CTR : 59|4@0+ (1,0) [0|15] "" XXX
- SG_ STEER_ANGLE : 43|12@0+ (-1,2048) [0|7] "" XXX
- SG_ STATIC_2 : 63|4@0+ (1,0) [0|15] "" XXX
- SG_ CURVE_1 : 7|12@0+ (1,0) [0|131071] "" XXX
- SG_ CURVE_2 : 11|12@0- (1,0) [0|127] "" XXX
- SG_ FLIPPY_1 : 44|1@0+ (1,0) [0|15] "" XXX
- SG_ NEW_SIGNAL_4 : 34|3@1+ (1,0) [0|3] "" XXX
- SG_ CURVE_3 : 31|11@0- (1,0) [0|63] "" XXX
- SG_ NEW_SIGNAL_1 : 33|4@0+ (1,0) [0|3] "" XXX
-
 BO_ 158 MSG_05: 8 XXX
  SG_ NEW_SIGNAL_1 : 23|8@0+ (1,0) [0|15] "" XXX
  SG_ NEW_SIGNAL_2 : 47|8@0+ (1,0) [0|255] "" XXX
@@ -510,26 +464,6 @@ BO_ 543 CRZ_EVENTS: 8 XXX
 BO_ 542 NEW_MSG_33: 8 XXX
  SG_ CTR : 48|4@1+ (1,0) [0|15] "" XXX
  SG_ CTR2 : 56|4@1+ (1,0) [0|15] "" XXX
-
-BO_ 868 RADAR_364: 8 XXX
- SG_ CTR : 59|4@0+ (1,0) [0|255] "" XXX
- SG_ NEW_SIGNAL_1 : 7|12@0+ (1,0) [0|255] "" XXX
- SG_ NEW_SIGNAL_2 : 11|12@0- (1,0) [0|15] "" XXX
- SG_ NEW_SIGNAL_3 : 27|12@0- (1,0) [0|255] "" XXX
- SG_ FLIPPERS_1 : 31|4@0+ (1,0) [0|15] "" XXX
- SG_ NEW_SIGNAL_4 : 44|1@1+ (1,0) [0|3] "" XXX
- SG_ FLIPPY_1 : 46|1@0+ (1,0) [0|3] "" XXX
- SG_ STATIC_1 : 47|1@0+ (1,0) [0|15] "" XXX
- SG_ STATIC_2 : 43|16@0+ (1,0) [0|7] "" XXX
-
-BO_ 869 RADAR_365: 8 XXX
- SG_ CTR : 59|4@0+ (1,0) [0|255] "" XXX
- SG_ NEW_SIGNAL_4 : 39|6@0+ (1,0) [0|63] "" XXX
- SG_ NEW_SIGNAL_1 : 7|14@0+ (1,0) [0|65535] "" XXX
- SG_ RELATED_1 : 9|18@0+ (1,0) [0|3] "" XXX
- SG_ RELATED_2 : 33|18@0+ (1,0) [0|15] "" XXX
- SG_ STATIC : 61|2@0+ (1,0) [0|3] "" XXX
- SG_ NEW_SIGNAL_2 : 63|2@0+ (1,0) [0|15] "" XXX
 
 BO_ 1114 NEW_MSG_4: 8 XXX
 
