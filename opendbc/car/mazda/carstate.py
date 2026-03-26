@@ -118,7 +118,9 @@ class CarState(CarStateBase):
     else:
       # lkas_init_complete gates this so the fault can only fire after LKAS_BLOCK
       # has cleared at least once, filtering the standstill boot sequence.
-      ret.steerFaultTemporary = self.lkas_init_complete and lkas_blocked
+      # Suppress during driver override — the EPS asserts LKAS_BLOCK normally
+      # when the driver applies enough torque to take over.
+      ret.steerFaultTemporary = self.lkas_init_complete and lkas_blocked and not ret.steeringPressed
 
     self.acc_active_last = ret.cruiseState.enabled
 
