@@ -14,7 +14,7 @@ Ecu = CarParams.Ecu
 
 class CarControllerParams:
   STEER_DRIVER_ALLOWANCE = 15     # allowed driver torque before start limiting
-  STEER_DRIVER_MULTIPLIER = 1     # weight driver torque
+  STEER_DRIVER_MULTIPLIER = 15    # weight driver torque
   STEER_DRIVER_FACTOR = 1         # from dbc
   STEER_STEP = 1  # 100 Hz
 
