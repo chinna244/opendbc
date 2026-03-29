@@ -19,6 +19,7 @@ class CarState(CarStateBase):
     self.lkas_allowed_speed = False
     self.lkas_init_complete = False
     self.lkas_init_frames = 0
+    self.lkas_blocked_frames = 0
 
     self.distance_button = 0
     self.accel_button = 0
@@ -112,13 +113,20 @@ class CarState(CarStateBase):
     ret.lowSpeedAlert = self.low_speed_alert
 
     # Check if LKAS is disabled due to lack of driver torque when all other states indicate
-    # it should be enabled (steer lockout).
+    # it should be enabled (steer lockout). Debounce LKAS_BLOCK by 3s (300 frames) to
+    # filter blocks during lane changes at intersections with poor markings — the stock
+    # camera blocks LKAS for up to 3s when lane lines disappear mid-turn.
+    # Decay at 10x so brief CAN glitches don't reset a genuine fault counter.
     if self.CP.minSteerSpeed > 0:
-      ret.steerFaultTemporary = self.lkas_allowed_speed and lkas_blocked
+      lkas_fault = self.lkas_allowed_speed and lkas_blocked
     else:
-      # lkas_init_complete gates this so the fault can only fire after LKAS_BLOCK
-      # has cleared at least once, filtering the standstill boot sequence.
-      ret.steerFaultTemporary = self.lkas_init_complete and lkas_blocked
+      lkas_fault = self.lkas_init_complete and lkas_blocked
+
+    if lkas_fault:
+      self.lkas_blocked_frames = min(self.lkas_blocked_frames + 1, 600)
+    else:
+      self.lkas_blocked_frames = max(self.lkas_blocked_frames - 10, 0)
+    ret.steerFaultTemporary = self.lkas_blocked_frames > 300
 
     self.acc_active_last = ret.cruiseState.enabled
 
