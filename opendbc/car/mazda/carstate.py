@@ -17,8 +17,6 @@ class CarState(CarStateBase):
     self.crz_btns_counter = 0
     self.acc_active_last = False
     self.lkas_allowed_speed = False
-    self.lkas_init_complete = False
-    self.lkas_init_frames = 0
 
     self.distance_button = 0
     self.accel_button = 0
@@ -53,7 +51,7 @@ class CarState(CarStateBase):
 
     ret.steeringAngleDeg = cp.vl["STEER"]["STEER_ANGLE"]
     ret.steeringTorque = cp.vl["STEER_TORQUE"]["STEER_TORQUE_SENSOR"]
-    ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > LKAS_LIMITS.STEER_THRESHOLD, 10)
+    ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > LKAS_LIMITS.STEER_THRESHOLD, 5)
 
     ret.steeringTorqueEps = cp.vl["STEER_TORQUE"]["STEER_TORQUE_MOTOR"]
     ret.steeringRateDeg = cp.vl["STEER_RATE"]["STEER_ANGLE_RATE"]
@@ -81,17 +79,6 @@ class CarState(CarStateBase):
         self.lkas_allowed_speed = False
     else:
       self.lkas_allowed_speed = True
-      # CX-5 2022: LKAS_BLOCK is always ON at standstill (EPS boot). Track when
-      # it clears for the first time — after that, trust it as a real fault signal.
-      # Timeout after 5s (500 frames) so a persistent fault from startup is never hidden.
-      # VW uses the same pattern (eps_init_complete, frame > 600).
-      if ret.standstill:
-        self.lkas_init_complete = False
-        self.lkas_init_frames = 0
-      elif not lkas_blocked or self.lkas_init_frames > 500:
-        self.lkas_init_complete = True
-      else:
-        self.lkas_init_frames += 1
 
     # TODO: the signal used for available seems to be the adaptive cruise signal, instead of the main on
     #       it should be used for carState.cruiseState.nonAdaptive instead
@@ -113,13 +100,13 @@ class CarState(CarStateBase):
 
     # Check if LKAS is disabled due to lack of driver torque when all other states indicate
     # it should be enabled (steer lockout). Don't warn until we actually get lkas active
-    # and lose it again, i.e, after initial lkas activation.
-    # For CX-5 2022 (minSteerSpeed=0): suppress fault while driver is actively steering,
-    # since the stock camera routinely loses lane lines during normal turns.
+    # and lose it again, i.e, after initial lkas activation
     if self.CP.minSteerSpeed > 0:
       ret.steerFaultTemporary = self.lkas_allowed_speed and lkas_blocked
     else:
-      ret.steerFaultTemporary = self.lkas_init_complete and lkas_blocked and not ret.steeringPressed
+      # CX-5 2022: EPS accepts steering at all speeds regardless of LKAS_BLOCK.
+      # Verified across 5.5M frames: LKAS_BLOCK never indicates a real steering failure.
+      ret.steerFaultTemporary = False
 
     self.acc_active_last = ret.cruiseState.enabled
 
