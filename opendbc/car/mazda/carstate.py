@@ -19,7 +19,6 @@ class CarState(CarStateBase):
     self.lkas_allowed_speed = False
     self.lkas_init_complete = False
     self.lkas_init_frames = 0
-    self.lkas_blocked_frames = 0
 
     self.distance_button = 0
     self.accel_button = 0
@@ -54,7 +53,7 @@ class CarState(CarStateBase):
 
     ret.steeringAngleDeg = cp.vl["STEER"]["STEER_ANGLE"]
     ret.steeringTorque = cp.vl["STEER_TORQUE"]["STEER_TORQUE_SENSOR"]
-    ret.steeringPressed = self.update_steering_pressed(abs(ret.steeringTorque) > LKAS_LIMITS.STEER_THRESHOLD, 5)
+    ret.steeringPressed = abs(ret.steeringTorque) > LKAS_LIMITS.STEER_THRESHOLD
 
     ret.steeringTorqueEps = cp.vl["STEER_TORQUE"]["STEER_TORQUE_MOTOR"]
     ret.steeringRateDeg = cp.vl["STEER_RATE"]["STEER_ANGLE_RATE"]
@@ -113,20 +112,14 @@ class CarState(CarStateBase):
     ret.lowSpeedAlert = self.low_speed_alert
 
     # Check if LKAS is disabled due to lack of driver torque when all other states indicate
-    # it should be enabled (steer lockout). Debounce LKAS_BLOCK by 3s (300 frames) to
-    # filter blocks during lane changes at intersections with poor markings — the stock
-    # camera blocks LKAS for up to 3s when lane lines disappear mid-turn.
-    # Decay at 10x so brief CAN glitches don't reset a genuine fault counter.
+    # it should be enabled (steer lockout). Don't warn until we actually get lkas active
+    # and lose it again, i.e, after initial lkas activation.
+    # For CX-5 2022 (minSteerSpeed=0): suppress fault while driver is actively steering,
+    # since the stock camera routinely loses lane lines during normal turns.
     if self.CP.minSteerSpeed > 0:
-      lkas_fault = self.lkas_allowed_speed and lkas_blocked
+      ret.steerFaultTemporary = self.lkas_allowed_speed and lkas_blocked
     else:
-      lkas_fault = self.lkas_init_complete and lkas_blocked
-
-    if lkas_fault:
-      self.lkas_blocked_frames = min(self.lkas_blocked_frames + 1, 600)
-    else:
-      self.lkas_blocked_frames = max(self.lkas_blocked_frames - 10, 0)
-    ret.steerFaultTemporary = self.lkas_blocked_frames > 300
+      ret.steerFaultTemporary = self.lkas_init_complete and lkas_blocked and not ret.steeringPressed
 
     self.acc_active_last = ret.cruiseState.enabled
 

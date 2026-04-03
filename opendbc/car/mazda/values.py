@@ -23,6 +23,7 @@ class CarControllerParams:
       self.STEER_MAX = 1500        # theoretical max_steer 2047
       self.STEER_DELTA_UP = 15
       self.STEER_DELTA_DOWN = 25
+      self.STEER_DRIVER_MULTIPLIER = 25
     else:
       self.STEER_MAX = 800         # theoretical max_steer 2047
       self.STEER_DELTA_UP = 10
@@ -42,7 +43,7 @@ class MazdaCarSpecs(CarSpecs):
 
 @dataclass(frozen=True, kw_only=True)
 class MazdaCX5_2022CarSpecs(CarSpecs):
-  tireStiffnessFactor: float = 0.85  # 19" low-profile tires
+  tireStiffnessFactor: float = 1.0
 
 
 class MazdaFlags(IntFlag):
