@@ -21,6 +21,12 @@ class CarControllerParams:
   def __init__(self, CP):
     if CP.carFingerprint == CAR.MAZDA_CX5_2022:
       self.STEER_MAX = 1500        # theoretical max_steer 2047
+      # EPS soft-saturates above ~48 kph. steeringTorqueEps peaks at TX=750
+      # then declines — extra torque is ignored. Verified across 631K clean frames.
+      # Rate limits scale with STEER_MAX to maintain ~1.2%/frame (~0.8s to peak).
+      self.STEER_MAX_LOOKUP = ([0., 13.3, 14.4], [1500, 1500, 750])
+      self.STEER_DELTA_UP_LOOKUP = ([0., 13.3, 14.4], [15, 15, 9])
+      self.STEER_DELTA_DOWN_LOOKUP = ([0., 13.3, 14.4], [25, 25, 15])
       self.STEER_DELTA_UP = 15
       self.STEER_DELTA_DOWN = 25
       self.STEER_DRIVER_MULTIPLIER = 25
