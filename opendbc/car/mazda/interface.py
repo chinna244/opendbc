@@ -25,7 +25,7 @@ class CarInterface(CarInterfaceBase):
 
     ret.steerActuatorDelay = 0.1
     if candidate in (CAR.MAZDA_CX5_2022,):
-      ret.steerActuatorDelay = 0.07
+      ret.steerActuatorDelay = 0.14  # lagd learns 0.338 total (initial = this + 0.2)
     ret.steerLimitTimer = 0.8
 
     CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
