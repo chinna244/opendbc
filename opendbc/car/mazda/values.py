@@ -21,9 +21,10 @@ class CarControllerParams:
   def __init__(self, CP):
     if CP.carFingerprint == CAR.MAZDA_CX5_2022:
       self.STEER_MAX = 1200        # theoretical max_steer 2047
-      # EPS LKAS_EFFECTIVE ceiling: 1148 below 19 mph, ramps to 620 at 32 mph, flat above.
-      # Verified across 5.3M clean frames from 3238 segments.
-      self.STEER_MAX_LOOKUP = ([0., 8.5, 11.0, 13.0, 14.0, 14.5], [1200, 1200, 1040, 820, 700, 620])
+      # EPS LKAS_EFFECTIVE ceiling: 1148 below 19 mph, drops to 620 at 32 mph.
+      # Cliff at 32 mph (14.2 m/s) with 0.3 m/s ramp to avoid step during speed oscillation.
+      # 1200 below cliff: EPS motor plateaus above REQ=500, so 1200 captures full authority.
+      self.STEER_MAX_LOOKUP = ([0., 14.2, 14.5], [1200, 1200, 620])
       # EPS hardware rate limit: 12 units/frame at all speeds (4-unit quantization, max 3 steps).
       self.STEER_DELTA_UP = 12
       self.STEER_DELTA_DOWN = 12

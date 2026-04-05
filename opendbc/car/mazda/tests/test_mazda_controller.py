@@ -22,15 +22,15 @@ class TestCarControllerParams:
       carFingerprint = CAR.MAZDA_CX5
     return CarControllerParams(FakeCP())
 
-  # ── CX-5 2022: speed-dependent STEER_MAX ──
+  # ── CX-5 2022: cliff STEER_MAX at 32 mph ──
 
   def test_cx5_2022_has_steer_max_lookup(self, cx5_2022_params):
     assert hasattr(cx5_2022_params, 'STEER_MAX_LOOKUP')
 
   def test_cx5_2022_low_speed_steer_max(self, cx5_2022_params):
-    """Below 19 mph (8.5 m/s), full authority at 1200."""
+    """Below 32 mph (14.2 m/s), full authority at 1200."""
     p = cx5_2022_params
-    for v_ego in [0.0, 4.0, 8.5]:
+    for v_ego in [0.0, 5.0, 10.0, 14.2]:
       steer_max = round(float(np.interp(v_ego, p.STEER_MAX_LOOKUP[0], p.STEER_MAX_LOOKUP[1])))
       assert steer_max == 1200, f"steer_max should be 1200 at {v_ego} m/s, got {steer_max}"
 
@@ -41,19 +41,12 @@ class TestCarControllerParams:
       steer_max = round(float(np.interp(v_ego, p.STEER_MAX_LOOKUP[0], p.STEER_MAX_LOOKUP[1])))
       assert steer_max == 620, f"steer_max should be 620 at {v_ego} m/s, got {steer_max}"
 
-  def test_cx5_2022_transition_overshoots_eps_ceiling(self, cx5_2022_params):
-    """STEER_MAX lookup stays above the measured EPS ceiling at all speeds."""
+  def test_cx5_2022_cliff_transition(self, cx5_2022_params):
+    """Short ramp from 1200 to 620 between 14.2 and 14.5 m/s prevents step discontinuity."""
     p = cx5_2022_params
-    # EPS ceiling data points: (speed_ms, max_effective)
-    eps_ceiling = [
-      (9.1, 1092), (9.9, 1064), (10.5, 1024), (11.0, 1008),
-      (11.6, 956), (12.1, 900), (12.6, 824), (13.0, 752),
-      (13.4, 732), (13.8, 696), (14.1, 620),
-    ]
-    for v, ceiling in eps_ceiling:
-      steer_max = float(np.interp(v, p.STEER_MAX_LOOKUP[0], p.STEER_MAX_LOOKUP[1]))
-      assert steer_max >= ceiling, \
-        f"STEER_MAX ({steer_max:.0f}) < EPS ceiling ({ceiling}) at {v:.1f} m/s"
+    mid = 14.35
+    steer_max = float(np.interp(mid, p.STEER_MAX_LOOKUP[0], p.STEER_MAX_LOOKUP[1]))
+    assert 620 < steer_max < 1200, f"Should interpolate at {mid} m/s, got {steer_max}"
 
   def test_cx5_2022_constant_rate_limits(self, cx5_2022_params):
     """Rate limits are constant — EPS hardware rate is 12/frame at all speeds."""
