@@ -26,15 +26,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     apply_torque = 0
 
-    # Speed-dependent STEER_MAX and rate limits (CX-5 2022 only)
+    # Speed-dependent STEER_MAX (CX-5 2022: EPS ceiling drops with speed)
     if hasattr(self.params, 'STEER_MAX_LOOKUP'):
-      v_ego = CS.out.vEgoRaw
-      steer_max = round(float(np.interp(v_ego, self.params.STEER_MAX_LOOKUP[0],
+      steer_max = round(float(np.interp(CS.out.vEgoRaw, self.params.STEER_MAX_LOOKUP[0],
                                          self.params.STEER_MAX_LOOKUP[1])))
-      self.params.STEER_DELTA_UP = round(float(np.interp(v_ego, self.params.STEER_DELTA_UP_LOOKUP[0],
-                                                           self.params.STEER_DELTA_UP_LOOKUP[1])))
-      self.params.STEER_DELTA_DOWN = round(float(np.interp(v_ego, self.params.STEER_DELTA_DOWN_LOOKUP[0],
-                                                             self.params.STEER_DELTA_DOWN_LOOKUP[1])))
     else:
       steer_max = self.params.STEER_MAX
 

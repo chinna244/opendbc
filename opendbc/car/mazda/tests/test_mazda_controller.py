@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for Mazda CX-5 2022 speed-dependent STEER_MAX and rate limits."""
+"""Tests for Mazda CX-5 2022 speed-dependent STEER_MAX."""
 
 import numpy as np
 import pytest
@@ -22,71 +22,60 @@ class TestCarControllerParams:
       carFingerprint = CAR.MAZDA_CX5
     return CarControllerParams(FakeCP())
 
-  # ── CX-5 2022: speed-dependent lookups exist ──
+  # ── CX-5 2022: speed-dependent STEER_MAX ──
 
-  def test_cx5_2022_has_lookups(self, cx5_2022_params):
+  def test_cx5_2022_has_steer_max_lookup(self, cx5_2022_params):
     assert hasattr(cx5_2022_params, 'STEER_MAX_LOOKUP')
-    assert hasattr(cx5_2022_params, 'STEER_DELTA_UP_LOOKUP')
-    assert hasattr(cx5_2022_params, 'STEER_DELTA_DOWN_LOOKUP')
 
-  def test_cx5_2022_low_speed_values(self, cx5_2022_params):
-    """Below 32 mph (14.4 m/s), full authority."""
+  def test_cx5_2022_low_speed_steer_max(self, cx5_2022_params):
+    """Below 19 mph (8.5 m/s), full authority at 1200."""
     p = cx5_2022_params
-    for v_ego in [0.0, 5.0, 10.0, 14.4]:
+    for v_ego in [0.0, 4.0, 8.5]:
       steer_max = round(float(np.interp(v_ego, p.STEER_MAX_LOOKUP[0], p.STEER_MAX_LOOKUP[1])))
-      delta_up = round(float(np.interp(v_ego, p.STEER_DELTA_UP_LOOKUP[0], p.STEER_DELTA_UP_LOOKUP[1])))
-      delta_down = round(float(np.interp(v_ego, p.STEER_DELTA_DOWN_LOOKUP[0], p.STEER_DELTA_DOWN_LOOKUP[1])))
-      assert steer_max == 1500, f"steer_max should be 1500 at {v_ego} m/s, got {steer_max}"
-      assert delta_up == 15, f"delta_up should be 15 at {v_ego} m/s, got {delta_up}"
-      assert delta_down == 25, f"delta_down should be 25 at {v_ego} m/s, got {delta_down}"
+      assert steer_max == 1200, f"steer_max should be 1200 at {v_ego} m/s, got {steer_max}"
 
-  def test_cx5_2022_high_speed_values(self, cx5_2022_params):
-    """Above 36 mph (16.0 m/s), reduced authority matching EPS limit."""
+  def test_cx5_2022_high_speed_steer_max(self, cx5_2022_params):
+    """Above 33 mph (14.5 m/s), reduced to 620 matching EPS ceiling."""
     p = cx5_2022_params
-    for v_ego in [16.0, 20.0, 30.0, 40.0]:
+    for v_ego in [14.5, 20.0, 30.0, 40.0]:
       steer_max = round(float(np.interp(v_ego, p.STEER_MAX_LOOKUP[0], p.STEER_MAX_LOOKUP[1])))
-      delta_up = round(float(np.interp(v_ego, p.STEER_DELTA_UP_LOOKUP[0], p.STEER_DELTA_UP_LOOKUP[1])))
-      delta_down = round(float(np.interp(v_ego, p.STEER_DELTA_DOWN_LOOKUP[0], p.STEER_DELTA_DOWN_LOOKUP[1])))
-      assert steer_max == 750, f"steer_max should be 750 at {v_ego} m/s, got {steer_max}"
-      assert delta_up == 9, f"delta_up should be 9 at {v_ego} m/s, got {delta_up}"
-      assert delta_down == 15, f"delta_down should be 15 at {v_ego} m/s, got {delta_down}"
+      assert steer_max == 620, f"steer_max should be 620 at {v_ego} m/s, got {steer_max}"
 
-  def test_cx5_2022_transition_is_smooth(self, cx5_2022_params):
-    """Values interpolate smoothly between 14.4 and 16.0 m/s."""
+  def test_cx5_2022_transition_overshoots_eps_ceiling(self, cx5_2022_params):
+    """STEER_MAX lookup stays above the measured EPS ceiling at all speeds."""
     p = cx5_2022_params
-    v_mid = 15.2  # midpoint
-    steer_max = float(np.interp(v_mid, p.STEER_MAX_LOOKUP[0], p.STEER_MAX_LOOKUP[1]))
-    assert 750 < steer_max < 1500, f"steer_max should interpolate at {v_mid} m/s, got {steer_max}"
-    delta_up = float(np.interp(v_mid, p.STEER_DELTA_UP_LOOKUP[0], p.STEER_DELTA_UP_LOOKUP[1]))
-    assert 9 < delta_up < 15, f"delta_up should interpolate at {v_mid} m/s, got {delta_up}"
+    # EPS ceiling data points: (speed_ms, max_effective)
+    eps_ceiling = [
+      (9.1, 1092), (9.9, 1064), (10.5, 1024), (11.0, 1008),
+      (11.6, 956), (12.1, 900), (12.6, 824), (13.0, 752),
+      (13.4, 732), (13.8, 696), (14.1, 620),
+    ]
+    for v, ceiling in eps_ceiling:
+      steer_max = float(np.interp(v, p.STEER_MAX_LOOKUP[0], p.STEER_MAX_LOOKUP[1]))
+      assert steer_max >= ceiling, \
+        f"STEER_MAX ({steer_max:.0f}) < EPS ceiling ({ceiling}) at {v:.1f} m/s"
 
-  def test_cx5_2022_rate_scales_with_steer_max(self, cx5_2022_params):
-    """Rate limits maintain roughly consistent %/frame across speeds."""
+  def test_cx5_2022_constant_rate_limits(self, cx5_2022_params):
+    """Rate limits are constant — EPS hardware rate is 12/frame at all speeds."""
     p = cx5_2022_params
-    # Low speed: 15/1500 = 1.0%
-    low_pct = 15 / 1500
-    # High speed: 9/750 = 1.2%
-    high_pct = 9 / 750
-    # Should be within 0.5% of each other
-    assert abs(high_pct - low_pct) < 0.005, f"Rate % should be similar: low={low_pct:.3f}, high={high_pct:.3f}"
+    assert p.STEER_DELTA_UP == 12
+    assert p.STEER_DELTA_DOWN == 12
+    assert not hasattr(p, 'STEER_DELTA_UP_LOOKUP')
+    assert not hasattr(p, 'STEER_DELTA_DOWN_LOOKUP')
 
   def test_cx5_2022_within_panda_safety(self, cx5_2022_params):
-    """All lookup values stay within panda safety limits (1500 max, 15/25 rates)."""
+    """All lookup values stay within panda safety limits."""
     p = cx5_2022_params
     for v_ego in np.linspace(0, 40, 100):
       steer_max = float(np.interp(v_ego, p.STEER_MAX_LOOKUP[0], p.STEER_MAX_LOOKUP[1]))
-      delta_up = float(np.interp(v_ego, p.STEER_DELTA_UP_LOOKUP[0], p.STEER_DELTA_UP_LOOKUP[1]))
-      delta_down = float(np.interp(v_ego, p.STEER_DELTA_DOWN_LOOKUP[0], p.STEER_DELTA_DOWN_LOOKUP[1]))
-      assert steer_max <= 1500, f"steer_max exceeds panda safety at {v_ego:.1f} m/s"
-      assert delta_up <= 15, f"delta_up exceeds panda safety at {v_ego:.1f} m/s"
-      assert delta_down <= 25, f"delta_down exceeds panda safety at {v_ego:.1f} m/s"
+      assert steer_max <= 1200, f"steer_max exceeds panda safety at {v_ego:.1f} m/s"
+      assert p.STEER_DELTA_UP <= 12, "delta_up exceeds panda safety"
+      assert p.STEER_DELTA_DOWN <= 25, "delta_down exceeds panda safety"
 
   # ── Pre-2022: no lookups, unchanged behavior ──
 
   def test_pre_2022_no_lookups(self, pre_2022_params):
     assert not hasattr(pre_2022_params, 'STEER_MAX_LOOKUP')
-    assert not hasattr(pre_2022_params, 'STEER_DELTA_UP_LOOKUP')
-    assert not hasattr(pre_2022_params, 'STEER_DELTA_DOWN_LOOKUP')
 
   def test_pre_2022_static_values(self, pre_2022_params):
     assert pre_2022_params.STEER_MAX == 800
