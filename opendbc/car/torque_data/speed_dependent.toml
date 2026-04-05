@@ -11,6 +11,10 @@
 # Values from comma 4 device-learned data.
 
 [MAZDA_CX5_2022]
-speed_bp    = [6.5, 10.0, 15.0, 21.0, 26.5, 32.0, 37.5]
-laf_bp      = [3.037, 3.188, 2.333, 2.417, 2.830, 3.034, 2.209]
-friction_bp = [0.147, 0.129, 0.115, 0.104, 0.100, 0.100, 0.100]
+# Bins 0-2: STEER_MAX=1500 zone (below 32 mph / 14.4 m/s)
+# Bins 3-6: STEER_MAX=750 zone (above 36 mph / 16.0 m/s)
+# LAF above transition halved from pre-speedmax learned values to account
+# for STEER_MAX changing from 1500 to 750 (normalized torque scale changes).
+speed_bp    = [6.5, 10.0, 14.4, 16.0, 22.0, 28.0, 36.0]
+laf_bp      = [3.09, 3.23, 3.15, 1.20, 1.24, 1.48, 1.30]
+friction_bp = [0.147, 0.129, 0.115, 0.104, 0.100, 0.090, 0.100]

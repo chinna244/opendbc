@@ -30,9 +30,9 @@ class TestCarControllerParams:
     assert hasattr(cx5_2022_params, 'STEER_DELTA_DOWN_LOOKUP')
 
   def test_cx5_2022_low_speed_values(self, cx5_2022_params):
-    """Below 48 kph (13.3 m/s), full authority."""
+    """Below 32 mph (14.4 m/s), full authority."""
     p = cx5_2022_params
-    for v_ego in [0.0, 5.0, 10.0, 13.3]:
+    for v_ego in [0.0, 5.0, 10.0, 14.4]:
       steer_max = round(float(np.interp(v_ego, p.STEER_MAX_LOOKUP[0], p.STEER_MAX_LOOKUP[1])))
       delta_up = round(float(np.interp(v_ego, p.STEER_DELTA_UP_LOOKUP[0], p.STEER_DELTA_UP_LOOKUP[1])))
       delta_down = round(float(np.interp(v_ego, p.STEER_DELTA_DOWN_LOOKUP[0], p.STEER_DELTA_DOWN_LOOKUP[1])))
@@ -41,9 +41,9 @@ class TestCarControllerParams:
       assert delta_down == 25, f"delta_down should be 25 at {v_ego} m/s, got {delta_down}"
 
   def test_cx5_2022_high_speed_values(self, cx5_2022_params):
-    """Above 52 kph (14.4 m/s), reduced authority matching EPS limit."""
+    """Above 36 mph (16.0 m/s), reduced authority matching EPS limit."""
     p = cx5_2022_params
-    for v_ego in [14.4, 20.0, 30.0, 40.0]:
+    for v_ego in [16.0, 20.0, 30.0, 40.0]:
       steer_max = round(float(np.interp(v_ego, p.STEER_MAX_LOOKUP[0], p.STEER_MAX_LOOKUP[1])))
       delta_up = round(float(np.interp(v_ego, p.STEER_DELTA_UP_LOOKUP[0], p.STEER_DELTA_UP_LOOKUP[1])))
       delta_down = round(float(np.interp(v_ego, p.STEER_DELTA_DOWN_LOOKUP[0], p.STEER_DELTA_DOWN_LOOKUP[1])))
@@ -52,9 +52,9 @@ class TestCarControllerParams:
       assert delta_down == 15, f"delta_down should be 15 at {v_ego} m/s, got {delta_down}"
 
   def test_cx5_2022_transition_is_smooth(self, cx5_2022_params):
-    """Values interpolate smoothly between 13.3 and 14.4 m/s."""
+    """Values interpolate smoothly between 14.4 and 16.0 m/s."""
     p = cx5_2022_params
-    v_mid = 13.85  # midpoint
+    v_mid = 15.2  # midpoint
     steer_max = float(np.interp(v_mid, p.STEER_MAX_LOOKUP[0], p.STEER_MAX_LOOKUP[1]))
     assert 750 < steer_max < 1500, f"steer_max should interpolate at {v_mid} m/s, got {steer_max}"
     delta_up = float(np.interp(v_mid, p.STEER_DELTA_UP_LOOKUP[0], p.STEER_DELTA_UP_LOOKUP[1]))
