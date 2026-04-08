@@ -14,5 +14,5 @@
 # Flat STEER_MAX=1200. Bins aligned with EPS ceiling ramp (1148→620 at 19-32 mph).
 # Seeds from mazda-dev learned values scaled by 1200/1500.
 speed_bp    = [6.5, 9.5, 12.0, 14.5, 21.0, 28.0, 35.0]
-laf_bp      = [2.74, 2.65, 2.40, 2.07, 2.08, 2.38, 2.06]
-friction_bp = [0.164, 0.125, 0.118, 0.111, 0.097, 0.091, 0.100]
+laf_bp      = [2.47, 2.57, 2.31, 1.96, 1.98, 2.37, 2.05]
+friction_bp = [0.171, 0.147, 0.136, 0.127, 0.102, 0.087, 0.100]
