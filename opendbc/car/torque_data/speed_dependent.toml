@@ -11,9 +11,8 @@
 # Values from comma 4 device-learned data.
 
 [MAZDA_CX5_2022]
-# Bin boundary at 14.2 m/s (32 mph) aligns with STEER_MAX cliff (1200→620).
-# Bins 0-1: STEER_MAX=1200, seeds from mazda-dev learned values.
-# Bins 2-6: STEER_MAX=620, seeds from current branch. Bins 5-6 estimated.
-speed_bp    = [6.5, 12.0, 16.4, 21.0, 26.5, 32.0, 37.5]
-laf_bp      = [3.04, 2.36, 0.89, 0.95, 1.33, 1.52, 1.10]
-friction_bp = [0.179, 0.179, 0.179, 0.140, 0.109, 0.090, 0.100]
+# Flat STEER_MAX=1200. Bins aligned with EPS ceiling ramp (1148→620 at 19-32 mph).
+# Seeds from mazda-dev learned values scaled by 1200/1500.
+speed_bp    = [6.5, 9.5, 12.0, 14.5, 21.0, 28.0, 35.0]
+laf_bp      = [2.74, 2.65, 2.40, 2.07, 2.08, 2.38, 2.06]
+friction_bp = [0.164, 0.125, 0.118, 0.111, 0.097, 0.091, 0.100]

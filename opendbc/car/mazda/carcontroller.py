@@ -1,5 +1,3 @@
-import numpy as np
-
 from opendbc.can import CANPacker
 from opendbc.car import Bus, structs
 from opendbc.car.lateral import apply_driver_steer_torque_limits
@@ -26,18 +24,11 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     apply_torque = 0
 
-    # Speed-dependent STEER_MAX (CX-5 2022: EPS ceiling drops with speed)
-    if hasattr(self.params, 'STEER_MAX_LOOKUP'):
-      steer_max = round(float(np.interp(CS.out.vEgoRaw, self.params.STEER_MAX_LOOKUP[0],
-                                         self.params.STEER_MAX_LOOKUP[1])))
-    else:
-      steer_max = self.params.STEER_MAX
-
     if CC.latActive:
       # calculate steer and also set limits due to driver torque
-      new_torque = int(round(CC.actuators.torque * steer_max))
+      new_torque = int(round(CC.actuators.torque * self.params.STEER_MAX))
       apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
-                                                      CS.out.steeringTorque, self.params, steer_max)
+                                                      CS.out.steeringTorque, self.params)
 
     if CC.cruiseControl.cancel:
       # If brake is pressed, let us wait >70ms before trying to disable crz to avoid
@@ -74,7 +65,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     can_sends.extend(IntelligentCruiseButtonManagementInterface.update(self, CC_SP, CS, self.packer, self.frame, self.last_button_frame))
 
     new_actuators = CC.actuators.as_builder()
-    new_actuators.torque = apply_torque / steer_max
+    new_actuators.torque = apply_torque / self.params.STEER_MAX
     new_actuators.torqueOutputCan = apply_torque
 
     self.frame += 1
