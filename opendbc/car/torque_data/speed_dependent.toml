@@ -15,5 +15,5 @@
 # Bins 0-1: STEER_MAX=1200, seeds from mazda-dev learned values.
 # Bins 2-6: STEER_MAX=620, seeds from current branch. Bins 5-6 estimated.
 speed_bp    = [6.5, 12.0, 16.4, 21.0, 26.5, 32.0, 37.5]
-laf_bp      = [3.26, 2.26, 0.80, 1.03, 1.33, 1.52, 1.10]
+laf_bp      = [3.04, 2.36, 0.89, 0.95, 1.33, 1.52, 1.10]
 friction_bp = [0.179, 0.179, 0.179, 0.140, 0.109, 0.090, 0.100]
