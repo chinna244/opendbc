@@ -28,7 +28,6 @@ class CarControllerParams:
       # EPS hardware rate limit: 12 units/frame at all speeds (4-unit quantization, max 3 steps).
       self.STEER_DELTA_UP = 12
       self.STEER_DELTA_DOWN = 25
-      self.STEER_DRIVER_MULTIPLIER = 25
     else:
       self.STEER_MAX = 800         # theoretical max_steer 2047
       self.STEER_DELTA_UP = 10
