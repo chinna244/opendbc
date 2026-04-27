@@ -13,7 +13,7 @@
 [MAZDA_CX5_2022]
 # STEER_MAX cliff 1200→800 at 32 mph. Bin boundary at 14.2 m/s aligns with cliff.
 # Bins 0-2: SM=1200 (full low-speed authority). Bins 3-6: SM=800 (22% PID headroom).
-# Seeds from pre-speedmax converged values scaled by SM/1500.
+# Seeds from device-learned values (2026-04-27, post-speedmax).
 speed_bp    = [6.5, 9.5, 12.0, 16.4, 21.0, 28.0, 35.0]
-laf_bp      = [2.47, 2.57, 2.31, 1.27, 1.32, 1.58, 1.37]
-friction_bp = [0.171, 0.147, 0.136, 0.120, 0.102, 0.087, 0.100]
+laf_bp      = [2.45, 2.49, 2.16, 1.30, 1.37, 1.56, 1.61]
+friction_bp = [0.180, 0.146, 0.148, 0.158, 0.134, 0.121, 0.108]
