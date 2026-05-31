@@ -3,13 +3,15 @@ from opendbc.car import Bus, create_button_events, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.mazda.values import DBC, LKAS_LIMITS
+from opendbc.sunnypilot.car.mazda.carstate_ext import CarStateExt
 
 ButtonType = structs.CarState.ButtonEvent.Type
 
 
-class CarState(CarStateBase):
+class CarState(CarStateBase, CarStateExt):
   def __init__(self, CP, CP_SP):
-    super().__init__(CP, CP_SP)
+    CarStateBase.__init__(self, CP, CP_SP)
+    CarStateExt.__init__(self, CP, CP_SP)
 
     can_define = CANDefine(DBC[CP.carFingerprint][Bus.pt])
     self.shifter_values = can_define.dv["GEAR"]["GEAR"]
@@ -133,11 +135,16 @@ class CarState(CarStateBase):
       *create_button_events(self.decel_button, prev_decel_button, {1: ButtonType.decelCruise}),
     ]
 
+    CarStateExt.update(self, ret, ret_sp, can_parsers)
+
     return ret, ret_sp
 
   @staticmethod
   def get_can_parsers(CP, CP_SP):
+    cam_messages = [
+      ("CAM_TRAFFIC_SIGNS", 0),
+    ]
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], 0),
-      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], 2),
+      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], cam_messages, 2),
     }
