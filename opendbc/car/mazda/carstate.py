@@ -23,6 +23,7 @@ class CarState(CarStateBase, CarStateExt):
     self.distance_button = 0
     self.accel_button = 0
     self.decel_button = 0
+    self.cancel_button = 0
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
@@ -119,20 +120,26 @@ class CarState(CarStateBase, CarStateExt):
     self.cam_laneinfo = cp_cam.vl["CAM_LANEINFO"]
     ret.steerFaultPermanent = cp_cam.vl["CAM_LKAS"]["ERR_BIT_1"] == 1
 
-    # cruise control button events: distance, inc, and dec
+    # cruise control button events: distance, inc, dec, and cancel
     prev_distance_button = self.distance_button
     prev_accel_button = self.accel_button
     prev_decel_button = self.decel_button
+    prev_cancel_button = self.cancel_button
     self.distance_button = cp.vl["CRZ_BTNS"]["DISTANCE_LESS"]
     # On CX-5 2022 the wheel "+" button toggles SET_P (not RES); RES is the resume button.
     # Verified against route 0000019c--84a5408a38 seg2/3: holding "+" emits SET_P=1, body ECU increments CRZ_SPEED.
     self.accel_button = cp.vl["CRZ_BTNS"]["SET_P"]
     self.decel_button = cp.vl["CRZ_BTNS"]["SET_M"]
+    # CAN_OFF carries the cancel intent. Without an event here, ICBM's readiness gate never
+    # learns the driver is canceling, so it keeps spamming CRZ_BTNS with cancel=0 and the
+    # body ECU treats the latest non-cancel frame as authoritative. Critical for cancel-safety.
+    self.cancel_button = cp.vl["CRZ_BTNS"]["CAN_OFF"]
 
     ret.buttonEvents = [
       *create_button_events(self.distance_button, prev_distance_button, {1: ButtonType.gapAdjustCruise}),
       *create_button_events(self.accel_button, prev_accel_button, {1: ButtonType.accelCruise}),
       *create_button_events(self.decel_button, prev_decel_button, {1: ButtonType.decelCruise}),
+      *create_button_events(self.cancel_button, prev_cancel_button, {1: ButtonType.cancel}),
     ]
 
     CarStateExt.update(self, ret, ret_sp, can_parsers)

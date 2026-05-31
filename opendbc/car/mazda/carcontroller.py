@@ -71,7 +71,12 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
                                                       self.frame, apply_torque, CS.cam_lkas))
 
     # Intelligent Cruise Button Management
-    can_sends.extend(IntelligentCruiseButtonManagementInterface.update(self, CC_SP, CS, self.packer, self.frame, self.last_button_frame))
+    # Suppress ICBM CRZ_BTNS spam while cancel/resume are in flight or while the driver is
+    # holding the wheel cancel button. Without this guard ICBM's interleaved cancel=0 frames
+    # race the driver's cancel=1 frames on the bus and the body ECU drops the cancel intent.
+    icbm_suppress = CC.cruiseControl.cancel or CC.cruiseControl.resume or CS.cancel_button == 1
+    if not icbm_suppress:
+      can_sends.extend(IntelligentCruiseButtonManagementInterface.update(self, CC_SP, CS, self.packer, self.frame, self.last_button_frame))
 
     new_actuators = CC.actuators.as_builder()
     new_actuators.torque = apply_torque / steer_max
