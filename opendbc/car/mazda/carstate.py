@@ -122,7 +122,9 @@ class CarState(CarStateBase):
     prev_accel_button = self.accel_button
     prev_decel_button = self.decel_button
     self.distance_button = cp.vl["CRZ_BTNS"]["DISTANCE_LESS"]
-    self.accel_button = cp.vl["CRZ_BTNS"]["RES"]
+    # On CX-5 2022 the wheel "+" button toggles SET_P (not RES); RES is the resume button.
+    # Verified against route 0000019c--84a5408a38 seg2/3: holding "+" emits SET_P=1, body ECU increments CRZ_SPEED.
+    self.accel_button = cp.vl["CRZ_BTNS"]["SET_P"]
     self.decel_button = cp.vl["CRZ_BTNS"]["SET_M"]
 
     ret.buttonEvents = [
