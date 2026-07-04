@@ -94,6 +94,16 @@ class LKAS_LIMITS:
   ENABLE_SPEED = 52     # kph
 
 
+# EPS firmware versions with steer-to-zero capability (2022+ CX-5 EPS). Matched against
+# car_fw rather than the fingerprinted platform so the same EPS swapped into another Mazda
+# keeps full-speed steering. Keep in sync with the CAR.MAZDA_CX5_2022 (Ecu.eps, 0x730) block
+# in fingerprints.py.
+STEER_TO_ZERO_EPS_FW = {
+  b'KBST-3210X-A-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+  b'KSD5-3210X-C-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+}
+
+
 class Buttons:
   NONE = 0
   SET_PLUS = 1

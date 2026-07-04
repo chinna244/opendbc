@@ -5,7 +5,7 @@ from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.carstate import CarState
 from opendbc.car.mazda.radar_interface import RadarInterface
-from opendbc.car.mazda.values import CAR, DBC, LKAS_LIMITS
+from opendbc.car.mazda.values import CAR, DBC, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW
 
 
 class CarInterface(CarInterfaceBase):
@@ -30,7 +30,11 @@ class CarInterface(CarInterfaceBase):
 
     CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
 
-    if candidate not in (CAR.MAZDA_CX5_2022,):
+    # 2022+ CX-5 EPS can steer to zero; detect by EPS firmware so an EPS
+    # swapped into another Mazda keeps full-speed steering.
+    steer_to_zero = candidate == CAR.MAZDA_CX5_2022 or \
+      any(fw.ecu == 'eps' and fw.fwVersion in STEER_TO_ZERO_EPS_FW for fw in car_fw)
+    if not steer_to_zero:
       ret.minSteerSpeed = LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS
 
     ret.centerToFront = ret.wheelbase * 0.41
