@@ -22,9 +22,9 @@ from dataclasses import dataclass
 class ICBMActuationProfile:
   # Discrete taps. tap_rate_hz is the fastest cadence the body ECU reliably registers;
   # pushing beyond it makes the ECU drop presses (measured on Mazda: ~9 Hz sends register
-  # at ~0.47 steps/press vs ~0.93 at 5 Hz — faster is slower).
+  # at ~0.47 steps/press vs ~0.93 at 5 Hz — faster is slower). The per-tap increment is
+  # not modeled: the servo is closed-loop on the dash, so tap size is implicit.
   tap_rate_hz: float = 5.
-  tap_increment: int = 1  # display units (mph or km/h) per registered tap
 
   # Held-button behavior of the stock ECU. 0 disables hold planning entirely (taps only).
   # A hold first snaps the set speed to the next multiple of longpress_step, then steps by
@@ -55,7 +55,6 @@ class ICBMActuationProfile:
 ICBM_ACTUATION_PROFILES: dict[str, ICBMActuationProfile] = {
   'mazda': ICBMActuationProfile(
     tap_rate_hz=5.,
-    tap_increment=1,
     longpress_step=5,
     longpress_first_step_s=0.6,
     longpress_step_period_s=0.55,
