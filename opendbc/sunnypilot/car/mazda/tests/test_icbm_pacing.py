@@ -58,7 +58,7 @@ class TestIcbmEmission(unittest.TestCase):
 
   def test_taps_hold_steady_pace(self):
     """No ramp: the cadence stays at the 5 Hz registration floor no matter how long the
-    send runs (the ECU drops presses at tighter spacing — measured, F4)."""
+    send runs (the ECU drops presses at tighter spacing; measured, F4)."""
     sends = self.run_frames([SendButtonState.increase] * 600)
 
     assert all(g >= 20 for g in self.gaps(sends)), f"taps must never exceed 5 Hz: {self.gaps(sends)}"

@@ -115,7 +115,7 @@ class IntelligentCruiseButtonManagement:
     increase = auto()
     decrease = auto()
     # sustained hold, emitted at the button message's native rate for as long as the servo
-    # asserts it — for ECUs whose long-press steps a coarse grid (e.g. Mazda +5 mph)
+    # asserts it, for ECUs whose long-press steps a coarse grid (e.g. Mazda +5 mph)
     increaseHold = auto()
     decreaseHold = auto()
 

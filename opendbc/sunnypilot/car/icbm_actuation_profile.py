@@ -12,7 +12,7 @@ button snaps the set speed along a coarse grid, and whether the ACC delays decel
 while the set speed is still changing. The servo that plans button moves reads these
 characteristics from here.
 
-Cars without a measured profile get DEFAULT_PROFILE: discrete taps only, no grid, no hold —
+Cars without a measured profile get DEFAULT_PROFILE: discrete taps only, no grid, no hold;
 the long-standing ICBM behavior. A brand only changes behavior by adding a measured entry.
 """
 from dataclasses import dataclass
@@ -22,7 +22,7 @@ from dataclasses import dataclass
 class ICBMActuationProfile:
   # Discrete taps. tap_rate_hz is the fastest cadence the body ECU reliably registers;
   # pushing beyond it makes the ECU drop presses (measured on Mazda: ~9 Hz sends register
-  # at ~0.47 steps/press vs ~0.93 at 5 Hz — faster is slower). The per-tap increment is
+  # at ~0.47 steps/press vs ~0.93 at 5 Hz; faster is slower). The per-tap increment is
   # not modeled: the servo is closed-loop on the dash, so tap size is implicit.
   tap_rate_hz: float = 5.
 
