@@ -48,6 +48,11 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
 }
 
 static bool mazda_tx_hook(const CANPacket_t *msg) {
+  // Envelope sized for the CX-5 2022+ EPS, which the controller commands up to (max_torque 1200,
+  // driver_torque_multiplier 15 vs upstream stock 800/1). SafetyModel.mazda is per-brand and can't
+  // see the fingerprint/EPS, so these limits apply to every Mazda. Non-CX-5-EPS Mazdas self-cap
+  // lower in the controller (values.py gates the tune on minSteerSpeed == 0), so this is only a
+  // looser backstop for them — not a behavior change. Per-car gating would need a safety param.
   const TorqueSteeringLimits MAZDA_STEERING_LIMITS = {
     .max_torque = 1200,
     .max_rate_up = 12,

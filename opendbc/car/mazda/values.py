@@ -14,12 +14,14 @@ Ecu = CarParams.Ecu
 
 class CarControllerParams:
   STEER_DRIVER_ALLOWANCE = 15     # allowed driver torque before start limiting
-  STEER_DRIVER_MULTIPLIER = 15    # weight driver torque
   STEER_DRIVER_FACTOR = 1         # from dbc
   STEER_STEP = 1  # 100 Hz
 
   def __init__(self, CP):
-    if CP.carFingerprint == CAR.MAZDA_CX5_2022:
+    # Gate the higher-authority steering tune on the CX-5 2022+ EPS, not the car model, so the
+    # CX-9 that shares this EPS and CX-5-EPS swaps keep it. steer_to_zero sets minSteerSpeed == 0
+    # (interface.py / STEER_TO_ZERO_EPS_FW) — the same EPS-present proxy carstate.py gates on.
+    if CP.minSteerSpeed == 0:
       self.STEER_MAX = 1200        # theoretical max_steer 2047; EPS clips above ceiling per speed
       # 1200 below 32 mph for full low-speed authority and feedforward overshoot.
       # 800 above for smoother highway steering with 22% PID headroom above EPS ceiling (620).
@@ -27,10 +29,12 @@ class CarControllerParams:
       # EPS hardware rate limit: 12 units/frame at all speeds (4-unit quantization, max 3 steps).
       self.STEER_DELTA_UP = 12
       self.STEER_DELTA_DOWN = 25
+      self.STEER_DRIVER_MULTIPLIER = 15   # weight driver torque (tuned for the CX-5 EPS; upstream stock is 1)
     else:
       self.STEER_MAX = 800         # theoretical max_steer 2047
       self.STEER_DELTA_UP = 10
       self.STEER_DELTA_DOWN = 25
+      self.STEER_DRIVER_MULTIPLIER = 1    # upstream stock
 
 
 @dataclass
