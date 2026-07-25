@@ -9,6 +9,7 @@ from opendbc.car import structs, DT_CTRL
 from opendbc.car.can_definitions import CanData
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.values import Buttons
+from opendbc.sunnypilot.car.icbm_actuation_profile import get_actuation_profile
 from opendbc.sunnypilot.car.intelligent_cruise_button_management_interface_base import IntelligentCruiseButtonManagementInterfaceBase
 
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -17,24 +18,25 @@ SendButtonState = structs.IntelligentCruiseButtonManagement.SendButtonState
 BUTTONS = {
   SendButtonState.increase: Buttons.SET_PLUS,
   SendButtonState.decrease: Buttons.SET_MINUS,
+  SendButtonState.increaseHold: Buttons.SET_PLUS,
+  SendButtonState.decreaseHold: Buttons.SET_MINUS,
 }
+HOLD_BUTTONS = (SendButtonState.increaseHold, SendButtonState.decreaseHold)
 
-# Send pacing. One press moves the dash 1 mph, so a fixed 0.2s pace caps tracking at ~5 mph/s
-# and restoring the set speed after a deep smart-cruise slowdown takes several seconds. The
-# dash confirms a press in ~50 ms (p90 ~80 ms, measured on CX-5 2022), so once a ramp is
-# clearly sustained in one direction we tighten the pace. A direction change or a pause in
-# sending resets to the conservative cadence.
-PACE_NORMAL = 0.2  # s between button frames
-PACE_RAMP = 0.1  # s between button frames during a sustained same-direction ramp
-RAMP_MIN_SENDS = 3  # consecutive same-direction sends before tightening the pace
-RAMP_RESET_TIME = 0.5  # s without a send resets the ramp
+# The body ECU registers at most ~1 discrete press per 200 ms; a tighter cadence makes it
+# drop presses (measured: ~0.93 mph/press at 5 Hz vs ~0.47 at 9 Hz — faster send rate,
+# slower dash). Hold frames go out at the CRZ_BTNS native rate instead: the wheel's genuine
+# frames (button bit 0) interleave with ours either way, so a synthesized hold has to
+# out-shout them at message rate for the ECU to integrate it as a hold. Whether it does is
+# decided on-car; the servo watches the dash and falls back to discrete taps if the
+# long-press step never lands.
+HOLD_PERIOD = 0.02  # s between hold frames (CRZ_BTNS native 50 Hz)
 
 
 class IntelligentCruiseButtonManagementInterface(IntelligentCruiseButtonManagementInterfaceBase):
   def __init__(self, CP, CP_SP):
     super().__init__(CP, CP_SP)
-    self.ramp_send_button = SendButtonState.none
-    self.ramp_sends = 0
+    self.tap_period = 1. / get_actuation_profile(CP.brand).tap_rate_hz
 
   def update(self, CC_SP, CS, packer, frame, last_button_frame) -> list[CanData]:
     can_sends = []
@@ -52,24 +54,21 @@ class IntelligentCruiseButtonManagementInterface(IntelligentCruiseButtonManageme
 
     if self.ICBM.sendButton != SendButtonState.none:
       send_button = BUTTONS[self.ICBM.sendButton]
-
-      # The time-gap reset also covers gaps where update() wasn't called or was suppressed
-      # (cancel/resume in flight, driver presses); the else branch covers brief pauses.
       since_last_send = (self.frame - self.last_button_frame) * DT_CTRL
-      if self.ICBM.sendButton != self.ramp_send_button or since_last_send > RAMP_RESET_TIME:
-        self.ramp_send_button = self.ICBM.sendButton
-        self.ramp_sends = 0
 
-      pace = PACE_RAMP if self.ramp_sends >= RAMP_MIN_SENDS else PACE_NORMAL
-      if since_last_send > pace:
-        self.button_frame += 1
-        button_counter_offset = [1, 1, 0, None][self.button_frame % 4]
-        if button_counter_offset is not None:
-          can_sends.append(mazdacan.create_button_cmd(packer, self.CP, CS.crz_btns_counter + button_counter_offset, send_button))
-          self.ramp_sends += 1
+      if self.ICBM.sendButton in HOLD_BUTTONS:
+        # Sustained hold: one frame per native message slot. The genuine counter advances
+        # between consecutive sends at this cadence, so a fixed +1 offset stays unique.
+        if since_last_send > HOLD_PERIOD:
+          can_sends.append(mazdacan.create_button_cmd(packer, self.CP, CS.crz_btns_counter + 1, send_button))
           self.last_button_frame = self.frame
-    else:
-      self.ramp_send_button = SendButtonState.none
-      self.ramp_sends = 0
+      else:
+        # Discrete tap, paced to the ECU's registration floor
+        if since_last_send > self.tap_period:
+          self.button_frame += 1
+          button_counter_offset = [1, 1, 0, None][self.button_frame % 4]
+          if button_counter_offset is not None:
+            can_sends.append(mazdacan.create_button_cmd(packer, self.CP, CS.crz_btns_counter + button_counter_offset, send_button))
+            self.last_button_frame = self.frame
 
     return can_sends
