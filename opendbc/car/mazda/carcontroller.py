@@ -1,15 +1,138 @@
+from enum import StrEnum
+
 import numpy as np
 
 from opendbc.can import CANPacker
-from opendbc.car import Bus, structs
+from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, structs
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.mazda import mazdacan
+from opendbc.car.mazda.longitudinal import RADAR_ADDR
 from opendbc.car.mazda.values import CarControllerParams, Buttons
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
+LongCtrlState = structs.CarControl.Actuators.LongControlState
+
+# Synthetic radar frames go to the car and to the camera; the panda only forwards
+# received frames between those buses, not our own transmissions.
+LONG_BUSES = (0, 2)
+
+HOLD_CTRL_LATCH_FRAMES = int(CarControllerParams.HOLD_CTRL_LATCH_T / DT_CTRL)
+HOLD_LATCH_FRAMES = int(CarControllerParams.HOLD_LATCH_T / DT_CTRL)
+HOLD_PASSIVE_FRAMES = int(CarControllerParams.HOLD_PASSIVE_T / DT_CTRL)
+RESUME_RELEASE_FRAMES = int(CarControllerParams.RESUME_RELEASE_T / DT_CTRL)
+RESUME_REACTIVATE_FRAMES = int(CarControllerParams.RESUME_REACTIVATE_T / DT_CTRL)
+RESUME_UNLATCH_FRAMES = int(CarControllerParams.RESUME_UNLATCH_T / DT_CTRL)
+
+
+class StopGoState(StrEnum):
+  CRUISING = "cruising"
+  STOPPING = "stopping"
+  HOLD = "hold"
+  HOLD_LATCHED = "hold latched"
+  HOLD_PASSIVE = "hold passive"
+  RESUMING = "resuming"
+
+
+class StopAndGoStateMachine:
+  """Replays stock MRCC's stop-and-go sequence: ramp to a stop, hold at -1.024 m/s2,
+  relax to the latched hold, drop to the passive hold on long stops, and release
+  through a short brake-release window on resume."""
+
+  def __init__(self):
+    self.state = StopGoState.CRUISING
+    self.hold_frames = 0
+    self.release_frames = 0
+    self.reactivate_frames = 0
+    self.unlatch_frames = 0
+
+  def update(self, long_active: bool, stopping: bool, standstill: bool,
+             resume_pressed: bool, virtual_resume: bool, gas_override: bool) -> StopGoState:
+    if not long_active:
+      self.state = StopGoState.CRUISING
+      self.hold_frames = 0
+      self.release_frames = 0
+      self.reactivate_frames = 0
+      self.unlatch_frames = 0
+      return self.state
+
+    if self.state == StopGoState.CRUISING:
+      if stopping:
+        self.state = StopGoState.STOPPING
+
+    elif self.state == StopGoState.STOPPING:
+      if standstill:
+        self.state = StopGoState.HOLD
+        self.hold_frames = 0
+      elif not stopping:
+        self.state = StopGoState.CRUISING
+
+    elif self.state in (StopGoState.HOLD, StopGoState.HOLD_LATCHED, StopGoState.HOLD_PASSIVE):
+      self.hold_frames += 1
+      # Stock's earliest observed hold release comes after the 2 s CRZ_CTRL latch, so a
+      # physical RES waits for it. A virtual resume additionally waits for the relaxed
+      # hold command so a transient plan flicker cannot release the hold early.
+      ctrl_latched = self.hold_frames >= HOLD_CTRL_LATCH_FRAMES
+      resume = (resume_pressed and ctrl_latched) or (virtual_resume and self.state != StopGoState.HOLD)
+      if gas_override or resume:
+        # stock briefly re-raises the latched profile when resuming out of a passive hold
+        self.reactivate_frames = RESUME_REACTIVATE_FRAMES if self.state == StopGoState.HOLD_PASSIVE else 0
+        self.release_frames = RESUME_RELEASE_FRAMES
+        self.unlatch_frames = RESUME_UNLATCH_FRAMES
+        self.state = StopGoState.RESUMING
+      elif self.hold_frames >= HOLD_PASSIVE_FRAMES:
+        self.state = StopGoState.HOLD_PASSIVE
+      elif self.hold_frames >= HOLD_LATCH_FRAMES:
+        self.state = StopGoState.HOLD_LATCHED
+
+    elif self.state == StopGoState.RESUMING:
+      if self.reactivate_frames > 0:
+        self.reactivate_frames -= 1
+      elif self.unlatch_frames > 0:
+        self.unlatch_frames -= 1
+      if resume_pressed or virtual_resume or gas_override:
+        # keep the brake released while the resume request holds
+        self.release_frames = RESUME_RELEASE_FRAMES
+      else:
+        self.release_frames -= 1
+      if self.release_frames <= 0:
+        # re-hold if the car never moved, otherwise hand control back to the plan
+        self.state = StopGoState.HOLD if standstill else StopGoState.CRUISING
+        self.hold_frames = 0
+
+    return self.state
+
+  @property
+  def stop_bits(self) -> bool:
+    # CRZ_INFO stop flags are held through the approach and the strong hold, and clear
+    # once the hold command relaxes
+    return self.state in (StopGoState.STOPPING, StopGoState.HOLD)
+
+  @property
+  def resume_unlatching(self) -> bool:
+    return self.state == StopGoState.RESUMING and self.reactivate_frames == 0 and self.unlatch_frames > 0
+
+  @property
+  def acc_active_2(self) -> bool:
+    return self.state != StopGoState.HOLD_PASSIVE
+
+  def radar_has_lead(self, lead_visible: bool) -> bool:
+    return lead_visible or self.state in (StopGoState.STOPPING, StopGoState.HOLD,
+                                          StopGoState.HOLD_LATCHED, StopGoState.HOLD_PASSIVE)
+
+  def ctrl_phase(self, lead_visible: bool) -> int:
+    # RADAR_LEAD_RELATIVE_DISTANCE progression through stop-and-go, from stock captures
+    if self.state == StopGoState.CRUISING:
+      return 2 if lead_visible else 1
+    if self.state == StopGoState.STOPPING:
+      return 3
+    if self.state == StopGoState.HOLD:
+      return 4 if self.hold_frames >= HOLD_CTRL_LATCH_FRAMES else 3
+    if self.state == StopGoState.RESUMING:
+      return 4 if self.reactivate_frames > 0 else 3
+    return 4  # HOLD_LATCHED, HOLD_PASSIVE
 
 
 class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterface):
@@ -20,6 +143,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.apply_torque_last = 0
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.brake_counter = 0
+    self.stop_and_go = StopAndGoStateMachine()
+    self.virtual_resume_latched = False
+    self.long_counter = 0
+    self.radar_counter = 0
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -39,6 +166,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
                                                       CS.out.steeringTorque, self.params, steer_max)
 
+    virtual_resume_sent = False
     if CC.cruiseControl.cancel:
       # If brake is pressed, let us wait >70ms before trying to disable crz to avoid
       # a race condition with the stock system, where the second cancel from openpilot
@@ -54,9 +182,18 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       if CC.cruiseControl.resume and self.frame % 5 == 0:
         # Mazda Stop and Go requires a RES button (or gas) press if the car stops more than 3 seconds
         # Send Resume button when planner wants car to move
-        can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.RESUME))
+        if not self.CP.openpilotLongitudinalControl:
+          can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.RESUME))
+        elif CS.out.standstill:
+          # with openpilot longitudinal the RES press asks the body ECU to leave its
+          # standstill hold; only meaningful from a stop
+          can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.RESUME))
+          virtual_resume_sent = True
 
     self.apply_torque_last = apply_torque
+
+    if self.CP.openpilotLongitudinalControl:
+      can_sends.extend(self.update_longitudinal(CC, CS, virtual_resume_sent))
 
     # send HUD alerts
     if self.frame % 50 == 0:
@@ -84,3 +221,64 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     self.frame += 1
     return new_actuators, can_sends
+
+  def update_longitudinal(self, CC, CS, virtual_resume_sent):
+    can_sends = []
+
+    # only trust a virtual resume once a RES frame has actually gone out on the bus
+    if not CC.cruiseControl.resume or not CS.out.standstill:
+      self.virtual_resume_latched = False
+    elif virtual_resume_sent:
+      self.virtual_resume_latched = True
+
+    stopping = CC.actuators.longControlState == LongCtrlState.stopping
+    gas_override = CC.cruiseControl.override or CS.out.gasPressed
+    sm = self.stop_and_go
+    state = sm.update(CC.longActive, stopping, CS.out.standstill,
+                      resume_pressed=bool(CS.resume_button),
+                      virtual_resume=self.virtual_resume_latched,
+                      gas_override=gas_override)
+
+    accel = 0.
+    if CC.longActive:
+      accel = float(np.clip(CC.actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+      if state == StopGoState.HOLD:
+        accel = CarControllerParams.ACCEL_HOLD
+      elif state in (StopGoState.HOLD_LATCHED, StopGoState.HOLD_PASSIVE):
+        accel = CarControllerParams.ACCEL_HOLD_LATCHED
+      elif state == StopGoState.RESUMING:
+        # brake-release window: let the car creep off the hold, never brake into it
+        accel = max(accel, 0.)
+
+    if self.frame % CarControllerParams.TESTER_PRESENT_STEP == 0:
+      # keeps the radar in its diagnostic session, and with it the stock frames silenced
+      can_sends.append(make_tester_present_msg(RADAR_ADDR, 0, suppress_response=True))
+
+    lead_visible = CC.hudControl.leadVisible
+    if self.frame % CarControllerParams.RADAR_STEP == 0:
+      synthetic_lead = CC.longActive and (lead_visible or state != StopGoState.CRUISING)
+      for bus in LONG_BUSES:
+        can_sends.extend(mazdacan.create_radar_frames(bus, self.radar_counter, synthetic_lead))
+      self.radar_counter += 1
+
+    if self.frame % CarControllerParams.LONG_STEP == 0:
+      acc_available = CS.out.cruiseState.available
+      # mirror the driver's distance setting on the dash; stock shows gap 2 by default
+      gap = (int(CC.hudControl.leadDistanceBars) or 2) if (CC.longActive or acc_available) else 0
+      if CC.longActive:
+        has_lead = sm.radar_has_lead(lead_visible)
+        phase = sm.ctrl_phase(lead_visible)
+        acc_active_2 = sm.acc_active_2
+      else:
+        has_lead = False
+        phase = 0
+        acc_active_2 = False
+      for bus in LONG_BUSES:
+        can_sends.append(mazdacan.create_acc_command(self.packer, bus, self.long_counter, accel,
+                                                     CC.longActive, acc_available,
+                                                     stopping=sm.stop_bits, resume_unlatching=sm.resume_unlatching))
+        can_sends.append(mazdacan.create_crz_ctrl(self.packer, bus, CC.longActive, acc_available, gap,
+                                                  has_lead, phase, acc_active_2))
+      self.long_counter += 1
+
+    return can_sends

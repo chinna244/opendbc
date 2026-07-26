@@ -79,9 +79,6 @@ class RadarInterface(RadarInterfaceBase):
       self.pts[addr].dRel = math.cos(azimuth) * dist
       self.pts[addr].yRel = -math.sin(azimuth) * dist
       self.pts[addr].vRel = relv
-      self.pts[addr].aRel = float('nan')
-      self.pts[addr].yvRel = float('nan')
-      self.pts[addr].measured = True
 
     ret.points = list(self.pts.values())
     return ret

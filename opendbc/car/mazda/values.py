@@ -17,6 +17,26 @@ class CarControllerParams:
   STEER_DRIVER_FACTOR = 1         # from dbc
   STEER_STEP = 1  # 100 Hz
 
+  ACCEL_MAX = 2.0   # m/s2
+  ACCEL_MIN = -3.5  # m/s2
+
+  # Longitudinal message rates, 100 Hz frames
+  LONG_STEP = 2             # CRZ_INFO/CRZ_CTRL at 50 Hz, matching stock
+  RADAR_STEP = 10           # radar static + track frames at 10 Hz
+  TESTER_PRESENT_STEP = 50  # keeps the radar in its diagnostic session
+
+  # Stop-and-go phase timing, seconds, from stock MRCC captures
+  HOLD_CTRL_LATCH_T = 2.0      # CRZ_CTRL switches to the latched-hold phase
+  HOLD_LATCH_T = 6.0           # CRZ_INFO relaxes the hold command and clears the stop bits
+  HOLD_PASSIVE_T = 9.6         # CRZ_CTRL drops ACC_ACTIVE_2 in long holds
+  RESUME_RELEASE_T = 0.5       # brake-release window after a resume request
+  RESUME_REACTIVATE_T = 0.08   # latched-hold blip when resuming out of a passive hold
+  RESUME_UNLATCH_T = 0.20      # RESUME_UNLATCHING pulse width
+
+  # Standstill hold commands; stock sends raw -1024 through the hold, then exactly -1 once latched
+  ACCEL_HOLD = -1.024         # m/s2
+  ACCEL_HOLD_LATCHED = -0.001  # m/s2
+
   def __init__(self, CP):
     # Gate the higher-authority steering tune on the CX-5 2022+ EPS, not the car model, so the
     # CX-9 that shares this EPS and CX-5-EPS swaps keep it. steer_to_zero sets minSteerSpeed == 0
@@ -57,6 +77,10 @@ class MazdaFlags(IntFlag):
   # Static flags
   # Gen 1 hardware: same CAN messages and same camera
   GEN1 = 1
+
+
+class MazdaSafetyFlags(IntFlag):
+  LONG = 1
 
 
 @dataclass

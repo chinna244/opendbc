@@ -1,4 +1,82 @@
+from opendbc.car.can_definitions import CanData
 from opendbc.car.mazda.values import Buttons, MazdaFlags
+
+# Radar frames the body ECU expects to keep receiving for stop-and-go to work. Byte-exact
+# captures from a 0x764 radar with no objects in view; only the counter nibble in the last
+# byte changes. 0x364 optionally carries a synthetic stopped lead so standstill holds work
+# without a real lead in radar view.
+RADAR_STATIC_MSG = (0x499, bytes.fromhex("0008c00000000000"))
+RADAR_TRACK_MSGS = {
+  0x361: bytes.fromhex("fff7fefe1fc00080"),
+  0x362: bytes.fromhex("fff7fefe1fc78c80"),
+  0x363: bytes.fromhex("fff7fefe1fc00000"),
+  0x364: bytes.fromhex("fff7fefe1fc00000"),
+  0x365: bytes.fromhex("fff7fe7ffbff3fc0"),
+  0x366: bytes.fromhex("fff7fe7ffbff3fc0"),
+}
+SYNTHETIC_LEAD_TRACK_ADDR = 0x364
+SYNTHETIC_LEAD_TRACK_MSG = bytes.fromhex("0a4000001dc00000")
+
+
+def crz_info_checksum(dat: bytes) -> int:
+  # Inverted sum of the first seven bytes; the radar leaves the STOPPING bit out of the
+  # sum. Verified against 1.94M stock frames, including every stop-bit frame.
+  return (0xFF - ((sum(dat[:7]) - (dat[5] & 0x04)) & 0xFF)) & 0xFF
+
+
+def create_acc_command(packer, bus, counter, accel, long_active, acc_available, stopping, resume_unlatching):
+  # CRZ_INFO stands in for the disabled radar's accel command frame. While MRCC is armed
+  # but not engaged, stock advertises ACC_SET_ALLOWED with a zero command so the dash
+  # accepts SET; with the main switch off it broadcasts a static standby pattern with the
+  # command field pegged high.
+  values = {
+    "STATUS": 1,
+    "STATIC_1": 0x7ff,
+    "CTR1": counter % 16,
+  }
+  if long_active or acc_available:
+    values.update({
+      "ACCEL_CMD": accel,
+      "ACC_ACTIVE": int(long_active),
+      "ACC_SET_ALLOWED": 1,
+      "NEW_SIGNAL_7": 1,
+      "STOPPING": int(stopping),
+      "STOPPING_2": int(stopping),
+      "RESUME_UNLATCHING": int(resume_unlatching),
+    })
+  else:
+    values["ACCEL_CMD"] = 4.094  # standby pattern, raw 8190
+
+  dat = packer.make_can_msg("CRZ_INFO", bus, values)[1]
+  values["CHKSUM"] = crz_info_checksum(dat)
+  return packer.make_can_msg("CRZ_INFO", bus, values)
+
+
+def create_crz_ctrl(packer, bus, long_active, acc_available, gap_setting, radar_has_lead, stop_go_phase, acc_active_2):
+  # CRZ_CTRL stands in for the disabled radar's cruise-state frame. stop_go_phase mirrors
+  # stock's stop-and-go progression through RADAR_LEAD_RELATIVE_DISTANCE (see the DBC
+  # comment); gap_setting mirrors the driver's distance setting on the dash.
+  values = {
+    "MSG_1_INV": 1,
+    "MSG_1_INV_COPY": 1,
+    "NEW_SIGNAL_8": 1,
+    "CRZ_ACTIVE": int(long_active),
+    "CRZ_AVAILABLE": int(long_active or acc_available),
+    "DISTANCE_SETTING": gap_setting,
+    "RADAR_HAS_LEAD": int(radar_has_lead),
+    "RADAR_LEAD_RELATIVE_DISTANCE": stop_go_phase,
+    "ACC_ACTIVE_2": int(acc_active_2),
+  }
+  return packer.make_can_msg("CRZ_CTRL", bus, values)
+
+
+def create_radar_frames(bus, counter, synthetic_lead):
+  frames = [CanData(RADAR_STATIC_MSG[0], RADAR_STATIC_MSG[1], bus)]
+  for addr, dat in RADAR_TRACK_MSGS.items():
+    if synthetic_lead and addr == SYNTHETIC_LEAD_TRACK_ADDR:
+      dat = SYNTHETIC_LEAD_TRACK_MSG
+    frames.append(CanData(addr, dat[:7] + bytes([(dat[7] & 0xf0) | (counter % 16)]), bus))
+  return frames
 
 
 def create_steering_control(packer, CP, frame, apply_torque, lkas):
