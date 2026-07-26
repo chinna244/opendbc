@@ -131,11 +131,11 @@ class TestMazdaLongitudinalMessages:
   @pytest.mark.parametrize(("long_active", "acc_available", "gap", "has_lead", "phase", "acc_active_2", "expected"), [
     (False, False, 0, False, 0, False, "0201010000000000"),  # standby
     (False, True, 2, False, 0, False, "02010b0000000000"),   # MRCC armed, SET allowed
-    (True, True, 2, True, 1, True, "0a018b2000001000"),      # engaged, cruise
-    (True, True, 2, True, 2, True, "0a018b4000001000"),      # engaged, following
-    (True, True, 2, True, 3, True, "0a018b6000001000"),      # stop-and-go hold / resume
-    (True, True, 2, True, 4, True, "0a018b8000001000"),      # hold latched
-    (True, True, 2, True, 4, False, "0a018b8000000000"),     # passive hold, ACC_ACTIVE_2 drops
+    (True, True, 2, True, 1, True, "0a018b2000001000"),      # engaged, cruise, no lead
+    (True, True, 2, True, 2, True, "0a018b4000001000"),      # engaged, following a lead
+    (True, True, 2, True, 3, True, "0a018b6000001000"),      # stop-and-go hold (near phase)
+    (True, True, 2, True, 4, True, "0a018b8000001000"),      # stop-and-go hold (far phase)
+    (True, True, 2, True, 3, False, "0a018b6000000000"),     # relaxed hold, ACC_ACTIVE_2 drops
     (True, True, 1, True, 2, True, "0a01874000001000"),      # driver gap 1 mirrored to the dash
   ])
   def test_crz_ctrl_golden_bytes(self, packer, long_active, acc_available, gap, has_lead, phase, acc_active_2, expected):
@@ -195,10 +195,8 @@ class TestStopAndGoStateMachine:
 
     # resume out of the passive hold: latched-profile blip, then the unlatch pulse
     assert self.run(sm, 1, stopping=True, standstill=True, virtual_resume=True) == StopGoState.RESUMING
-    assert sm.ctrl_phase(lead_visible=True) == 4
     assert not sm.resume_unlatching
     self.run(sm, RESUME_REACTIVATE_FRAMES, stopping=True, standstill=True, virtual_resume=True)
-    assert sm.ctrl_phase(lead_visible=True) == 3
     assert sm.resume_unlatching
     self.run(sm, RESUME_UNLATCH_FRAMES, stopping=True, standstill=True, virtual_resume=True)
     assert not sm.resume_unlatching
@@ -206,13 +204,18 @@ class TestStopAndGoStateMachine:
     # car creeps off the hold, request clears, release window runs out
     assert self.run(sm, RESUME_RELEASE_FRAMES, stopping=False, standstill=False) == StopGoState.CRUISING
 
-  def test_ctrl_latch_phase_progression(self, sm):
+  def test_hold_command_relaxes_at_latch(self, sm):
     self.run(sm, 1, stopping=True)
     self.run(sm, 1, stopping=True, standstill=True)
+    # strong hold with stop bits and ACC_ACTIVE_2 set, near stop phase
+    assert sm.state == StopGoState.HOLD
+    assert sm.stop_bits and sm.acc_active_2
     assert sm.ctrl_phase(lead_visible=True) == 3
-    self.run(sm, HOLD_CTRL_LATCH_FRAMES, stopping=True, standstill=True)
-    assert sm.state == StopGoState.HOLD  # CRZ_CTRL latches before the hold command relaxes
-    assert sm.ctrl_phase(lead_visible=True) == 4
+    # after the measured 3.8 s the command relaxes: stop bits and ACC_ACTIVE_2 clear together
+    self.run(sm, HOLD_LATCH_FRAMES, stopping=True, standstill=True)
+    assert sm.state == StopGoState.HOLD_LATCHED
+    assert not sm.stop_bits and not sm.acc_active_2
+    assert sm.ctrl_phase(lead_visible=True) == 3
 
   def test_physical_res_waits_for_ctrl_latch(self, sm):
     self.run(sm, 1, stopping=True)
@@ -221,7 +224,6 @@ class TestStopAndGoStateMachine:
     assert self.run(sm, 10, stopping=True, standstill=True, resume_pressed=True) == StopGoState.HOLD
     self.run(sm, HOLD_CTRL_LATCH_FRAMES, stopping=True, standstill=True)
     assert self.run(sm, 1, stopping=True, standstill=True, resume_pressed=True) == StopGoState.RESUMING
-    assert sm.ctrl_phase(lead_visible=False) == 3  # no passive-hold blip needed
 
   def test_gas_releases_hold_immediately(self, sm):
     self.run(sm, 1, stopping=True)

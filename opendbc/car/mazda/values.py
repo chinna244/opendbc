@@ -25,10 +25,11 @@ class CarControllerParams:
   RADAR_STEP = 10           # radar static + track frames at 10 Hz
   TESTER_PRESENT_STEP = 50  # keeps the radar in its diagnostic session
 
-  # Stop-and-go phase timing, seconds, from stock MRCC captures
-  HOLD_CTRL_LATCH_T = 2.0      # CRZ_CTRL switches to the latched-hold phase
-  HOLD_LATCH_T = 6.0           # CRZ_INFO relaxes the hold command and clears the stop bits
-  HOLD_PASSIVE_T = 9.6         # CRZ_CTRL drops ACC_ACTIVE_2 in long holds
+  # Stop-and-go phase timing, seconds, measured from stock MRCC captures
+  # (tools/mazda_long/analyze_hold_resume.py, 34 episodes)
+  HOLD_CTRL_LATCH_T = 2.0      # earliest a physical RES is honored out of the hold
+  HOLD_LATCH_T = 3.8           # command relaxes -1024 -> -1, stop bits + ACC_ACTIVE_2 clear
+  HOLD_PASSIVE_T = 9.6         # long-hold substate, kept for the RES-resume reactivation blip
   RESUME_RELEASE_T = 0.5       # brake-release window after a resume request
   RESUME_REACTIVATE_T = 0.08   # latched-hold blip when resuming out of a passive hold
   RESUME_UNLATCH_T = 0.20      # RESUME_UNLATCHING pulse width

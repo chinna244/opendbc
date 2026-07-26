@@ -49,7 +49,8 @@ class StopAndGoStateMachine:
     self.unlatch_frames = 0
 
   def update(self, long_active: bool, stopping: bool, standstill: bool,
-             resume_pressed: bool, virtual_resume: bool, gas_override: bool) -> StopGoState:
+             resume_pressed: bool = False, virtual_resume: bool = False,
+             gas_override: bool = False) -> StopGoState:
     if not long_active:
       self.state = StopGoState.CRUISING
       self.hold_frames = 0
@@ -116,23 +117,20 @@ class StopAndGoStateMachine:
 
   @property
   def acc_active_2(self) -> bool:
-    return self.state != StopGoState.HOLD_PASSIVE
+    # stock drops ACC_ACTIVE_2 together with the command relax at the hold latch
+    return self.state not in (StopGoState.HOLD_LATCHED, StopGoState.HOLD_PASSIVE)
 
   def radar_has_lead(self, lead_visible: bool) -> bool:
     return lead_visible or self.state in (StopGoState.STOPPING, StopGoState.HOLD,
                                           StopGoState.HOLD_LATCHED, StopGoState.HOLD_PASSIVE)
 
   def ctrl_phase(self, lead_visible: bool) -> int:
-    # RADAR_LEAD_RELATIVE_DISTANCE progression through stop-and-go, from stock captures
+    # RADAR_LEAD_RELATIVE_DISTANCE: 1 cruise, 2 follow, 3 stop/hold, 4 hold-far. Stock holds a
+    # constant stop phase through the whole hold and drops to follow on resume; without a real
+    # lead distance we advertise the near stop phase (3) throughout the hold.
     if self.state == StopGoState.CRUISING:
       return 2 if lead_visible else 1
-    if self.state == StopGoState.STOPPING:
-      return 3
-    if self.state == StopGoState.HOLD:
-      return 4 if self.hold_frames >= HOLD_CTRL_LATCH_FRAMES else 3
-    if self.state == StopGoState.RESUMING:
-      return 4 if self.reactivate_frames > 0 else 3
-    return 4  # HOLD_LATCHED, HOLD_PASSIVE
+    return 3
 
 
 class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterface):
