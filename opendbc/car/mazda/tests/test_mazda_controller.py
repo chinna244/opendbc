@@ -2,14 +2,18 @@
 """Tests for the Mazda CX-5 2022+ EPS steering parameters (gated on the EPS, not the model)
 and the longitudinal message builders and stop-and-go state machine."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
 from opendbc.can import CANPacker
+from opendbc.car import Bus
 from opendbc.car.mazda import mazdacan
-from opendbc.car.mazda.carcontroller import (HOLD_CTRL_LATCH_FRAMES, HOLD_LATCH_FRAMES, HOLD_PASSIVE_FRAMES,
+from opendbc.car.mazda.carcontroller import (CarController, HOLD_CTRL_LATCH_FRAMES, HOLD_LATCH_FRAMES, HOLD_PASSIVE_FRAMES,
                                              RESUME_REACTIVATE_FRAMES, RESUME_RELEASE_FRAMES, RESUME_UNLATCH_FRAMES,
                                              StopAndGoStateMachine, StopGoState)
+from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams
 
 
@@ -249,3 +253,118 @@ class TestStopAndGoStateMachine:
     self.run(sm, 1, stopping=True)
     # lead speeds up again before the car reaches standstill
     assert self.run(sm, 1, stopping=False) == StopGoState.CRUISING
+
+
+LongCtrlState = None  # bound in the fixture from structs
+
+
+def _mock_cc(long_active, accel, long_state, standstill, gas, override, resume, lead_visible, gap, available):
+  out = SimpleNamespace(standstill=standstill, gasPressed=gas,
+                        cruiseState=SimpleNamespace(available=available))
+  actuators = SimpleNamespace(accel=accel, longControlState=long_state)
+  cruise = SimpleNamespace(resume=resume, override=override, cancel=False)
+  hud = SimpleNamespace(leadVisible=lead_visible, leadDistanceBars=gap)
+  cc = SimpleNamespace(longActive=long_active, actuators=actuators, cruiseControl=cruise, hudControl=hud)
+  cs = SimpleNamespace(out=out, resume_button=0)
+  return cc, cs
+
+
+class TestLongitudinalIntegration:
+  """Drives the real CarController.update_longitudinal through an engage -> cruise -> stop ->
+  hold -> resume timeline and checks the emitted CAN, not just the state machine in isolation."""
+
+  @pytest.fixture
+  def cc(self):
+    CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], alpha_long=True,
+                                 is_release=False, docs=False)
+    CP_SP = CarInterface.get_params_sp(CP, CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], True, False, False)
+    assert CP.openpilotLongitudinalControl
+    return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
+
+  def _step(self, cc, **kw):
+    from opendbc.car import structs
+    long_state = kw.pop("long_state", structs.CarControl.Actuators.LongControlState.pid)
+    params = dict(long_active=True, accel=0.5, long_state=long_state, standstill=False,
+                  gas=False, override=False, resume=False, lead_visible=True, gap=2, available=True)
+    params.update(kw)
+    control, carstate = _mock_cc(**params)
+    sends = cc.update_longitudinal(control, carstate, virtual_resume_sent=False)
+    cc.frame += 1
+    return sends
+
+  def test_engaged_frame_rates_and_counters(self, cc):
+    from opendbc.car import structs
+    long = structs.CarControl.Actuators.LongControlState
+    crz_info = crz_ctrl = radar_static = tester = 0
+    for _ in range(100):  # 1 s at 100 Hz
+      sends = self._step(cc, long_state=long.pid, accel=1.0, gap=2)
+      addrs = [a for a, _, _ in sends]
+      buses = {a: [] for a, _, _ in sends}
+      for a, _, b in sends:
+        buses[a].append(b)
+      crz_info += addrs.count(0x21b)
+      crz_ctrl += addrs.count(0x21c)
+      radar_static += addrs.count(0x499)
+      tester += sum(1 for a, _, _ in sends if a == 0x764)
+      # CRZ_INFO/CRZ_CTRL, when emitted, always go to both bus 0 and bus 2
+      if 0x21b in buses:
+        assert sorted(buses[0x21b]) == [0, 2]
+        assert sorted(buses[0x21c]) == [0, 2]
+
+    # 100 Hz loop: long msgs at 50 Hz (x2 buses), radar at 10 Hz (x2), tester at 2 Hz
+    assert crz_info == crz_ctrl == 100    # 50 frames x 2 buses
+    assert radar_static == 20             # 10 frames x 2 buses
+    assert tester == 2                    # 2 Hz, single bus
+    assert cc.long_counter == 50 and cc.radar_counter == 10
+
+  def test_gap_setting_mirrors_driver(self, cc):
+    from opendbc.can import CANParser
+    from opendbc.car import structs
+    for gap in (1, 2, 3):
+      cc.frame = 0  # force emission on the first step
+      sends = self._step(cc, gap=gap, long_state=structs.CarControl.Actuators.LongControlState.pid)
+      ctrl = next(dat for a, dat, b in sends if a == 0x21c and b == 0)
+      cp = CANParser("mazda_2017", [("CRZ_CTRL", float("nan"))], 0)
+      cp.update([(0, [(0x21c, ctrl, 0)])])
+      assert cp.vl["CRZ_CTRL"]["DISTANCE_SETTING"] == gap
+
+  def test_stop_emits_hold_then_relaxes(self, cc):
+    from opendbc.car import structs
+    long = structs.CarControl.Actuators.LongControlState
+
+    def accel_cmd(sends):
+      dat = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
+      if dat is None:
+        return None
+      return (((dat[2] & 0x3) << 11) | (dat[3] << 3) | (dat[4] >> 5)) - 4096
+
+    # approach the stop
+    for _ in range(int(0.5 / 0.01)):
+      self._step(cc, long_state=long.stopping, accel=-1.5, standstill=False)
+    # reach standstill: expect the strong hold command
+    hold_seen = latched_seen = False
+    for _ in range(int(8.0 / 0.01)):
+      sends = self._step(cc, long_state=long.stopping, accel=-1.5, standstill=True)
+      cmd = accel_cmd(sends)
+      if cmd is None:
+        continue
+      if cmd == round(CarControllerParams.ACCEL_HOLD * 1000):
+        hold_seen = True
+      if hold_seen and cmd == round(CarControllerParams.ACCEL_HOLD_LATCHED * 1000):
+        latched_seen = True
+    assert hold_seen, "strong -1024 hold command never emitted at standstill"
+    assert latched_seen, "hold never relaxed to the latched -1 command"
+
+  def test_disengaged_emits_stock_patterns(self, cc):
+    from opendbc.car import structs
+    off = structs.CarControl.Actuators.LongControlState.off
+    # main off, not available: the exact standby pattern the panda allowlists byte-for-byte
+    cc.frame = 0
+    sends = self._step(cc, long_active=False, long_state=off, available=False)
+    info = next(dat for a, dat, b in sends if a == 0x21b and b == 0)
+    assert info.hex().startswith("01ffe3ffc000")
+    # MRCC armed but not engaged: stock advertises ACC_SET_ALLOWED with a zero command
+    cc.frame = 0
+    sends = self._step(cc, long_active=False, long_state=off, available=True)
+    info = next(dat for a, dat, b in sends if a == 0x21b and b == 0)
+    assert info.hex().startswith("01ffe2000480")
