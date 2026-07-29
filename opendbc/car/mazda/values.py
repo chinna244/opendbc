@@ -24,6 +24,10 @@ class CarControllerParams:
   LONG_STEP = 2             # CRZ_INFO/CRZ_CTRL at 50 Hz, matching stock
   RADAR_STEP = 10           # radar static + track frames at 10 Hz
   TESTER_PRESENT_STEP = 50  # keeps the radar in its diagnostic session
+  SESSION_STEP = 50         # session-control requests at 2 Hz, fire-and-forget
+
+  # stock CRZ_INFO runs at 50 Hz; treat the radar as silenced after 50 ms without it
+  STOCK_RADAR_ALIVE_FRAMES = 5
 
   # Stop-and-go phase timing, seconds, measured from stock MRCC captures
   # (tools/mazda_long/analyze_hold_resume.py, 34 episodes)

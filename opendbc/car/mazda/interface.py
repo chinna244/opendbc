@@ -4,7 +4,6 @@ from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.carstate import CarState
-from opendbc.car.mazda.longitudinal import enter_radar_programming_session, request_radar_default_session
 from opendbc.car.mazda.radar_interface import RadarInterface
 from opendbc.car.mazda.values import CAR, DBC, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaSafetyFlags
 
@@ -52,6 +51,12 @@ class CarInterface(CarInterfaceBase):
 
     ret.centerToFront = ret.wheelbase * 0.41
 
+    # The radar teardown runs from the control loop, not init: silencing the radar
+    # before the FSC camera finishes its cold-boot radar-presence check latches an
+    # i-ACTIVSENSE fault, so carcontroller waits for carstate's settle gate. The
+    # ordered hand-back on an onroad toggle-off runs the same way, before the
+    # process restart is requested.
+
     return ret
 
   @staticmethod
@@ -60,17 +65,3 @@ class CarInterface(CarInterfaceBase):
     ret.intelligentCruiseButtonManagementAvailable = True
 
     return ret
-
-  @staticmethod
-  def init(CP, CP_SP, can_recv, can_send):
-    if CP.openpilotLongitudinalControl:
-      # Failure leaves the stock radar broadcasting; carstate keeps accFaulted set while
-      # stock CRZ_INFO is heard, so longitudinal cannot engage against a live radar.
-      enter_radar_programming_session(can_recv, can_send)
-
-  @staticmethod
-  def deinit(CP, can_recv, can_send):
-    # nothing calls this today; the radar also recovers on its own via the UDS S3
-    # timeout a few seconds after tester present stops
-    if CP.openpilotLongitudinalControl:
-      request_radar_default_session(can_recv, can_send)

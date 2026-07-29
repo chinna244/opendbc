@@ -7,6 +7,11 @@ from opendbc.sunnypilot.car.mazda.carstate_ext import CarStateExt
 
 ButtonType = structs.CarState.ButtonEvent.Type
 
+# 10 s at 100 Hz. The FSC's radar-presence check failed when the radar went quiet 1.9 s
+# after the boot-settle broadcast and passed at 5.8 s and beyond; 10 s doubles the
+# largest observed-clean gap and still beats stock MRCC's own arming time (24-42 s cold).
+FSC_SETTLE_FRAMES = 1000
+
 
 class CarState(CarStateBase, CarStateExt):
   def __init__(self, CP, CP_SP):
@@ -31,6 +36,12 @@ class CarState(CarStateBase, CarStateExt):
     self.cruise_enabled = False
     self.brake_pressed_prev = False
     self.stock_radar_silent_frames = 0
+    self.cam_laneinfo_seen = False
+    self.fsc_settled_frames = 0
+
+  @property
+  def radar_teardown_gate(self) -> bool:
+    return self.fsc_settled_frames >= FSC_SETTLE_FRAMES
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
@@ -106,14 +117,32 @@ class CarState(CarStateBase, CarStateExt):
       ret.cruiseState.available = self.cruise_available
       ret.cruiseState.enabled = self.cruise_enabled
 
-      # Two-master guard: while the stock radar still broadcasts CRZ_INFO (teardown failed,
-      # or the radar recovered through its S3 timeout), our synthetic frames would fight it
-      # on the bus, so block longitudinal engagement until it has been silent for 1 second.
+      # Two-master guard: while the stock radar still broadcasts CRZ_INFO (teardown pending
+      # or failed, or the radar recovered through its S3 timeout), our synthetic frames
+      # would fight it on the bus, so block longitudinal engagement until it has been
+      # silent for 1 second.
       if len(cp.vl_all["CRZ_INFO"]["CTR1"]) > 0:
         self.stock_radar_silent_frames = 0
       else:
         self.stock_radar_silent_frames += 1
       ret.accFaulted = self.stock_radar_silent_frames < 100
+
+      # Radar teardown gate: the FSC camera broadcasts a boot-in-progress state on
+      # CAM_LANEINFO (NO_ERR_BIT + BIT2 set, clearing at 2.8-6.0 s; both are pure boot
+      # markers, never set again while driving), then runs a radar-presence check in the
+      # following seconds. Silencing the radar ~2 s after the settle latches an
+      # i-ACTIVSENSE fault; ~6+ s is proven clean. Require the settled state to be
+      # observed for 10 s before the teardown may start; a latched fault (ERR_BIT) also
+      # shows the boot markers clear, so it must hold the gate closed.
+      if self.cam_laneinfo_seen or len(cp_cam.vl_all["CAM_LANEINFO"]["LANE_LINES"]) > 0:
+        self.cam_laneinfo_seen = True
+        laneinfo = cp_cam.vl["CAM_LANEINFO"]
+        fsc_booting = laneinfo["NO_ERR_BIT"] == 1 or laneinfo["BIT2"] == 1
+        fsc_faulted = laneinfo["ERR_BIT"] == 1
+        if fsc_booting or fsc_faulted:
+          self.fsc_settled_frames = 0
+        else:
+          self.fsc_settled_frames += 1
     else:
       # TODO: the signal used for available seems to be the adaptive cruise signal, instead of the main on
       #       it should be used for carState.cruiseState.nonAdaptive instead
