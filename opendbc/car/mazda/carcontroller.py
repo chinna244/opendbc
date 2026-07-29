@@ -3,12 +3,11 @@ from enum import StrEnum
 import numpy as np
 
 from opendbc.can import CANPacker
-from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, structs
+from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, structs, uds
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.mazda import mazdacan
-from opendbc.car.mazda.longitudinal import (RADAR_ADDR, SESSION_DEFAULT, SESSION_PROGRAMMING,
-                                            RadarSessionManager, RadarSessionState, create_radar_session_msg)
+from opendbc.car.mazda.longitudinal import RADAR_ADDR, RadarSessionManager, RadarSessionState, create_radar_session_msg
 from opendbc.car.mazda.values import CarControllerParams, Buttons
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
@@ -226,25 +225,26 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     can_sends = []
 
     # Radar session sequencing: hold off the teardown until the FSC's cold-boot
-    # radar-presence check has cleared (carstate's settle gate), keep the radar in its
+    # radar-presence check has cleared (carstate's settle timer), keep the radar in its
     # programming session while we own the bus, and on an onroad toggle-off return it
-    # to the default session before card requests the process restart.
-    stock_radar_alive = CS.stock_radar_silent_frames < CarControllerParams.STOCK_RADAR_ALIVE_FRAMES
-    # never yank the radar out from under an active stock MRCC engagement (driver SET
-    # before the gate passed on a warm boot): wait for the driver to disengage first
-    stock_cruise_engaged = stock_radar_alive and CS.out.cruiseState.enabled
-    teardown_ok = CS.radar_teardown_gate and not stock_cruise_engaged
-    session_state = self.radar_session.update(teardown_ok, stock_radar_alive, CC_SP.radarHandBack)
+    # to the default session before card requests the process restart. Never yank the
+    # radar out from under an active stock MRCC engagement (driver SET before the gate
+    # passed on a warm boot): wait for the driver to disengage first.
+    stock_radar_alive = CS.stock_radar_alive
+    teardown_ok = CS.fsc_settled and not (stock_radar_alive and CS.out.cruiseState.enabled)
+    session_state = self.radar_session.update(teardown_ok, stock_radar_alive, CC_SP.stockEcuHandBack)
+    # synthetic radar frames flow while we own the bus, and keep flowing through the
+    # hand-back so the camera never sees a radar gap
+    radar_master = session_state in (RadarSessionState.SILENCED, RadarSessionState.HANDBACK)
 
-    if self.frame % CarControllerParams.SESSION_STEP == 0:
+    if self.frame % CarControllerParams.RADAR_UDS_STEP == 0:
       if session_state == RadarSessionState.SILENCING:
-        can_sends.append(create_radar_session_msg(SESSION_PROGRAMMING))
+        can_sends.append(create_radar_session_msg(uds.SESSION_TYPE.PROGRAMMING))
       elif session_state == RadarSessionState.HANDBACK:
-        can_sends.append(create_radar_session_msg(SESSION_DEFAULT))
-
-    if session_state == RadarSessionState.SILENCED and self.frame % CarControllerParams.TESTER_PRESENT_STEP == 0:
-      # keeps the radar in its diagnostic session, and with it the stock frames silenced
-      can_sends.append(make_tester_present_msg(RADAR_ADDR, 0, suppress_response=True))
+        can_sends.append(create_radar_session_msg(uds.SESSION_TYPE.DEFAULT))
+      elif session_state == RadarSessionState.SILENCED:
+        # keeps the radar in its diagnostic session, and with it the stock frames silenced
+        can_sends.append(make_tester_present_msg(RADAR_ADDR, 0, suppress_response=True))
 
     # only trust a virtual resume once a RES frame has actually gone out on the bus
     if not CC.cruiseControl.resume or not CS.out.standstill:
@@ -272,13 +272,13 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         accel = max(accel, 0.)
 
     lead_visible = CC.hudControl.leadVisible
-    if self.radar_session.radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:
+    if radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:
       synthetic_lead = CC.longActive and (lead_visible or state != StopGoState.CRUISING)
       for bus in LONG_BUSES:
         can_sends.extend(mazdacan.create_radar_frames(bus, self.radar_counter, synthetic_lead))
       self.radar_counter += 1
 
-    if self.radar_session.radar_master and self.frame % CarControllerParams.LONG_STEP == 0:
+    if radar_master and self.frame % CarControllerParams.LONG_STEP == 0:
       acc_available = CS.out.cruiseState.available
       # mirror the driver's distance setting on the dash; stock shows gap 2 by default
       gap = (int(CC.hudControl.leadDistanceBars) or 2) if (CC.longActive or acc_available) else 0

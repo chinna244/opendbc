@@ -149,8 +149,9 @@ class CarControlSP:
   leadTwo: 'LeadData' = field(default_factory=lambda: LeadData())
   intelligentCruiseButtonManagement: 'IntelligentCruiseButtonManagement' = field(default_factory=lambda: IntelligentCruiseButtonManagement())
   # card-side only, never crosses the wire: asks the car controller to return a
-  # silenced ECU to stock before an onroad cycle is requested (Mazda radar hand-back)
-  radarHandBack: bool = auto_field()
+  # silenced stock ECU to service before an onroad cycle is requested (e.g. the
+  # Mazda radar's default-session hand-back)
+  stockEcuHandBack: bool = auto_field()
 
   @auto_dataclass
   class Param:

@@ -21,13 +21,16 @@ class CarControllerParams:
   ACCEL_MIN = -3.5  # m/s2
 
   # Longitudinal message rates, 100 Hz frames
-  LONG_STEP = 2             # CRZ_INFO/CRZ_CTRL at 50 Hz, matching stock
-  RADAR_STEP = 10           # radar static + track frames at 10 Hz
-  TESTER_PRESENT_STEP = 50  # keeps the radar in its diagnostic session
-  SESSION_STEP = 50         # session-control requests at 2 Hz, fire-and-forget
+  LONG_STEP = 2        # CRZ_INFO/CRZ_CTRL at 50 Hz, matching stock
+  RADAR_STEP = 10      # radar static + track frames at 10 Hz
+  RADAR_UDS_STEP = 50  # radar UDS traffic at 2 Hz: session control or tester present
 
-  # stock CRZ_INFO runs at 50 Hz; treat the radar as silenced after 50 ms without it
-  STOCK_RADAR_ALIVE_FRAMES = 5
+  # Radar session timing, seconds. The FSC's radar-presence check faulted when the radar
+  # went quiet 1.9 s after the camera's boot settle and passed from 5.8 s
+  # (docs/mazda-alpha-long-setup-teardown.md), hence the 10 s settle requirement.
+  FSC_SETTLE_T = 10.0         # observed-settled time before the teardown may start
+  STOCK_RADAR_ALIVE_T = 0.05  # stock CRZ_INFO runs at 50 Hz; silent this long = torn down
+  STOCK_RADAR_GUARD_T = 1.0   # two-master guard: block engagement until silent this long
 
   # Stop-and-go phase timing, seconds, measured from stock MRCC captures
   # (tools/mazda_long/analyze_hold_resume.py, 34 episodes)

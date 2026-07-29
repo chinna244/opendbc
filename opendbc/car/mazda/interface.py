@@ -51,12 +51,6 @@ class CarInterface(CarInterfaceBase):
 
     ret.centerToFront = ret.wheelbase * 0.41
 
-    # The radar teardown runs from the control loop, not init: silencing the radar
-    # before the FSC camera finishes its cold-boot radar-presence check latches an
-    # i-ACTIVSENSE fault, so carcontroller waits for carstate's settle gate. The
-    # ordered hand-back on an onroad toggle-off runs the same way, before the
-    # process restart is requested.
-
     return ret
 
   @staticmethod
