@@ -220,6 +220,8 @@ class CarState(CarStateBase, CarStateExt):
       # teardown, and its presence is what the two-master guard watches for
       pt_messages.append(("CRZ_INFO", float("nan")))
     cam_messages = [
+      # read through vl_all, which unlike vl has no lazy registration
+      ("CAM_LANEINFO", 0),
       ("CAM_TRAFFIC_SIGNS", 0),
     ]
     return {
