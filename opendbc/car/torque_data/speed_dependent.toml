@@ -13,15 +13,11 @@
 [MAZDA_CX5_2022]
 # STEER_MAX cliff 1200→800 at 32 mph. Bin boundary at 14.2 m/s aligns with cliff.
 # Bins 0-2: SM=1200 (full low-speed authority). Bins 3-6: SM=800 (22% PID headroom).
-# Refreshed 2026-07-26 from the deepest-learned local rlogs, per bin, via
-# tools/mazda_long/scan_speed_bin_coverage.py. Sources (samples admitted to that bin):
-#   6.5  0000000a--e9977ca942 seg5   (810)     9.5  0000019e--3149956bee seg11 (2073)
-#   12.0 0000019e--3149956bee seg11  (2228)   16.4  0000019e--3149956bee seg11 (2857)
-#   21.0 0000019c--84a5408a38 seg11  (4148)
-# 28.0 kept from the device cache carried into 0000019c (learned on drives not stored locally);
-# 35.0 has never gone valid in any local rlog, so it keeps the 2026-04-27 value.
-# All sources confirmed post-speedmax (LKAS commands >800 seen), so laf needs no rescaling —
-# laf is per *normalized* torque and therefore scales with STEER_MAX.
+# Refreshed 2026-08-03 straight from the comma 4's LiveTorqueParameters cache
+# (per-bin SVD fits, all learned on the current bin layout so laf needs no
+# STEER_MAX rescaling). Samples per bin: 7072 / 8297 / 7765 / 11936 / 12000 (cap).
+# Bins 28.0 and 35.0 have never gone valid (520 / 0 samples) and keep their
+# previous seed values.
 speed_bp    = [6.5, 9.5, 12.0, 16.4, 21.0, 28.0, 35.0]
-laf_bp      = [2.11, 2.34, 2.10, 1.20, 1.27, 1.33, 1.61]
-friction_bp = [0.174, 0.164, 0.155, 0.159, 0.142, 0.130, 0.108]
+laf_bp      = [2.30, 2.53, 2.23, 1.09, 1.10, 1.33, 1.61]
+friction_bp = [0.173, 0.144, 0.147, 0.159, 0.147, 0.130, 0.108]
