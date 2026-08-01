@@ -18,6 +18,8 @@ class CarInterface(CarInterfaceBase):
     ret.brand = "mazda"
     ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.mazda)]
 
+    ret.radarUnavailable = Bus.radar not in DBC[candidate]
+
     ret.alphaLongitudinalAvailable = candidate == CAR.MAZDA_CX5_2022
     ret.openpilotLongitudinalControl = alpha_long and ret.alphaLongitudinalAvailable
     if ret.openpilotLongitudinalControl:
@@ -28,8 +30,6 @@ class CarInterface(CarInterfaceBase):
       ret.radarUnavailable = True
       ret.stopAccel = -1.0  # stock MRCC holds raw -1024 (-1.024 m/s2) at a stop
       ret.longitudinalActuatorDelay = 0.36  # measured ~0.3 s dead time + ~0.3 s first-order lag
-    else:
-      ret.radarUnavailable = Bus.radar not in DBC[candidate]
 
     ret.dashcamOnly = candidate not in (CAR.MAZDA_CX5_2022, CAR.MAZDA_CX9_2021)
 

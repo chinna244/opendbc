@@ -200,9 +200,7 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     }
   }
 
-  if (mazda_longitudinal && long_replacement_bus && ((msg->addr == MAZDA_RADAR_TRACK_1) || (msg->addr == MAZDA_RADAR_TRACK_2) ||
-                                                     (msg->addr == MAZDA_RADAR_TRACK_3) || (msg->addr == MAZDA_RADAR_TRACK_4) ||
-                                                     (msg->addr == MAZDA_RADAR_TRACK_5) || (msg->addr == MAZDA_RADAR_TRACK_6))) {
+  if (mazda_longitudinal && long_replacement_bus && (msg->addr >= MAZDA_RADAR_TRACK_1) && (msg->addr <= MAZDA_RADAR_TRACK_6)) {
     if (!mazda_radar_track_msg_valid(msg)) {
       tx = false;
     }
