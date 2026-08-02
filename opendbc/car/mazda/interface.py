@@ -20,6 +20,13 @@ class CarInterface(CarInterfaceBase):
 
     ret.radarUnavailable = Bus.radar not in DBC[candidate]
 
+    # 2022+ CX-5 EPS can steer to zero and has no hands-off lockout. Detected by EPS firmware
+    # rather than by model, so an EPS swapped into an older Mazda is recognized as what it is.
+    steer_to_zero = candidate == CAR.MAZDA_CX5_2022 or \
+      any(fw.ecu == 'eps' and fw.fwVersion in STEER_TO_ZERO_EPS_FW for fw in car_fw)
+    if not steer_to_zero:
+      ret.minSteerSpeed = LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS
+
     ret.alphaLongitudinalAvailable = candidate == CAR.MAZDA_CX5_2022
     ret.openpilotLongitudinalControl = alpha_long and ret.alphaLongitudinalAvailable
     if ret.openpilotLongitudinalControl:
@@ -31,23 +38,20 @@ class CarInterface(CarInterfaceBase):
       ret.stopAccel = -1.0  # stock MRCC holds raw -1024 (-1.024 m/s2) at a stop
       ret.longitudinalActuatorDelay = 0.36  # measured ~0.3 s dead time + ~0.3 s first-order lag
 
-    ret.dashcamOnly = candidate not in (CAR.MAZDA_CX5_2022, CAR.MAZDA_CX9_2021)
+    # Older Mazdas are dashcam only for one reason: their EPS locks steering out after ~5 s of
+    # hands-off and below 45 kph. That is a property of the EPS, not of the car, so a car with
+    # the 2022+ EPS swapped in is controllable and lifts with it. Longitudinal stays keyed on the
+    # model above: the radar and camera are not part of an EPS swap.
+    ret.dashcamOnly = candidate not in (CAR.MAZDA_CX5_2022, CAR.MAZDA_CX9_2021) and not steer_to_zero
 
     ret.enableBsm = 0x477 in fingerprint[0]
 
-    ret.steerActuatorDelay = 0.1
-    if candidate in (CAR.MAZDA_CX5_2022,):
-      ret.steerActuatorDelay = 0.14  # lagd learns 0.338 total (initial = this + 0.2)
+    # command-to-torque lag is EPS firmware, so it follows the EPS. lagd learns the rest
+    # (0.338 total on a CX-5 2022; initial = this + 0.2)
+    ret.steerActuatorDelay = 0.14 if steer_to_zero else 0.1
     ret.steerLimitTimer = 0.8
 
     CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)
-
-    # 2022+ CX-5 EPS can steer to zero; detect by EPS firmware so an EPS
-    # swapped into another Mazda keeps full-speed steering.
-    steer_to_zero = candidate == CAR.MAZDA_CX5_2022 or \
-      any(fw.ecu == 'eps' and fw.fwVersion in STEER_TO_ZERO_EPS_FW for fw in car_fw)
-    if not steer_to_zero:
-      ret.minSteerSpeed = LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS
 
     ret.centerToFront = ret.wheelbase * 0.41
 
