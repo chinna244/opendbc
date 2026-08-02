@@ -130,16 +130,22 @@ class CarState(CarStateBase, CarStateExt):
         self.stock_radar_silent_frames += 1
       ret.accFaulted = self.stock_radar_silent_frames < STOCK_RADAR_GUARD_FRAMES
 
-      # FSC settle timer (the radar teardown gate): the camera broadcasts a
-      # boot-in-progress state on CAM_LANEINFO (NO_ERR_BIT + BIT2, pure boot markers
-      # clearing at 2.8-6.0 s and never set again while driving), then runs a
-      # radar-presence check in the following seconds. A latched fault (ERR_BIT) also
-      # shows the boot markers clear, so it must hold the timer at zero. The seen latch
-      # matters: before the first frame the parser reads all-zero, which would count as
-      # settled.
+      # FSC settle timer (the radar teardown gate): the camera broadcasts a boot-in-progress
+      # state on CAM_LANEINFO (NO_ERR_BIT, a pure boot marker clearing at 2.8-6.0 s and never
+      # set again while driving), then runs a radar-presence check in the following seconds.
+      # A latched fault (ERR_BIT) also shows the boot marker clear, so it must hold the timer
+      # at zero. The seen latch matters: before the first frame the parser reads all-zero,
+      # which would count as settled.
+      #
+      # BIT2 used to gate this too. It is byte-identical to NO_ERR_BIT on every frame of the
+      # 40 alpha-long routes this was developed against, so it carried no information there,
+      # but another CX-5 2022 with identical camera firmware (GSH7-67XK2-U) cold-booted with
+      # BIT2 latched high and NO_ERR_BIT clear for a whole ignition cycle. That pinned the
+      # timer at zero, so the radar was never silenced and the two-master guard held
+      # accFaulted for the entire drive with nothing to tell the driver why.
       self.cam_laneinfo_seen |= len(cp_cam.vl_all["CAM_LANEINFO"]["LANE_LINES"]) > 0
       laneinfo = cp_cam.vl["CAM_LANEINFO"]
-      settled = self.cam_laneinfo_seen and not any(laneinfo[s] for s in ("NO_ERR_BIT", "BIT2", "ERR_BIT"))
+      settled = self.cam_laneinfo_seen and not any(laneinfo[s] for s in ("NO_ERR_BIT", "ERR_BIT"))
       self.fsc_settled_frames = self.fsc_settled_frames + 1 if settled else 0
     else:
       # TODO: the signal used for available seems to be the adaptive cruise signal, instead of the main on
