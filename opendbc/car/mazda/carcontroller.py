@@ -1,7 +1,7 @@
 import numpy as np
 
 from opendbc.can import CANPacker
-from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, structs, uds
+from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, rate_limit, structs, uds
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.mazda import mazdacan
@@ -101,6 +101,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     new_actuators = CC.actuators.as_builder()
     new_actuators.torque = apply_torque / steer_max
     new_actuators.torqueOutputCan = apply_torque
+    # report what actually went on the wire, not the plan: the clip, the standstill hold values,
+    # the slew limit, and the zero we send through a gas override all live in accel_last
+    new_actuators.accel = self.accel_last
 
     self.frame += 1
     return new_actuators, can_sends
@@ -137,12 +140,11 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       self.virtual_resume_latched = True
 
     stopping = CC.actuators.longControlState == LongCtrlState.stopping
-    # A gas press is an override, not a disengagement: openpilot stops controlling, but stock
-    # MRCC stays engaged and eases its command off the brake while the PCM arbitrates the
-    # driver's pedal against it (analyze_gas_override.py over 576 stock segments: the engaged
-    # bits hold through 9 of 11 decel overrides). Dropping ACC_ACTIVE and the command in one
-    # frame instead hands the powertrain back mid-decel, so a light pedal input lands as a
-    # lurch and a rev flare. Stay engaged and release the command at a bounded rate.
+    # A gas press is an override, not a disengagement. The command goes to zero as everywhere
+    # else, but the engaged bits stay set off CC.enabled the way Honda drives ACC_CONTROL's
+    # CONTROL_ON. Clearing them mid-decel takes the PCM out of ACC mode as the driver adds
+    # throttle, so a light pedal input lands as a lurch and a rev flare; stock MRCC holds them
+    # through 9 of 11 decel overrides (analyze_gas_override.py, 576 stock segments).
     gas_override = CC.enabled and (CC.cruiseControl.override or CS.out.gasPressed)
     long_engaged = CC.longActive or gas_override
     sm = self.stop_and_go
@@ -154,6 +156,11 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     accel = 0.
     if CC.longActive:
       accel = float(np.clip(CC.actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+      # Slew limit the plan-following command. accel_last is tracked through overrides too, so
+      # taking control back when the driver lifts off ramps in instead of stepping. The hold and
+      # resume commands below are byte-exact stock replays and bypass the limit.
+      accel = rate_limit(accel, self.accel_last, CarControllerParams.ACCEL_WINDDOWN_LIMIT,
+                         CarControllerParams.ACCEL_WINDUP_LIMIT)
       if state == StopGoState.HOLD:
         accel = CarControllerParams.ACCEL_HOLD
       elif state in (StopGoState.HOLD_LATCHED, StopGoState.HOLD_PASSIVE):
@@ -161,12 +168,6 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       elif state == StopGoState.RESUMING:
         # brake-release window: let the car creep off the hold, never brake into it
         accel = max(accel, 0.)
-    elif gas_override:
-      # ease off whatever was commanded, and never ask for drive torque on top of the pedal.
-      # Pulling away from a standstill hold instead goes through the resume window, which is
-      # how stock releases the hold when the driver uses the gas rather than RES.
-      accel = 0. if state == StopGoState.RESUMING else \
-        min(0., self.accel_last + CarControllerParams.OVERRIDE_RELEASE_RATE * DT_CTRL)
     self.accel_last = accel
 
     lead_visible = CC.hudControl.leadVisible

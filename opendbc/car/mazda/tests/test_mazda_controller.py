@@ -285,6 +285,17 @@ def cc():
   return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
 
 
+def _long_frames(sends):
+  """(ACCEL_CMD raw, CRZ_INFO.ACC_ACTIVE, CRZ_CTRL.CRZ_ACTIVE) from a bus 0 emission, or None."""
+  info = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
+  ctrl = next((d for a, d, b in sends if a == 0x21c and b == 0), None)
+  if info is None:
+    return None
+  cp = CANParser("mazda_2017", [("CRZ_INFO", float("nan")), ("CRZ_CTRL", float("nan"))], 0)
+  cp.update([(0, [(0x21b, info, 0), (0x21c, ctrl, 0)])])
+  return decode_accel_cmd_raw(info), cp.vl["CRZ_INFO"]["ACC_ACTIVE"], cp.vl["CRZ_CTRL"]["CRZ_ACTIVE"]
+
+
 def _step(cc, **kw):
   kw.setdefault("long_state", structs.CarControl.Actuators.LongControlState.pid)
   control, control_sp, carstate = _mock_cc(**kw)
@@ -354,23 +365,14 @@ class TestLongitudinalIntegration:
     assert hold_seen, "strong -1024 hold command never emitted at standstill"
     assert latched_seen, "hold never relaxed to the latched -1 command"
 
-  def test_gas_override_stays_engaged_and_eases_off(self, cc):
-    """A gas press is an override, not a disengagement. Stock MRCC keeps ACC_ACTIVE and
-    CRZ_ACTIVE set and relaxes its command; dropping both in one frame hands the powertrain
-    back mid-decel, which the driver feels as a lurch (docs/mazda-gas-override.md)."""
+  def test_gas_override_stays_engaged(self, cc):
+    """A gas press is an override, not a disengagement. The command goes to zero as on every
+    other port, but the engaged bits stay set the way Honda drives CONTROL_ON off CC.enabled.
+    Clearing them mid-decel takes the PCM out of ACC mode (docs/mazda-gas-override.md)."""
     long = structs.CarControl.Actuators.LongControlState
 
-    def long_frames(sends):
-      info = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
-      ctrl = next((d for a, d, b in sends if a == 0x21c and b == 0), None)
-      if info is None:
-        return None
-      cp = CANParser("mazda_2017", [("CRZ_INFO", float("nan")), ("CRZ_CTRL", float("nan"))], 0)
-      cp.update([(0, [(0x21b, info, 0), (0x21c, ctrl, 0)])])
-      return decode_accel_cmd_raw(info), cp.vl["CRZ_INFO"]["ACC_ACTIVE"], cp.vl["CRZ_CTRL"]["CRZ_ACTIVE"]
-
     # braking hard, then the driver taps the gas
-    for _ in range(50):
+    for _ in range(200):
       _step(cc, long_state=long.pid, accel=-2.0, cruise_engaged=True)
     assert cc.accel_last == pytest.approx(-2.0)
 
@@ -378,26 +380,62 @@ class TestLongitudinalIntegration:
     for _ in range(100):  # 1 s of override
       sends = _step(cc, long_active=False, enabled=True, long_state=long.off, accel=0.,
                     gas=True, override=True, cruise_engaged=True)
-      frame = long_frames(sends)
+      frame = _long_frames(sends)
       if frame is not None:
         cmds.append(frame)
 
     raw, acc_active, crz_active = zip(*cmds, strict=True)
     assert all(acc_active), "ACC_ACTIVE dropped during a gas override"
     assert all(crz_active), "CRZ_ACTIVE dropped during a gas override"
-    # the command eases off the brake instead of stepping to zero
-    assert raw[0] < -1900, f"command dumped the brake on the first frame: {raw[0]}"
-    assert raw[-1] > raw[0], "command never released"
-    assert max(raw) <= 0, "openpilot asked for drive torque on top of the driver's pedal"
-    released = (raw[-1] - raw[0]) / 1000.
-    assert released == pytest.approx(CarControllerParams.OVERRIDE_RELEASE_RATE, abs=0.1), \
-      f"released {released:.2f} m/s2 in 1 s"
+    assert set(raw) == {0}, f"command should be zero through the override, got {sorted(set(raw))}"
 
-    # releasing the pedal with cruise still on hands control straight back
-    sends = _step(cc, long_state=long.pid, accel=-1.0, cruise_engaged=True)
-    cc.frame = 0
-    sends = _step(cc, long_state=long.pid, accel=-1.0, cruise_engaged=True)
-    assert long_frames(sends)[0] == -1000
+  def test_command_slew_is_rate_limited(self, cc):
+    """The plan can step; the wire should not. Windup is limited tightly because dumping the
+    brake in one frame is what the driver feels, winddown loosely so braking is never delayed."""
+    long = structs.CarControl.Actuators.LongControlState
+    for _ in range(200):
+      _step(cc, long_state=long.pid, accel=-2.0, cruise_engaged=True)
+    assert cc.accel_last == pytest.approx(-2.0)
+
+    # plan jumps straight to +1.0: the command must ramp, not step
+    prev = cc.accel_last
+    for _ in range(5):
+      _step(cc, long_state=long.pid, accel=1.0, cruise_engaged=True)
+      assert cc.accel_last - prev == pytest.approx(CarControllerParams.ACCEL_WINDUP_LIMIT, abs=1e-6)
+      prev = cc.accel_last
+
+    # and the other way, at the looser winddown limit
+    for _ in range(200):
+      _step(cc, long_state=long.pid, accel=1.0, cruise_engaged=True)
+    prev = cc.accel_last
+    for _ in range(5):
+      _step(cc, long_state=long.pid, accel=-3.0, cruise_engaged=True)
+      assert cc.accel_last - prev == pytest.approx(CarControllerParams.ACCEL_WINDDOWN_LIMIT, abs=1e-6)
+      prev = cc.accel_last
+
+  def test_accel_last_tracks_the_wire_not_the_plan(self, cc):
+    # update() reports accel_last as actuatorsOutput.accel, the way Toyota, Ford and Honda
+    # report the value they sent. It must be the wire value, clip and hold included.
+    long = structs.CarControl.Actuators.LongControlState
+
+    # a plan beyond the envelope is reported clipped, not as asked
+    for _ in range(400):
+      sends = _step(cc, long_state=long.pid, accel=-9.0, cruise_engaged=True)
+    assert cc.accel_last == pytest.approx(CarControllerParams.ACCEL_MIN)
+    frame = _long_frames(sends)
+    if frame is not None:
+      assert frame[0] == round(cc.accel_last * 1000)
+
+    # the standstill hold is a fixed stock replay, and that is what gets reported
+    for _ in range(int(0.5 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.5, standstill=True, cruise_engaged=True)
+    assert cc.accel_last == pytest.approx(CarControllerParams.ACCEL_HOLD)
+
+    # through a gas override we report the zero we actually send
+    for _ in range(10):
+      _step(cc, long_active=False, enabled=True, long_state=long.off, accel=0., gas=True,
+            override=True, cruise_engaged=True)
+    assert cc.accel_last == 0.
 
   def test_gas_from_standstill_hold_releases_the_brake(self, cc):
     # gas out of a hold is a resume, not a slow release: the hold command must go straight to

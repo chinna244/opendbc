@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from enum import IntFlag
 
-from opendbc.car import Bus, CarSpecs, DbcDict, PlatformConfig, Platforms
+from opendbc.car import Bus, CarSpecs, DbcDict, DT_CTRL, PlatformConfig, Platforms
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.structs import CarParams
 from opendbc.car.docs_definitions import CarHarness, CarDocs, CarParts
@@ -45,12 +45,13 @@ class CarControllerParams:
   ACCEL_HOLD = -1.024         # m/s2
   ACCEL_HOLD_LATCHED = -0.001  # m/s2
 
-  # Driver gas override: how fast the command may ease off the brake, m/s3. Stock holds its
-  # command for the first ~0.5 s of a press and then relaxes it about 0.6 m/s2 per second
-  # (tools/mazda_long/analyze_gas_override.py: 9 held decel overrides, cmd - cmd_pre goes
-  # -0.12 at +0.5 s, +0.14 at +1.0 s, +0.76 at +2.0 s). Ramping from the press instead of
-  # holding first is the permissive side of that.
-  OVERRIDE_RELEASE_RATE = 0.6
+  # Command slew limits, m/s3, on the plan-following command only. Asymmetric on purpose: the
+  # windup limit is what keeps the command from dumping the brake in one frame (the driver-felt
+  # problem), while a tight winddown limit would delay real braking for no measured benefit.
+  # 4.0 sits above the p99 of the plan's own up-slew on the reporter's route (p99 +3.2, p99.9
+  # +6.3, max +34 m/s3), so it only clips state-transition steps. Toyota uses 4.0 both ways.
+  ACCEL_WINDUP_LIMIT = 4.0 * DT_CTRL     # m/s2 per frame
+  ACCEL_WINDDOWN_LIMIT = -10.0 * DT_CTRL  # m/s2 per frame, clips only the p99.9+ steps
 
   def __init__(self, CP):
     # Gate the higher-authority steering tune on the CX-5 2022+ EPS, not the car model, so the
