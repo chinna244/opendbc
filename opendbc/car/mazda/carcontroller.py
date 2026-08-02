@@ -1,7 +1,7 @@
 import numpy as np
 
 from opendbc.can import CANPacker
-from opendbc.car import Bus, make_tester_present_msg, structs, uds
+from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, structs, uds
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.mazda import mazdacan
@@ -32,6 +32,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.long_counter = 0
     self.radar_counter = 0
     self.radar_session = RadarSessionManager()
+    self.accel_last = 0.
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -136,9 +137,16 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       self.virtual_resume_latched = True
 
     stopping = CC.actuators.longControlState == LongCtrlState.stopping
-    gas_override = CC.cruiseControl.override or CS.out.gasPressed
+    # A gas press is an override, not a disengagement: openpilot stops controlling, but stock
+    # MRCC stays engaged and eases its command off the brake while the PCM arbitrates the
+    # driver's pedal against it (analyze_gas_override.py over 576 stock segments: the engaged
+    # bits hold through 9 of 11 decel overrides). Dropping ACC_ACTIVE and the command in one
+    # frame instead hands the powertrain back mid-decel, so a light pedal input lands as a
+    # lurch and a rev flare. Stay engaged and release the command at a bounded rate.
+    gas_override = CC.enabled and (CC.cruiseControl.override or CS.out.gasPressed)
+    long_engaged = CC.longActive or gas_override
     sm = self.stop_and_go
-    state = sm.update(CC.longActive, stopping, CS.out.standstill,
+    state = sm.update(long_engaged, stopping, CS.out.standstill,
                       resume_pressed=bool(CS.resume_button),
                       virtual_resume=self.virtual_resume_latched,
                       gas_override=gas_override)
@@ -153,10 +161,17 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       elif state == StopGoState.RESUMING:
         # brake-release window: let the car creep off the hold, never brake into it
         accel = max(accel, 0.)
+    elif gas_override:
+      # ease off whatever was commanded, and never ask for drive torque on top of the pedal.
+      # Pulling away from a standstill hold instead goes through the resume window, which is
+      # how stock releases the hold when the driver uses the gas rather than RES.
+      accel = 0. if state == StopGoState.RESUMING else \
+        min(0., self.accel_last + CarControllerParams.OVERRIDE_RELEASE_RATE * DT_CTRL)
+    self.accel_last = accel
 
     lead_visible = CC.hudControl.leadVisible
     if radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:
-      synthetic_lead = CC.longActive and (lead_visible or state != StopGoState.CRUISING)
+      synthetic_lead = long_engaged and (lead_visible or state != StopGoState.CRUISING)
       for bus in LONG_BUSES:
         can_sends.extend(mazdacan.create_radar_frames(bus, self.radar_counter, synthetic_lead))
       self.radar_counter += 1
@@ -164,8 +179,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     if radar_master and self.frame % CarControllerParams.LONG_STEP == 0:
       acc_available = CS.out.cruiseState.available
       # mirror the driver's distance setting on the dash; stock shows gap 2 by default
-      gap = (int(CC.hudControl.leadDistanceBars) or 2) if (CC.longActive or acc_available) else 0
-      if CC.longActive:
+      gap = (int(CC.hudControl.leadDistanceBars) or 2) if (long_engaged or acc_available) else 0
+      if long_engaged:
         has_lead = sm.radar_has_lead(lead_visible)
         phase = sm.ctrl_phase(lead_visible)
         acc_active_2 = sm.acc_active_2
@@ -175,9 +190,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         acc_active_2 = False
       for bus in LONG_BUSES:
         can_sends.append(mazdacan.create_acc_command(self.packer, bus, self.long_counter, accel,
-                                                     CC.longActive, acc_available,
+                                                     long_engaged, acc_available,
                                                      stopping=sm.stop_bits, resume_unlatching=sm.resume_unlatching))
-        can_sends.append(mazdacan.create_crz_ctrl(self.packer, bus, CC.longActive, acc_available, gap,
+        can_sends.append(mazdacan.create_crz_ctrl(self.packer, bus, long_engaged, acc_available, gap,
                                                   has_lead, phase, acc_active_2))
       self.long_counter += 1
 

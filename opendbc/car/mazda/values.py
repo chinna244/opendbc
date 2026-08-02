@@ -45,6 +45,13 @@ class CarControllerParams:
   ACCEL_HOLD = -1.024         # m/s2
   ACCEL_HOLD_LATCHED = -0.001  # m/s2
 
+  # Driver gas override: how fast the command may ease off the brake, m/s3. Stock holds its
+  # command for the first ~0.5 s of a press and then relaxes it about 0.6 m/s2 per second
+  # (tools/mazda_long/analyze_gas_override.py: 9 held decel overrides, cmd - cmd_pre goes
+  # -0.12 at +0.5 s, +0.14 at +1.0 s, +0.76 at +2.0 s). Ramping from the press instead of
+  # holding first is the permissive side of that.
+  OVERRIDE_RELEASE_RATE = 0.6
+
   def __init__(self, CP):
     # Gate the higher-authority steering tune on the CX-5 2022+ EPS, not the car model, so the
     # CX-9 that shares this EPS and CX-5-EPS swaps keep it. steer_to_zero sets minSteerSpeed == 0
