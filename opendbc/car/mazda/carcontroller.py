@@ -63,12 +63,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.CANCEL))
     else:
       self.brake_counter = 0
-      if CC.cruiseControl.resume and self.frame % 5 == 0:
-        # Mazda Stop and Go requires a RES button (or gas) press if the car stops more than 3 seconds
-        # Send Resume button when planner wants car to move. With openpilot longitudinal the
-        # RES press asks the body ECU to leave its standstill hold; only meaningful from a stop.
-        if not self.CP.openpilotLongitudinalControl or CS.out.standstill:
-          can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.RESUME))
+      if self.resume_requested(CC, CS) and self.frame % 5 == 0:
+        can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.RESUME))
 
     self.apply_torque_last = apply_torque
 
@@ -104,6 +100,19 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     self.frame += 1
     return new_actuators, can_sends
+
+  def resume_requested(self, CC, CS) -> bool:
+    """Mazda stop-and-go needs a RES press (or gas) to leave a hold more than a few seconds old.
+
+    Under openpilot longitudinal, ask for exactly as long as the plan is asking to move and the
+    car has not moved yet. CC.cruiseControl.resume is the wrong trigger for that: it keys on
+    cruiseState standstill, which drops for ~3 s after a press and so drops the request while
+    the car is still stopped (Toyota documents the same trap), and on the planner rather than on
+    the command, which puts the press out before we are commanding anything positive.
+    """
+    if not self.CP.openpilotLongitudinalControl:
+      return CC.cruiseControl.resume
+    return CC.longActive and CS.out.standstill and CC.actuators.accel > 0.
 
   def update_longitudinal(self, CC, CC_SP, CS):
     can_sends = []

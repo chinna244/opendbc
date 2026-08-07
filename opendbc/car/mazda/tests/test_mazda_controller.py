@@ -524,6 +524,37 @@ class TestLongitudinalIntegration:
     assert all(d[:7] == empty[:7] for d in released), \
       f"fabricated lead survived the release: {released[0].hex()}"
 
+  def test_resume_asks_while_the_plan_wants_to_move_and_the_car_has_not(self, cc):
+    # the RES press has to outlast cruiseState.standstill, which drops for ~3 s after a press,
+    # so it is keyed on the car actually still being stopped
+    control, _, carstate = _mock_cc(standstill=True, accel=0.3)
+    assert cc.resume_requested(control, carstate)
+
+    # plan still braking: no press, even though the car is sitting in a hold
+    control, _, carstate = _mock_cc(standstill=True, accel=-1.024)
+    assert not cc.resume_requested(control, carstate)
+
+    # car is rolling: the hold is gone, stop asking
+    control, _, carstate = _mock_cc(standstill=False, accel=0.3)
+    assert not cc.resume_requested(control, carstate)
+
+    # not longitudinally active: never our press to send
+    control, _, carstate = _mock_cc(long_active=False, enabled=True, standstill=True, accel=0.3)
+    assert not cc.resume_requested(control, carstate)
+
+  def test_resume_matches_the_hold_release(self, cc):
+    # the press and the release run off the same condition, so the body is never asked to let
+    # go while we are still commanding the brake
+    long = structs.CarControl.Actuators.LongControlState
+    for _ in range(200):
+      _step(cc, long_state=long.stopping, accel=-1.024, standstill=True, cruise_engaged=True)
+    control, _, carstate = _mock_cc(standstill=True, accel=-1.024)
+    assert cc.stop_and_go.holding and not cc.resume_requested(control, carstate)
+
+    _step(cc, long_state=long.pid, accel=0.3, standstill=True, cruise_engaged=True)
+    control, _, carstate = _mock_cc(standstill=True, accel=0.3)
+    assert not cc.stop_and_go.holding and cc.resume_requested(control, carstate)
+
   def test_gas_pedal_without_cruise_stays_disengaged(self, cc):
     # gas pressed while openpilot is not enabled must not advertise an engaged ACC
     off = structs.CarControl.Actuators.LongControlState.off
