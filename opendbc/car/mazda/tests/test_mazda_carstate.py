@@ -75,3 +75,26 @@ class TestFscSettleGate:
     for i in range(int(CarControllerParams.FSC_SETTLE_T * 2 / DT_CTRL)):
       CI.update([(int(i * DT_CTRL * 1e9), [])])
     assert not CI.CS.fsc_settled
+
+
+class TestBrakeHold:
+  """GEAR.BRAKE_HOLD is the body ECU reporting that it owns the standstill hold. Stock relaxes
+  its own command the instant this sets, so the payloads below come straight off the two logs
+  that pinned the signal down: a hold that latched (route caace206f6 seg 8, 0x17 at 1157.34 s)
+  and one that never did (route 00000065 seg 4, stuck at 0x07 while the car crept)."""
+
+  @pytest.mark.parametrize(("payload", "expected"), [
+    ("142007ff02f00000", False),  # hold not taken over: keep braking
+    ("142017ff02f00000", True),   # body has the brakes
+    ("14200fff02f00000", False),  # released again at the resume
+  ])
+  def test_decodes_the_hold_bit(self, payload, expected):
+    CI = _interface()
+    # CANParser registers a message lazily on first access, so the first frame only arms it
+    for i in range(2):
+      CI.update([(int(i * DT_CTRL * 1e9), [(0x228, bytes.fromhex(payload), 0)])])
+    assert CI.CS.brake_hold is expected
+
+  def test_defaults_to_not_held(self):
+    # nothing parsed yet must read as "the car is not holding", the direction that keeps braking
+    assert not _interface().CS.brake_hold

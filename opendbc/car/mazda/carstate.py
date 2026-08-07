@@ -37,6 +37,8 @@ class CarState(CarStateBase, CarStateExt):
     self.stock_radar_silent_frames = 0
     self.cam_laneinfo_seen = False
     self.fsc_settled_frames = 0
+    # the body ECU has taken the standstill hold over and is holding the brakes itself
+    self.brake_hold = False
 
   @property
   def fsc_settled(self) -> bool:
@@ -66,6 +68,7 @@ class CarState(CarStateBase, CarStateExt):
 
     can_gear = int(cp.vl["GEAR"]["GEAR"])
     ret.gearShifter = self.parse_gear_shifter(self.shifter_values.get(can_gear, None))
+    self.brake_hold = cp.vl["GEAR"]["BRAKE_HOLD"] == 1
 
     ret.genericToggle = bool(cp.vl["BLINK_INFO"]["HIGH_BEAMS"])
     ret.leftBlindspot = cp.vl["BSM"]["LEFT_BS_STATUS"] != 0
