@@ -69,114 +69,77 @@ class RadarSessionManager:
     return self.state
 
 
-HOLD_CTRL_LATCH_FRAMES = int(CarControllerParams.HOLD_CTRL_LATCH_T / DT_CTRL)
-HOLD_LATCH_FRAMES = int(CarControllerParams.HOLD_LATCH_T / DT_CTRL)
-HOLD_PASSIVE_FRAMES = int(CarControllerParams.HOLD_PASSIVE_T / DT_CTRL)
-RESUME_RELEASE_FRAMES = int(CarControllerParams.RESUME_RELEASE_T / DT_CTRL)
-RESUME_REACTIVATE_FRAMES = int(CarControllerParams.RESUME_REACTIVATE_T / DT_CTRL)
 RESUME_UNLATCH_FRAMES = int(CarControllerParams.RESUME_UNLATCH_T / DT_CTRL)
 
 
-class StopGoState(StrEnum):
-  CRUISING = "cruising"
-  STOPPING = "stopping"
-  HOLD = "hold"
-  HOLD_LATCHED = "hold latched"
-  HOLD_PASSIVE = "hold passive"
-  RESUMING = "resuming"
+class StandstillHold:
+  """Holds the car stopped until the plan asks to move, the way Toyota and Honda do it.
 
+  Both upstream ports drive the standstill request straight off the plan and off car feedback,
+  with no timers in the path: Toyota clears its request on `actuators.accel > 0` and re-asserts
+  it whenever the plan is not asking to move, and Honda asserts STANDSTILL for exactly as long
+  as long control is in its stopping state. Neither ever substitutes a canned command for the
+  plan's own -- LongControl already parks at CP.stopAccel while stopping, which for this car is
+  the stock hold value.
 
-class StopAndGoStateMachine:
-  """Replays stock MRCC's stop-and-go sequence: ramp to a stop, hold at -1.024 m/s2,
-  relax to the latched hold, drop to the passive hold on long stops, and release
-  through a short brake-release window on resume."""
+  The relax off that hold is the one thing the car, not the plan, decides: stock lets go the
+  instant the body ECU latches its own brake hold (GEAR.BRAKE_HOLD), which can take anywhere
+  from nothing to several seconds. If the latch never comes we simply keep braking.
+
+  Nothing here latches: `holding` is recomputed every frame, so a plan that changes its mind
+  gets the hold straight back.
+  """
 
   def __init__(self):
     self._reset()
 
   def _reset(self):
-    self.state = StopGoState.CRUISING
-    self.hold_frames = 0
-    self.release_frames = 0
-    self.reactivate_frames = 0
+    self.holding = False
+    self.car_has_hold = False
     self.unlatch_frames = 0
 
   def update(self, long_active: bool, stopping: bool, standstill: bool,
-             resume_pressed: bool = False, virtual_resume: bool = False,
-             gas_override: bool = False) -> StopGoState:
+             plan_accel: float, brake_hold: bool) -> None:
     if not long_active:
       self._reset()
-      return self.state
+      return
 
-    if self.state == StopGoState.CRUISING:
-      if stopping:
-        self.state = StopGoState.STOPPING
+    was_holding = self.holding
+    # the plan asking for acceleration is the only thing that releases the hold
+    if plan_accel > 0.:
+      self.holding = False
+    elif stopping or standstill:
+      self.holding = True
 
-    elif self.state == StopGoState.STOPPING:
-      if standstill:
-        self.state = StopGoState.HOLD
-        self.hold_frames = 0
-      elif not stopping:
-        self.state = StopGoState.CRUISING
+    if self.unlatch_frames > 0:
+      self.unlatch_frames -= 1
+    if was_holding and not self.holding and standstill:
+      self.unlatch_frames = RESUME_UNLATCH_FRAMES
 
-    elif self.state in (StopGoState.HOLD, StopGoState.HOLD_LATCHED, StopGoState.HOLD_PASSIVE):
-      self.hold_frames += 1
-      # Stock's earliest observed hold release comes after the 2 s CRZ_CTRL latch, so a
-      # physical RES waits for it. A virtual resume additionally waits for the relaxed
-      # hold command so a transient plan flicker cannot release the hold early.
-      ctrl_latched = self.hold_frames >= HOLD_CTRL_LATCH_FRAMES
-      resume = (resume_pressed and ctrl_latched) or (virtual_resume and self.state != StopGoState.HOLD)
-      if gas_override or resume:
-        # stock briefly re-raises the latched profile when resuming out of a passive hold
-        self.reactivate_frames = RESUME_REACTIVATE_FRAMES if self.state == StopGoState.HOLD_PASSIVE else 0
-        self.release_frames = RESUME_RELEASE_FRAMES
-        self.unlatch_frames = RESUME_UNLATCH_FRAMES
-        self.state = StopGoState.RESUMING
-      elif self.hold_frames >= HOLD_PASSIVE_FRAMES:
-        self.state = StopGoState.HOLD_PASSIVE
-      elif self.hold_frames >= HOLD_LATCH_FRAMES:
-        self.state = StopGoState.HOLD_LATCHED
-
-    elif self.state == StopGoState.RESUMING:
-      if self.reactivate_frames > 0:
-        self.reactivate_frames -= 1
-      elif self.unlatch_frames > 0:
-        self.unlatch_frames -= 1
-      if resume_pressed or virtual_resume or gas_override:
-        # keep the brake released while the resume request holds
-        self.release_frames = RESUME_RELEASE_FRAMES
-      else:
-        self.release_frames -= 1
-      if self.release_frames <= 0:
-        # re-hold if the car never moved, otherwise hand control back to the plan
-        self.state = StopGoState.HOLD if standstill else StopGoState.CRUISING
-        self.hold_frames = 0
-
-    return self.state
+    # the body only owns the brakes while we are still asking it to hold
+    self.car_has_hold = self.holding and standstill and brake_hold
 
   @property
   def stop_bits(self) -> bool:
-    # CRZ_INFO stop flags are held through the approach and the strong hold, and clear
-    # once the hold command relaxes
-    return self.state in (StopGoState.STOPPING, StopGoState.HOLD)
+    # CRZ_INFO stop flags are held through the approach and the hold, and clear when the car
+    # takes over and the command relaxes
+    return self.holding and not self.car_has_hold
 
   @property
   def resume_unlatching(self) -> bool:
-    return self.state == StopGoState.RESUMING and self.reactivate_frames == 0 and self.unlatch_frames > 0
+    return self.unlatch_frames > 0
 
   @property
   def acc_active_2(self) -> bool:
-    # stock drops ACC_ACTIVE_2 together with the command relax at the hold latch
-    return self.state not in (StopGoState.HOLD_LATCHED, StopGoState.HOLD_PASSIVE)
+    # stock drops ACC_ACTIVE_2 together with the command relax
+    return not self.car_has_hold
 
   def radar_has_lead(self, lead_visible: bool) -> bool:
-    return lead_visible or self.state in (StopGoState.STOPPING, StopGoState.HOLD,
-                                          StopGoState.HOLD_LATCHED, StopGoState.HOLD_PASSIVE)
+    return lead_visible or self.holding
 
   def ctrl_phase(self, lead_visible: bool) -> int:
-    # RADAR_LEAD_RELATIVE_DISTANCE: 1 cruise, 2 follow, 3 stop/hold, 4 hold-far. Stock holds a
-    # constant stop phase through the whole hold and drops to follow on resume; without a real
-    # lead distance we advertise the near stop phase (3) throughout the hold.
-    if self.state == StopGoState.CRUISING:
-      return 2 if lead_visible else 1
-    return 3
+    # RADAR_LEAD_RELATIVE_DISTANCE: 1 cruise, 2 follow, 3 stop/hold. Stock holds a constant stop
+    # phase through the whole hold and drops to follow on release.
+    if self.holding:
+      return 3
+    return 2 if lead_visible else 1

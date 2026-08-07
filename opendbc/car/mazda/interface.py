@@ -35,7 +35,7 @@ class CarInterface(CarInterfaceBase):
       # PEDALS.ACC_ACTIVE, and the dash-owned CRZ_EVENTS setpoint survives the radar teardown
       ret.pcmCruise = True
       ret.radarUnavailable = True
-      ret.stopAccel = -1.0  # stock MRCC holds raw -1024 (-1.024 m/s2) at a stop
+      ret.stopAccel = -1.024  # stock MRCC holds raw -1024 at a stop; the plan parks here and we send it as-is
       ret.longitudinalActuatorDelay = 0.36  # measured ~0.3 s dead time + ~0.3 s first-order lag
 
     # Older Mazdas are dashcam only for one reason: their EPS locks steering out after ~5 s of

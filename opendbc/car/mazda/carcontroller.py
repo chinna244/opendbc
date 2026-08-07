@@ -1,12 +1,12 @@
 import numpy as np
 
 from opendbc.can import CANPacker
-from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, rate_limit, structs, uds
+from opendbc.car import Bus, make_tester_present_msg, rate_limit, structs, uds
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.mazda import mazdacan
-from opendbc.car.mazda.longitudinal import (RADAR_ADDR, RadarSessionManager, RadarSessionState, StopAndGoStateMachine,
-                                            StopGoState, create_radar_session_msg)
+from opendbc.car.mazda.longitudinal import (RADAR_ADDR, RadarSessionManager, RadarSessionState, StandstillHold,
+                                            create_radar_session_msg)
 from opendbc.car.mazda.values import CarControllerParams, Buttons
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
@@ -27,8 +27,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.apply_torque_last = 0
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.brake_counter = 0
-    self.stop_and_go = StopAndGoStateMachine()
-    self.virtual_resume_latched = False
+    self.stop_and_go = StandstillHold()
     self.long_counter = 0
     self.radar_counter = 0
     self.radar_session = RadarSessionManager()
@@ -52,7 +51,6 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
                                                       CS.out.steeringTorque, self.params, steer_max)
 
-    virtual_resume_sent = False
     if CC.cruiseControl.cancel:
       # If brake is pressed, let us wait >70ms before trying to disable crz to avoid
       # a race condition with the stock system, where the second cancel from openpilot
@@ -71,12 +69,11 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         # RES press asks the body ECU to leave its standstill hold; only meaningful from a stop.
         if not self.CP.openpilotLongitudinalControl or CS.out.standstill:
           can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.RESUME))
-          virtual_resume_sent = self.CP.openpilotLongitudinalControl
 
     self.apply_torque_last = apply_torque
 
     if self.CP.openpilotLongitudinalControl:
-      can_sends.extend(self.update_longitudinal(CC, CC_SP, CS, virtual_resume_sent))
+      can_sends.extend(self.update_longitudinal(CC, CC_SP, CS))
 
     # send HUD alerts
     if self.frame % 50 == 0:
@@ -108,7 +105,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.frame += 1
     return new_actuators, can_sends
 
-  def update_longitudinal(self, CC, CC_SP, CS, virtual_resume_sent):
+  def update_longitudinal(self, CC, CC_SP, CS):
     can_sends = []
 
     # Radar session sequencing: hold off the teardown until the FSC's cold-boot
@@ -133,12 +130,6 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         # keeps the radar in its diagnostic session, and with it the stock frames silenced
         can_sends.append(make_tester_present_msg(RADAR_ADDR, 0, suppress_response=True))
 
-    # only trust a virtual resume once a RES frame has actually gone out on the bus
-    if not CC.cruiseControl.resume or not CS.out.standstill:
-      self.virtual_resume_latched = False
-    elif virtual_resume_sent:
-      self.virtual_resume_latched = True
-
     stopping = CC.actuators.longControlState == LongCtrlState.stopping
     # A gas press is an override, not a disengagement. The command goes to zero as everywhere
     # else, but the engaged bits stay set off CC.enabled the way Honda drives ACC_CONTROL's
@@ -148,26 +139,18 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     gas_override = CC.enabled and (CC.cruiseControl.override or CS.out.gasPressed)
     long_engaged = CC.longActive or gas_override
     sm = self.stop_and_go
-    state = sm.update(long_engaged, stopping, CS.out.standstill,
-                      resume_pressed=bool(CS.resume_button),
-                      virtual_resume=self.virtual_resume_latched,
-                      gas_override=gas_override)
+    sm.update(long_engaged, stopping, CS.out.standstill, CC.actuators.accel, CS.brake_hold)
 
     accel = 0.
     if CC.longActive:
       accel = float(np.clip(CC.actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
       # Slew limit the plan-following command. accel_last is tracked through overrides too, so
-      # taking control back when the driver lifts off ramps in instead of stepping. The hold and
-      # resume commands below are byte-exact stock replays and bypass the limit.
+      # taking control back when the driver lifts off ramps in instead of stepping.
       accel = rate_limit(accel, self.accel_last, CarControllerParams.ACCEL_WINDDOWN_LIMIT,
                          CarControllerParams.ACCEL_WINDUP_LIMIT)
-      if state == StopGoState.HOLD:
-        accel = CarControllerParams.ACCEL_HOLD
-      elif state in (StopGoState.HOLD_LATCHED, StopGoState.HOLD_PASSIVE):
+      if sm.car_has_hold:
+        # the body ECU is holding the brakes itself, so stop asking for them like stock does
         accel = CarControllerParams.ACCEL_HOLD_LATCHED
-      elif state == StopGoState.RESUMING:
-        # brake-release window: let the car creep off the hold, never brake into it
-        accel = max(accel, 0.)
     self.accel_last = accel
 
     lead_visible = CC.hudControl.leadVisible

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Tests for the Mazda CX-5 2022+ EPS steering parameters (gated on the EPS, not the model)
-and the longitudinal message builders and stop-and-go state machine."""
+and the longitudinal message builders and standstill hold."""
 
 from types import SimpleNamespace
 
@@ -8,12 +8,10 @@ import numpy as np
 import pytest
 
 from opendbc.can import CANPacker, CANParser
-from opendbc.car import Bus, structs
+from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.carcontroller import CarController
-from opendbc.car.mazda.longitudinal import (HOLD_CTRL_LATCH_FRAMES, HOLD_LATCH_FRAMES, HOLD_PASSIVE_FRAMES,
-                                            RESUME_REACTIVATE_FRAMES, RESUME_RELEASE_FRAMES, RESUME_UNLATCH_FRAMES,
-                                            StopAndGoStateMachine, StopGoState)
+from opendbc.car.mazda.longitudinal import RESUME_UNLATCH_FRAMES, StandstillHold
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams
 
@@ -188,97 +186,101 @@ class TestMazdaLongitudinalMessages:
     assert dat[5:] == mazdacan.LEAD_TRACK_TEMPLATE[5:]
 
 
-class TestStopAndGoStateMachine:
+class TestStandstillHold:
 
   @pytest.fixture
   def sm(self):
-    return StopAndGoStateMachine()
+    return StandstillHold()
 
   @staticmethod
   def run(sm, frames, **kwargs):
-    defaults = dict(long_active=True, stopping=False, standstill=False,
-                    resume_pressed=False, virtual_resume=False, gas_override=False)
+    defaults = dict(long_active=True, stopping=False, standstill=False, plan_accel=-1.024,
+                    brake_hold=False)
     defaults.update(kwargs)
     for _ in range(frames):
-      state = sm.update(**defaults)
-    return state
+      sm.update(**defaults)
+    return sm
 
-  def test_full_stop_cycle_virtual_resume(self, sm):
-    assert self.run(sm, 1) == StopGoState.CRUISING
-    assert self.run(sm, 1, stopping=True) == StopGoState.STOPPING
-    assert self.run(sm, 1, stopping=True, standstill=True) == StopGoState.HOLD
-    assert sm.stop_bits
+  def test_holds_while_the_plan_is_stopping(self, sm):
+    self.run(sm, 1)
+    assert not sm.holding
+    self.run(sm, 1, stopping=True)
+    assert sm.holding and sm.stop_bits and sm.acc_active_2
+    assert sm.ctrl_phase(lead_visible=True) == 3
+    # arriving at a standstill changes nothing: the plan is still asking for the brakes
+    self.run(sm, 500, stopping=True, standstill=True)
+    assert sm.holding and sm.stop_bits
 
-    # a virtual resume cannot release the strong hold phase
-    assert self.run(sm, HOLD_LATCH_FRAMES - 2, stopping=True, standstill=True, virtual_resume=True) == StopGoState.HOLD
+  def test_hold_never_relaxes_on_its_own(self, sm):
+    # the creep-into-the-lead regression: without the car taking the hold over, the command
+    # must stay on the plan's brake no matter how long the stop lasts
+    self.run(sm, 1, stopping=True)
+    self.run(sm, int(30.0 / DT_CTRL), stopping=True, standstill=True)
+    assert sm.holding and sm.stop_bits and sm.acc_active_2
+    assert not sm.car_has_hold
 
-    assert self.run(sm, 2, stopping=True, standstill=True) == StopGoState.HOLD_LATCHED
-    assert not sm.stop_bits
-    assert self.run(sm, HOLD_PASSIVE_FRAMES, stopping=True, standstill=True) == StopGoState.HOLD_PASSIVE
-    assert not sm.acc_active_2
+  def test_relax_follows_the_car_taking_the_hold(self, sm):
+    self.run(sm, 1, stopping=True)
+    self.run(sm, 10, stopping=True, standstill=True)
+    assert not sm.car_has_hold
+    self.run(sm, 1, stopping=True, standstill=True, brake_hold=True)
+    # stop bits and ACC_ACTIVE_2 drop with the command, together, exactly as stock does
+    assert sm.car_has_hold and not sm.stop_bits and not sm.acc_active_2
+    # and it is not a latch: if the car lets go, we brake again
+    self.run(sm, 1, stopping=True, standstill=True, brake_hold=False)
+    assert not sm.car_has_hold and sm.stop_bits and sm.acc_active_2
 
-    # resume out of the passive hold: latched-profile blip, then the unlatch pulse
-    assert self.run(sm, 1, stopping=True, standstill=True, virtual_resume=True) == StopGoState.RESUMING
-    assert not sm.resume_unlatching
-    self.run(sm, RESUME_REACTIVATE_FRAMES, stopping=True, standstill=True, virtual_resume=True)
+  def test_released_when_the_plan_asks_to_move(self, sm):
+    self.run(sm, 1, stopping=True)
+    self.run(sm, 500, stopping=True, standstill=True, brake_hold=True)
+    assert sm.holding
+    self.run(sm, 1, standstill=True, plan_accel=0.1)
+    assert not sm.holding and not sm.car_has_hold
     assert sm.resume_unlatching
-    self.run(sm, RESUME_UNLATCH_FRAMES, stopping=True, standstill=True, virtual_resume=True)
+    assert sm.ctrl_phase(lead_visible=True) == 2
+
+  def test_release_holds_for_as_long_as_the_plan_wants_to_move(self, sm):
+    # the failed-resume regression: no release window to run out from under the plan
+    self.run(sm, 1, stopping=True)
+    self.run(sm, 100, stopping=True, standstill=True)
+    self.run(sm, int(5.0 / DT_CTRL), standstill=True, plan_accel=0.4)
+    assert not sm.holding and not sm.stop_bits
+
+  def test_hold_comes_back_if_the_plan_changes_its_mind(self, sm):
+    self.run(sm, 1, stopping=True)
+    self.run(sm, 100, stopping=True, standstill=True)
+    self.run(sm, 5, standstill=True, plan_accel=0.2)
+    assert not sm.holding
+    self.run(sm, 1, stopping=True, standstill=True, plan_accel=-1.0)
+    assert sm.holding and sm.stop_bits
+
+  def test_unlatch_pulses_once_at_the_release(self, sm):
+    self.run(sm, 1, stopping=True)
+    self.run(sm, 100, stopping=True, standstill=True)
     assert not sm.resume_unlatching
-
-    # car creeps off the hold, request clears, release window runs out
-    assert self.run(sm, RESUME_RELEASE_FRAMES, stopping=False, standstill=False) == StopGoState.CRUISING
-
-  def test_hold_command_relaxes_at_latch(self, sm):
-    self.run(sm, 1, stopping=True)
-    self.run(sm, 1, stopping=True, standstill=True)
-    # strong hold with stop bits and ACC_ACTIVE_2 set, near stop phase
-    assert sm.state == StopGoState.HOLD
-    assert sm.stop_bits and sm.acc_active_2
-    assert sm.ctrl_phase(lead_visible=True) == 3
-    # after the measured 3.8 s the command relaxes: stop bits and ACC_ACTIVE_2 clear together
-    self.run(sm, HOLD_LATCH_FRAMES, stopping=True, standstill=True)
-    assert sm.state == StopGoState.HOLD_LATCHED
-    assert not sm.stop_bits and not sm.acc_active_2
-    assert sm.ctrl_phase(lead_visible=True) == 3
-
-  def test_physical_res_waits_for_ctrl_latch(self, sm):
-    self.run(sm, 1, stopping=True)
-    self.run(sm, 1, stopping=True, standstill=True)
-    # earlier than any stock-observed release: RES is ignored
-    assert self.run(sm, 10, stopping=True, standstill=True, resume_pressed=True) == StopGoState.HOLD
-    self.run(sm, HOLD_CTRL_LATCH_FRAMES, stopping=True, standstill=True)
-    assert self.run(sm, 1, stopping=True, standstill=True, resume_pressed=True) == StopGoState.RESUMING
-
-  def test_gas_releases_hold_immediately(self, sm):
-    self.run(sm, 1, stopping=True)
-    self.run(sm, 1, stopping=True, standstill=True)
-    assert self.run(sm, 1, stopping=True, standstill=True, gas_override=True) == StopGoState.RESUMING
-
-  def test_rehold_when_car_does_not_move(self, sm):
-    self.run(sm, 1, stopping=True)
-    self.run(sm, HOLD_LATCH_FRAMES + 2, stopping=True, standstill=True)
-    self.run(sm, 1, stopping=True, standstill=True, virtual_resume=True)
-    # request disappears, car never moved: fall back into a fresh hold
-    assert self.run(sm, RESUME_RELEASE_FRAMES, stopping=True, standstill=True) == StopGoState.HOLD
-    assert sm.hold_frames == 0
-    assert sm.stop_bits
+    self.run(sm, 1, standstill=True, plan_accel=0.1)
+    assert sm.resume_unlatching
+    self.run(sm, RESUME_UNLATCH_FRAMES, standstill=True, plan_accel=0.1)
+    assert not sm.resume_unlatching
 
   def test_long_disengage_resets(self, sm):
     self.run(sm, 1, stopping=True)
-    self.run(sm, HOLD_LATCH_FRAMES + 2, stopping=True, standstill=True)
-    assert self.run(sm, 1, long_active=False) == StopGoState.CRUISING
-    assert sm.hold_frames == 0
+    self.run(sm, 100, stopping=True, standstill=True, brake_hold=True)
+    self.run(sm, 1, long_active=False)
+    assert not sm.holding and not sm.car_has_hold and not sm.stop_bits
 
-  def test_stop_abort_returns_to_cruising(self, sm):
+  def test_stop_abort_releases(self, sm):
     self.run(sm, 1, stopping=True)
+    assert sm.holding
     # lead speeds up again before the car reaches standstill
-    assert self.run(sm, 1, stopping=False) == StopGoState.CRUISING
+    self.run(sm, 1, stopping=False, plan_accel=0.3)
+    assert not sm.holding
 
 
 def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas=False, override=False,
              resume=False, lead_visible=True, gap=2, available=True,
              stock_radar_alive=False, fsc_settled=True, handback=False, cruise_engaged=False,
-             enabled=None, lead_d_rel=12.0, lead_v_rel=0.0):
+             enabled=None, lead_d_rel=12.0, lead_v_rel=0.0, brake_hold=False):
   # openpilot is enabled whenever it is longitudinally active; a gas override is the case
   # where it stays enabled with longActive low
   enabled = long_active if enabled is None else enabled
@@ -291,7 +293,7 @@ def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas
                        cruiseControl=cruise, hudControl=hud)
   cc_sp = SimpleNamespace(stockEcuHandBack=handback,
                           leadOne=SimpleNamespace(dRel=lead_d_rel, vRel=lead_v_rel))
-  cs = SimpleNamespace(out=out, resume_button=0,
+  cs = SimpleNamespace(out=out, resume_button=0, brake_hold=brake_hold,
                        stock_radar_alive=stock_radar_alive, fsc_settled=fsc_settled)
   return cc, cc_sp, cs
 
@@ -326,7 +328,7 @@ def _lead_track(dat):
 def _step(cc, **kw):
   kw.setdefault("long_state", structs.CarControl.Actuators.LongControlState.pid)
   control, control_sp, carstate = _mock_cc(**kw)
-  sends = cc.update_longitudinal(control, control_sp, carstate, virtual_resume_sent=False)
+  sends = cc.update_longitudinal(control, control_sp, carstate)
   cc.frame += 1
   return sends
 
@@ -378,19 +380,24 @@ class TestLongitudinalIntegration:
     # approach the stop
     for _ in range(int(0.5 / 0.01)):
       _step(cc, long_state=long.stopping, accel=-1.5, standstill=False)
-    # reach standstill: expect the strong hold command
-    hold_seen = latched_seen = False
-    for _ in range(int(8.0 / 0.01)):
-      sends = _step(cc, long_state=long.stopping, accel=-1.5, standstill=True)
-      cmd = accel_cmd(sends)
-      if cmd is None:
-        continue
-      if cmd == round(CarControllerParams.ACCEL_HOLD * 1000):
-        hold_seen = True
-      if hold_seen and cmd == round(CarControllerParams.ACCEL_HOLD_LATCHED * 1000):
-        latched_seen = True
-    assert hold_seen, "strong -1024 hold command never emitted at standstill"
-    assert latched_seen, "hold never relaxed to the latched -1 command"
+    # hold at a standstill: the command is the plan's own and must not relax on its own, no
+    # matter how long the stop lasts (the creep-into-the-lead regression)
+    cmds = []
+    for _ in range(int(30.0 / 0.01)):
+      cmd = accel_cmd(_step(cc, long_state=long.stopping, accel=-1.024, standstill=True))
+      if cmd is not None:
+        cmds.append(cmd)
+    settled = cmds[len(cmds) // 2:]
+    assert settled and set(settled) == {-1024}, f"hold command drifted off the plan: {sorted(set(settled))}"
+
+    # once the body ECU takes the hold over, stock stops asking for the brakes and so do we
+    relaxed = []
+    for _ in range(int(1.0 / 0.01)):
+      cmd = accel_cmd(_step(cc, long_state=long.stopping, accel=-1.024, standstill=True,
+                            brake_hold=True))
+      if cmd is not None:
+        relaxed.append(cmd)
+    assert relaxed and set(relaxed) == {round(CarControllerParams.ACCEL_HOLD_LATCHED * 1000)}
 
   def test_gas_override_stays_engaged(self, cc):
     """A gas press is an override, not a disengagement. The command goes to zero as on every
@@ -453,10 +460,10 @@ class TestLongitudinalIntegration:
     if frame is not None:
       assert frame[0] == round(cc.accel_last * 1000)
 
-    # the standstill hold is a fixed stock replay, and that is what gets reported
+    # the standstill hold is the plan's own command, and that is what gets reported
     for _ in range(int(0.5 / 0.01)):
       _step(cc, long_state=long.stopping, accel=-1.5, standstill=True, cruise_engaged=True)
-    assert cc.accel_last == pytest.approx(CarControllerParams.ACCEL_HOLD)
+    assert cc.accel_last == pytest.approx(-1.5)
 
     # through a gas override we report the zero we actually send
     for _ in range(10):
@@ -509,10 +516,9 @@ class TestLongitudinalIntegration:
     assert all(_lead_track(d)[0] == pytest.approx(mazdacan.LEAD_TRACK_DIST) for d in held)
 
     released = []
-    for _ in range(RESUME_RELEASE_FRAMES // 2):
-      released += tracks(_step(cc, long_active=False, enabled=True, long_state=long.off, accel=0.,
-                               gas=True, override=True, standstill=True, lead_visible=False,
-                               cruise_engaged=True))
+    for _ in range(50):
+      released += tracks(_step(cc, long_state=long.pid, accel=0.3, standstill=True,
+                               lead_visible=False, cruise_engaged=True))
     assert released
     empty = mazdacan.RADAR_TRACK_MSGS[0x364]
     assert all(d[:7] == empty[:7] for d in released), \

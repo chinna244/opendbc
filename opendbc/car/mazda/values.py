@@ -32,17 +32,13 @@ class CarControllerParams:
   STOCK_RADAR_ALIVE_T = 0.05  # stock CRZ_INFO runs at 50 Hz; silent this long = torn down
   STOCK_RADAR_GUARD_T = 1.0   # two-master guard: block engagement until silent this long
 
-  # Stop-and-go phase timing, seconds, measured from stock MRCC captures
-  # (tools/mazda_long/analyze_hold_resume.py, 34 episodes)
-  HOLD_CTRL_LATCH_T = 2.0      # earliest a physical RES is honored out of the hold
-  HOLD_LATCH_T = 3.8           # command relaxes -1024 -> -1, stop bits + ACC_ACTIVE_2 clear
-  HOLD_PASSIVE_T = 9.6         # long-hold substate, kept for the RES-resume reactivation blip
-  RESUME_RELEASE_T = 0.5       # brake-release window after a resume request
-  RESUME_REACTIVATE_T = 0.08   # latched-hold blip when resuming out of a passive hold
-  RESUME_UNLATCH_T = 0.20      # RESUME_UNLATCHING pulse width
+  RESUME_UNLATCH_T = 0.20      # RESUME_UNLATCHING pulse width at the release
 
-  # Standstill hold commands; stock sends raw -1024 through the hold, then exactly -1 once latched
-  ACCEL_HOLD = -1.024         # m/s2
+  # Stock relaxes its standstill command the instant the body ECU takes the hold over, not on any
+  # schedule: across 13 stock holds >= 4.5 s the relax and GEAR.BRAKE_HOLD agreed to within
+  # +-0.02 s in all 9 where both were visible, and the latch itself landed anywhere from 0.01 s
+  # to 7.6 s after standstill. The command through the hold is the plan's own, which parks at
+  # CP.stopAccel; this is only the relaxed value we send once the car has the brakes.
   ACCEL_HOLD_LATCHED = -0.001  # m/s2
 
   # Command slew limits, m/s3, on the plan-following command only. Asymmetric on purpose: the
