@@ -157,16 +157,35 @@ class TestMazdaLongitudinalMessages:
       (0x365, "fff7fe7ffbff3fc0"),
       (0x366, "fff7fe7ffbff3fc0"),
     ]
-    frames = mazdacan.create_radar_frames(0, 0, synthetic_lead=False)
+    frames = mazdacan.create_radar_frames(0, 0, None)
     assert [(f.address, f.dat.hex()) for f in frames] == expected
 
-  def test_radar_frames_counter_and_synthetic_lead(self):
-    frames = mazdacan.create_radar_frames(2, 15, synthetic_lead=True)
+  def test_radar_frames_counter_and_lead_track(self):
+    frames = mazdacan.create_radar_frames(2, 15, (mazdacan.LEAD_TRACK_DIST, 0.))
     assert all(f.src == 2 for f in frames)
     # counter stamps the low nibble of the last byte on every track
     assert [f.dat[7] & 0x0f for f in frames[1:]] == [15] * 6
     tracks = {f.address: f.dat.hex() for f in frames}
     assert tracks[0x364] == "0a4000001dc0000f"
+
+  def test_lead_track_at_template_range_is_the_capture(self):
+    assert mazdacan.create_lead_track(mazdacan.LEAD_TRACK_DIST, 0.) == mazdacan.LEAD_TRACK_TEMPLATE
+
+  @pytest.mark.parametrize("d_rel,v_rel", [
+    (0., 0.), (6.5, 1.5), (10.25, -2.0), (29.4, 2.9375), (255.875, 63.9375), (400., 100.), (5., -80.),
+  ])
+  def test_lead_track_round_trips_through_the_dbc(self, d_rel, v_rel):
+    dat = mazdacan.create_lead_track(d_rel, v_rel)
+    cp = CANParser("mazda_2017", [("RADAR_TRACK_364", float("nan"))], 0)
+    cp.update([(0, [(0x364, dat, 0)])])
+    vl = cp.vl["RADAR_TRACK_364"]
+    assert vl["DIST_OBJ"] == pytest.approx(min(max(d_rel, 0.), 255.875), abs=0.0625)
+    assert vl["RELV_OBJ"] == pytest.approx(min(max(v_rel, -64.), 63.9375), abs=0.0625)
+    # the bits outside the two fields we drive stay exactly as captured
+    assert dat[1] & 0x0f == mazdacan.LEAD_TRACK_TEMPLATE[1] & 0x0f
+    assert dat[2] == mazdacan.LEAD_TRACK_TEMPLATE[2]
+    assert dat[4] & 0x1f == mazdacan.LEAD_TRACK_TEMPLATE[4] & 0x1f
+    assert dat[5:] == mazdacan.LEAD_TRACK_TEMPLATE[5:]
 
 
 class TestStopAndGoStateMachine:
@@ -259,7 +278,7 @@ class TestStopAndGoStateMachine:
 def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas=False, override=False,
              resume=False, lead_visible=True, gap=2, available=True,
              stock_radar_alive=False, fsc_settled=True, handback=False, cruise_engaged=False,
-             enabled=None):
+             enabled=None, lead_d_rel=12.0, lead_v_rel=0.0):
   # openpilot is enabled whenever it is longitudinally active; a gas override is the case
   # where it stays enabled with longActive low
   enabled = long_active if enabled is None else enabled
@@ -270,7 +289,8 @@ def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas
   hud = SimpleNamespace(leadVisible=lead_visible, leadDistanceBars=gap)
   cc = SimpleNamespace(enabled=enabled, longActive=long_active, actuators=actuators,
                        cruiseControl=cruise, hudControl=hud)
-  cc_sp = SimpleNamespace(stockEcuHandBack=handback)
+  cc_sp = SimpleNamespace(stockEcuHandBack=handback,
+                          leadOne=SimpleNamespace(dRel=lead_d_rel, vRel=lead_v_rel))
   cs = SimpleNamespace(out=out, resume_button=0,
                        stock_radar_alive=stock_radar_alive, fsc_settled=fsc_settled)
   return cc, cc_sp, cs
@@ -294,6 +314,13 @@ def _long_frames(sends):
   cp = CANParser("mazda_2017", [("CRZ_INFO", float("nan")), ("CRZ_CTRL", float("nan"))], 0)
   cp.update([(0, [(0x21b, info, 0), (0x21c, ctrl, 0)])])
   return decode_accel_cmd_raw(info), cp.vl["CRZ_INFO"]["ACC_ACTIVE"], cp.vl["CRZ_CTRL"]["CRZ_ACTIVE"]
+
+
+def _lead_track(dat):
+  """(DIST_OBJ, RELV_OBJ) decoded from a 0x364 track frame."""
+  cp = CANParser("mazda_2017", [("RADAR_TRACK_364", float("nan"))], 0)
+  cp.update([(0, [(0x364, dat, 0)])])
+  return cp.vl["RADAR_TRACK_364"]["DIST_OBJ"], cp.vl["RADAR_TRACK_364"]["RELV_OBJ"]
 
 
 def _step(cc, **kw):
@@ -449,6 +476,47 @@ class TestLongitudinalIntegration:
       _step(cc, long_active=False, enabled=True, long_state=long.off, accel=0., gas=True,
             override=True, standstill=True, cruise_engaged=True)
     assert cc.accel_last == 0., f"hold not released for the driver's gas: {cc.accel_last}"
+
+  def test_lead_track_follows_the_measured_lead(self, cc):
+    # a frozen track is what latches the camera's SCBS fault, so the range we advertise has to
+    # move with the lead we are actually following
+    long = structs.CarControl.Actuators.LongControlState
+    seen = []
+    for i in range(60):
+      sends = _step(cc, long_state=long.pid, accel=0.5, lead_visible=True,
+                    lead_d_rel=20.0 - 0.1 * i, lead_v_rel=-1.5)
+      track = next((d for a, d, b in sends if a == 0x364 and b == 0), None)
+      if track is not None:
+        seen.append(_lead_track(track))
+    assert len(seen) > 1
+    dists = [d for d, _ in seen]
+    assert all(a > b for a, b in zip(dists, dists[1:], strict=False)), f"range did not close with the lead: {dists}"
+    assert all(v == pytest.approx(-1.5, abs=0.0625) for _, v in seen)
+
+  def test_hold_fabricates_a_lead_but_drops_it_on_release(self, cc):
+    # with no lead in view the hold still needs something to hold against, but carrying that
+    # fabricated object through the release is what the camera latches on
+    long = structs.CarControl.Actuators.LongControlState
+
+    def tracks(sends):
+      return [d for a, d, b in sends if a == 0x364 and b == 0]
+
+    held = []
+    for _ in range(int(3.0 / 0.01)):
+      held += tracks(_step(cc, long_state=long.stopping, accel=-1.5, standstill=True,
+                           lead_visible=False, cruise_engaged=True))
+    assert held
+    assert all(_lead_track(d)[0] == pytest.approx(mazdacan.LEAD_TRACK_DIST) for d in held)
+
+    released = []
+    for _ in range(RESUME_RELEASE_FRAMES // 2):
+      released += tracks(_step(cc, long_active=False, enabled=True, long_state=long.off, accel=0.,
+                               gas=True, override=True, standstill=True, lead_visible=False,
+                               cruise_engaged=True))
+    assert released
+    empty = mazdacan.RADAR_TRACK_MSGS[0x364]
+    assert all(d[:7] == empty[:7] for d in released), \
+      f"fabricated lead survived the release: {released[0].hex()}"
 
   def test_gas_pedal_without_cruise_stays_disengaged(self, cc):
     # gas pressed while openpilot is not enabled must not advertise an engaged ACC

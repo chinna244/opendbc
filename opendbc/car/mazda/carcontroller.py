@@ -171,10 +171,21 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.accel_last = accel
 
     lead_visible = CC.hudControl.leadVisible
+    # The track slot and CRZ_CTRL's RADAR_HAS_LEAD have to agree: the camera cross-checks them,
+    # and advertising a lead on one but not the other latches an SCBS fault. A real lead is
+    # reported as measured; the hold falls back to a fabricated stopped one only for as long as
+    # it needs a lead to hold against, and never through the release.
+    has_lead = long_engaged and sm.radar_has_lead(lead_visible)
+    if not has_lead:
+      lead = None
+    elif lead_visible and 0. < CC_SP.leadOne.dRel <= 255.875:
+      lead = (CC_SP.leadOne.dRel, CC_SP.leadOne.vRel)
+    else:
+      lead = (mazdacan.LEAD_TRACK_DIST, 0.)
+
     if radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:
-      synthetic_lead = long_engaged and (lead_visible or state != StopGoState.CRUISING)
       for bus in LONG_BUSES:
-        can_sends.extend(mazdacan.create_radar_frames(bus, self.radar_counter, synthetic_lead))
+        can_sends.extend(mazdacan.create_radar_frames(bus, self.radar_counter, lead))
       self.radar_counter += 1
 
     if radar_master and self.frame % CarControllerParams.LONG_STEP == 0:
@@ -182,11 +193,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       # mirror the driver's distance setting on the dash; stock shows gap 2 by default
       gap = (int(CC.hudControl.leadDistanceBars) or 2) if (long_engaged or acc_available) else 0
       if long_engaged:
-        has_lead = sm.radar_has_lead(lead_visible)
         phase = sm.ctrl_phase(lead_visible)
         acc_active_2 = sm.acc_active_2
       else:
-        has_lead = False
         phase = 0
         acc_active_2 = False
       for bus in LONG_BUSES:

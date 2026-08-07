@@ -3,8 +3,7 @@ from opendbc.car.mazda.values import Buttons, MazdaFlags
 
 # Radar frames the body ECU expects to keep receiving for stop-and-go to work. Byte-exact
 # captures from a 0x764 radar with no objects in view; only the counter nibble in the last
-# byte changes. 0x364 optionally carries a synthetic stopped lead so standstill holds work
-# without a real lead in radar view.
+# byte changes. 0x364 carries the lead we are following, if any.
 RADAR_STATIC_MSG = (0x499, bytes.fromhex("0008c00000000000"))
 RADAR_TRACK_MSGS = {
   0x361: bytes.fromhex("fff7fefe1fc00080"),
@@ -14,8 +13,13 @@ RADAR_TRACK_MSGS = {
   0x365: bytes.fromhex("fff7fe7ffbff3fc0"),
   0x366: bytes.fromhex("fff7fe7ffbff3fc0"),
 }
-SYNTHETIC_LEAD_TRACK_ADDR = 0x364
-SYNTHETIC_LEAD_TRACK_MSG = bytes.fromhex("0a4000001dc00000")
+LEAD_TRACK_ADDR = 0x364
+# An occupied track slot, captured from a 0x764 radar holding a stopped lead at 10.25 m.
+# create_lead_track only rewrites DIST_OBJ and RELV_OBJ; the rest is the radar's track-valid
+# pattern, which is not understood well enough to synthesize.
+LEAD_TRACK_TEMPLATE = bytes.fromhex("0a4000001dc00000")
+LEAD_TRACK_DIST = 10.25   # m, the template's own range
+DIST_OBJ_SCALE = 0.0625   # m per bit, DIST_OBJ and RELV_OBJ share it
 
 
 def crz_info_checksum(dat: bytes) -> int:
@@ -70,11 +74,31 @@ def create_crz_ctrl(packer, bus, long_active, acc_available, gap_setting, radar_
   return packer.make_can_msg("CRZ_CTRL", bus, values)
 
 
-def create_radar_frames(bus, counter, synthetic_lead):
+def create_lead_track(d_rel: float, v_rel: float) -> bytes:
+  """Place the lead we are following on the track slot the camera reads.
+
+  A stock radar re-measures every track every 100 ms, so its range and range rate move with
+  the lead even at a standstill. Repeating one frozen frame instead makes the camera latch an
+  SCBS fault the moment a standstill hold releases: it is told an object sits at a fixed range
+  with zero closing speed while the car is commanded to drive off, which its own view of the
+  lead pulling away contradicts. RELV_OBJ carries the same sign as vRel, positive opening.
+  """
+  dist = round(min(max(d_rel, 0.), 255.875) / DIST_OBJ_SCALE)
+  relv = round(min(max(v_rel, -64.), 63.9375) / DIST_OBJ_SCALE) & 0x7ff
+  dat = bytearray(LEAD_TRACK_TEMPLATE)
+  dat[0] = dist >> 4
+  dat[1] = ((dist & 0xf) << 4) | (dat[1] & 0x0f)
+  dat[3] = relv >> 3
+  dat[4] = ((relv & 0x7) << 5) | (dat[4] & 0x1f)
+  return bytes(dat)
+
+
+def create_radar_frames(bus, counter, lead):
+  """lead is the (dRel, vRel) of the object to advertise on 0x364, or None for an empty slot."""
   frames = [CanData(RADAR_STATIC_MSG[0], RADAR_STATIC_MSG[1], bus)]
   for addr, dat in RADAR_TRACK_MSGS.items():
-    if synthetic_lead and addr == SYNTHETIC_LEAD_TRACK_ADDR:
-      dat = SYNTHETIC_LEAD_TRACK_MSG
+    if lead is not None and addr == LEAD_TRACK_ADDR:
+      dat = create_lead_track(*lead)
     frames.append(CanData(addr, dat[:7] + bytes([(dat[7] & 0xf0) | (counter % 16)]), bus))
   return frames
 
