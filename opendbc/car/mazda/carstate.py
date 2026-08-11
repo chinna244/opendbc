@@ -35,6 +35,7 @@ class CarState(CarStateBase, CarStateExt):
     self.cruise_enabled = False
     self.brake_pressed_prev = False
     self.stock_radar_silent_frames = 0
+    self.radar_was_silenced = False
     self.cam_laneinfo_seen = False
     self.fsc_settled_frames = 0
     # the body ECU has taken the standstill hold over and is holding the brakes itself
@@ -120,18 +121,29 @@ class CarState(CarStateBase, CarStateExt):
         self.cruise_available = False
       if acc_armed or acc_active or self.cruise_enabled or brake_free:
         self.cruise_enabled = acc_active
-      ret.cruiseState.available = self.cruise_available
-      ret.cruiseState.enabled = self.cruise_enabled
 
-      # Two-master guard: while the stock radar still broadcasts CRZ_INFO (teardown pending
-      # or failed, or the radar recovered through its S3 timeout), our synthetic frames
-      # would fight it on the bus, so block longitudinal engagement until it has been
-      # silent for 1 second.
+      # Two-master guard: while the stock radar still broadcasts CRZ_INFO, our synthetic
+      # frames would fight it on the bus, so engagement stays blocked until it has been
+      # silent for 1 second. The block wears two different hats:
+      #  - Before the first teardown of the drive this is the expected boot phase (FSC
+      #    settle + UDS handover, ~10-15 s), not a fault. Holding availability low keeps
+      #    engagement out with at most a wrongCarMode no-entry toast; raising accFaulted
+      #    here showed a permanent "Cruise Fault: Restart the Car" on every start for a
+      #    condition that clears by itself.
+      #  - After the radar has been silenced once, hearing it again is a genuine
+      #    two-master conflict (dropped tester present, S3 recovery, or the ordered
+      #    hand-back) and is a real accFaulted. The alpha-long toggle monitor relies on
+      #    exactly this edge as its "stock radar heard" acknowledgement.
       if len(cp.vl_all["CRZ_INFO"]["CTR1"]) > 0:
         self.stock_radar_silent_frames = 0
       else:
         self.stock_radar_silent_frames += 1
-      ret.accFaulted = self.stock_radar_silent_frames < STOCK_RADAR_GUARD_FRAMES
+      silenced = self.stock_radar_silent_frames >= STOCK_RADAR_GUARD_FRAMES
+      ret.accFaulted = self.radar_was_silenced and not silenced
+      self.radar_was_silenced |= silenced
+
+      ret.cruiseState.available = self.cruise_available and self.radar_was_silenced
+      ret.cruiseState.enabled = self.cruise_enabled
 
       # FSC settle timer (the radar teardown gate): the camera broadcasts a boot-in-progress
       # state on CAM_LANEINFO (NO_ERR_BIT, a pure boot marker clearing at 2.8-6.0 s and never

@@ -98,3 +98,54 @@ class TestBrakeHold:
   def test_defaults_to_not_held(self):
     # nothing parsed yet must read as "the car is not holding", the direction that keeps braking
     assert not _interface().CS.brake_hold
+
+
+class TestTwoMasterGuard:
+  """The stock-radar guard wears two hats: before the first teardown it is the expected boot
+  phase and must only hold availability low (no fault alert); once the radar has been silenced,
+  hearing it again is a genuine two-master conflict and must raise accFaulted."""
+
+  def _feed_guard(self, CI, seconds, radar_alive, start_frame=0):
+    from opendbc.can import CANPacker
+    from opendbc.car.mazda import mazdacan
+    packer = CANPacker("mazda_2017")
+    ret = None
+    frames = int(seconds / DT_CTRL)
+    for i in range(start_frame, start_frame + frames):
+      msgs = [packer.make_can_msg("PEDALS", 0, {"ACC_OFF": 1})]
+      if radar_alive:
+        msgs.append(mazdacan.create_acc_command(packer, 0, i, 0., False, True,
+                                                stopping=False, resume_unlatching=False))
+      ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(m[0], m[1], m[2]) for m in msgs])])
+    return ret, start_frame + frames
+
+  def test_boot_phase_is_not_a_fault(self):
+    # radar broadcasting, teardown not started: engagement blocked quietly, no Cruise Fault
+    CI = _interface()
+    ret, _ = self._feed_guard(CI, 5.0, radar_alive=True)
+    assert not ret.accFaulted
+    assert not ret.cruiseState.available
+
+  def test_availability_arrives_with_radar_silence(self):
+    CI = _interface()
+    ret, n = self._feed_guard(CI, 5.0, radar_alive=True)
+    ret, n = self._feed_guard(CI, CarControllerParams.STOCK_RADAR_GUARD_T + 0.5,
+                              radar_alive=False, start_frame=n)
+    assert not ret.accFaulted
+    assert ret.cruiseState.available
+
+  def test_radar_return_after_teardown_is_a_fault(self):
+    CI = _interface()
+    ret, n = self._feed_guard(CI, 5.0, radar_alive=True)
+    ret, n = self._feed_guard(CI, CarControllerParams.STOCK_RADAR_GUARD_T + 0.5,
+                              radar_alive=False, start_frame=n)
+    ret, n = self._feed_guard(CI, 0.5, radar_alive=True, start_frame=n)
+    assert ret.accFaulted
+    # availability keys on the latched "was silenced", so a transient return does not
+    # yank lateral out from under MADS on top of the fault
+    assert ret.cruiseState.available
+    # silence restores the clean state
+    ret, n = self._feed_guard(CI, CarControllerParams.STOCK_RADAR_GUARD_T + 0.5,
+                              radar_alive=False, start_frame=n)
+    assert not ret.accFaulted
+    assert ret.cruiseState.available
