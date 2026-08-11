@@ -70,6 +70,7 @@ class RadarSessionManager:
 
 
 RESUME_UNLATCH_FRAMES = int(CarControllerParams.RESUME_UNLATCH_T / DT_CTRL)
+LEAD_DEBOUNCE_FRAMES = int(CarControllerParams.LEAD_DEBOUNCE_T / DT_CTRL)
 
 
 class StandstillHold:
@@ -97,12 +98,25 @@ class StandstillHold:
     self.holding = False
     self.car_has_hold = False
     self.unlatch_frames = 0
+    self.lead_visible = False
+    self.lead_flip_frames = 0
 
   def update(self, long_active: bool, stopping: bool, standstill: bool,
-             plan_accel: float, brake_hold: bool) -> None:
+             plan_accel: float, brake_hold: bool, lead_visible: bool) -> None:
     if not long_active:
       self._reset()
       return
+
+    # the advertised lead follows leadVisible only once it has held steady: the camera
+    # cross-checks the track slot against RADAR_HAS_LEAD, and a marginal vision lead can
+    # flicker both faster than any real radar ever would
+    if lead_visible != self.lead_visible:
+      self.lead_flip_frames += 1
+      if self.lead_flip_frames >= LEAD_DEBOUNCE_FRAMES:
+        self.lead_visible = lead_visible
+        self.lead_flip_frames = 0
+    else:
+      self.lead_flip_frames = 0
 
     was_holding = self.holding
     # the plan asking for acceleration is the only thing that releases the hold
@@ -134,12 +148,12 @@ class StandstillHold:
     # stock drops ACC_ACTIVE_2 together with the command relax
     return not self.car_has_hold
 
-  def radar_has_lead(self, lead_visible: bool) -> bool:
-    return lead_visible or self.holding
+  def radar_has_lead(self) -> bool:
+    return self.lead_visible or self.holding
 
-  def ctrl_phase(self, lead_visible: bool) -> int:
+  def ctrl_phase(self) -> int:
     # RADAR_LEAD_RELATIVE_DISTANCE: 1 cruise, 2 follow, 3 stop/hold. Stock holds a constant stop
     # phase through the whole hold and drops to follow on release.
     if self.holding:
       return 3
-    return 2 if lead_visible else 1
+    return 2 if self.lead_visible else 1

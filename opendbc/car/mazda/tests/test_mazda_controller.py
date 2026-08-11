@@ -11,7 +11,7 @@ from opendbc.can import CANPacker, CANParser
 from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.carcontroller import CarController
-from opendbc.car.mazda.longitudinal import RESUME_UNLATCH_FRAMES, StandstillHold
+from opendbc.car.mazda.longitudinal import LEAD_DEBOUNCE_FRAMES, RESUME_UNLATCH_FRAMES, StandstillHold
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams
 
@@ -195,7 +195,7 @@ class TestStandstillHold:
   @staticmethod
   def run(sm, frames, **kwargs):
     defaults = dict(long_active=True, stopping=False, standstill=False, plan_accel=-1.024,
-                    brake_hold=False)
+                    brake_hold=False, lead_visible=True)
     defaults.update(kwargs)
     for _ in range(frames):
       sm.update(**defaults)
@@ -206,7 +206,7 @@ class TestStandstillHold:
     assert not sm.holding
     self.run(sm, 1, stopping=True)
     assert sm.holding and sm.stop_bits and sm.acc_active_2
-    assert sm.ctrl_phase(lead_visible=True) == 3
+    assert sm.ctrl_phase() == 3
     # arriving at a standstill changes nothing: the plan is still asking for the brakes
     self.run(sm, 500, stopping=True, standstill=True)
     assert sm.holding and sm.stop_bits
@@ -237,7 +237,7 @@ class TestStandstillHold:
     self.run(sm, 1, standstill=True, plan_accel=0.1)
     assert not sm.holding and not sm.car_has_hold
     assert sm.resume_unlatching
-    assert sm.ctrl_phase(lead_visible=True) == 2
+    assert sm.ctrl_phase() == 2
 
   def test_release_holds_for_as_long_as_the_plan_wants_to_move(self, sm):
     # the failed-resume regression: no release window to run out from under the plan
@@ -275,6 +275,31 @@ class TestStandstillHold:
     # lead speeds up again before the car reaches standstill
     self.run(sm, 1, stopping=False, plan_accel=0.3)
     assert not sm.holding
+
+  def test_lead_follows_only_a_steady_state(self, sm):
+    # a lead is adopted once leadVisible has held for the debounce window, not before
+    self.run(sm, LEAD_DEBOUNCE_FRAMES - 1, lead_visible=True)
+    assert not sm.radar_has_lead() and sm.ctrl_phase() == 1
+    self.run(sm, 1, lead_visible=True)
+    assert sm.radar_has_lead() and sm.ctrl_phase() == 2
+    # and dropped the same way
+    self.run(sm, LEAD_DEBOUNCE_FRAMES - 1, lead_visible=False)
+    assert sm.radar_has_lead()
+    self.run(sm, 1, lead_visible=False)
+    assert not sm.radar_has_lead()
+
+  def test_lead_flicker_never_reaches_the_bus(self, sm):
+    # the measured failure: a marginal 120 m vision lead toggled leadVisible 6 times in 1.4 s
+    # (route 6bb2dc61c4 t+400); none of it may reach RADAR_HAS_LEAD or the track slot
+    for frames, visible in ((15, True), (5, False), (7, True), (13, False), (10, True)):
+      self.run(sm, frames, lead_visible=visible)
+      assert not sm.radar_has_lead(), "a flickering lead leaked through the debounce"
+
+  def test_disengage_resets_the_lead(self, sm):
+    self.run(sm, 2 * LEAD_DEBOUNCE_FRAMES, lead_visible=True)
+    assert sm.radar_has_lead()
+    self.run(sm, 1, long_active=False)
+    assert not sm.radar_has_lead()
 
 
 def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas=False, override=False,
@@ -488,6 +513,9 @@ class TestLongitudinalIntegration:
     # a frozen track is what latches the camera's SCBS fault, so the range we advertise has to
     # move with the lead we are actually following
     long = structs.CarControl.Actuators.LongControlState
+    # let the lead debounce adopt the visible lead before sampling the track
+    for _ in range(LEAD_DEBOUNCE_FRAMES):
+      _step(cc, long_state=long.pid, accel=0.5, lead_visible=True, lead_d_rel=20.0, lead_v_rel=-1.5)
     seen = []
     for i in range(60):
       sends = _step(cc, long_state=long.pid, accel=0.5, lead_visible=True,
