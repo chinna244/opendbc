@@ -10,6 +10,7 @@ ButtonType = structs.CarState.ButtonEvent.Type
 FSC_SETTLE_FRAMES = int(CarControllerParams.FSC_SETTLE_T / DT_CTRL)
 STOCK_RADAR_ALIVE_FRAMES = int(CarControllerParams.STOCK_RADAR_ALIVE_T / DT_CTRL)
 STOCK_RADAR_GUARD_FRAMES = int(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CTRL)
+CANCEL_CONTEXT_FRAMES = int(CarControllerParams.CANCEL_CONTEXT_T / DT_CTRL)
 
 
 class CarState(CarStateBase, CarStateExt):
@@ -36,6 +37,7 @@ class CarState(CarStateBase, CarStateExt):
     self.brake_pressed_prev = False
     self.stock_radar_silent_frames = 0
     self.radar_was_silenced = False
+    self.cancel_context_frames = 0
     self.cam_laneinfo_seen = False
     self.fsc_settled_frames = 0
     # the body ECU has taken the standstill hold over and is holding the brakes itself
@@ -115,9 +117,19 @@ class CarState(CarStateBase, CarStateExt):
       acc_armed = cp.vl["PEDALS"]["ACC_OFF"] == 1
       acc_active = cp.vl["PEDALS"]["ACC_ACTIVE"] == 1
       brake_free = not ret.brakePressed and not self.brake_pressed_prev
+      # The brake hold below exists for brake-only PEDALS samples that arrive with both bits
+      # low mid-press. A wheel CANCEL is different: it turns the MRCC main state off for real,
+      # and it has to land even with the brake down -- holding through it kept lateral engaged
+      # against a cancel mashed under braking until the brake was released 4 s later (route
+      # 7f9e3ff336 t+484-488). The PEDALS reaction runs a few frames behind the button, so
+      # cancel context outlives the press by a moment.
+      if cp.vl["CRZ_BTNS"]["CAN_OFF"] == 1:
+        self.cancel_context_frames = CANCEL_CONTEXT_FRAMES
+      elif self.cancel_context_frames > 0:
+        self.cancel_context_frames -= 1
       if acc_armed or acc_active:
         self.cruise_available = True
-      elif brake_free:
+      elif brake_free or self.cancel_context_frames > 0:
         self.cruise_available = False
       if acc_armed or acc_active or self.cruise_enabled or brake_free:
         self.cruise_enabled = acc_active

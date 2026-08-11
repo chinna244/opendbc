@@ -149,3 +149,56 @@ class TestTwoMasterGuard:
                               radar_alive=False, start_frame=n)
     assert not ret.accFaulted
     assert ret.cruiseState.available
+
+
+class TestCancelUnderBraking:
+  """The availability brake-hold exists for brake-only PEDALS samples that arrive with both
+  bits low mid-press. A wheel CANCEL turns the MRCC main state off for real and must land
+  even with the brake down (route 7f9e3ff336 t+484-488: cancel mashed under braking was
+  swallowed until the brake released 4 s later)."""
+
+  def _armed_and_silent(self, CI):
+    # get past the two-master guard with the main armed so availability starts True
+    from opendbc.can import CANPacker
+    packer = CANPacker("mazda_2017")
+    guard = CarControllerParams.STOCK_RADAR_GUARD_T + 0.5
+    for i in range(int(guard / DT_CTRL)):
+      msgs = [packer.make_can_msg("PEDALS", 0, {"ACC_OFF": 1})]
+      ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(m[0], m[1], m[2]) for m in msgs])])
+    assert ret.cruiseState.available
+    return packer, int(guard / DT_CTRL)
+
+  def _feed(self, CI, packer, n0, seconds, brake, cancel):
+    ret = None
+    frames = int(seconds / DT_CTRL)
+    for i in range(n0, n0 + frames):
+      msgs = [packer.make_can_msg("PEDALS", 0, {"ACC_OFF": 0, "BRAKE_ON": int(brake)}),
+              packer.make_can_msg("CRZ_BTNS", 0, {"CAN_OFF": int(cancel)})]
+      ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(m[0], m[1], m[2]) for m in msgs])])
+    return ret, n0 + frames
+
+  def test_brake_only_dropout_is_held(self):
+    CI = _interface()
+    packer, n = self._armed_and_silent(CI)
+    ret, n = self._feed(CI, packer, n, 1.0, brake=True, cancel=False)
+    assert ret.cruiseState.available
+
+  def test_cancel_lands_through_the_brake(self):
+    CI = _interface()
+    packer, n = self._armed_and_silent(CI)
+    ret, n = self._feed(CI, packer, n, 0.3, brake=True, cancel=True)
+    assert not ret.cruiseState.available
+
+  def test_cancel_context_outlives_the_press(self):
+    # the PEDALS reaction can trail the button: press-and-release while still armed, then the
+    # bits drop only after the button is back up -- the context memory has to carry it
+    CI = _interface()
+    packer, n = self._armed_and_silent(CI)
+    ret = None
+    for i in range(n, n + 5):  # cancel pressed, PEDALS not yet reacting
+      msgs = [packer.make_can_msg("PEDALS", 0, {"ACC_OFF": 1}),
+              packer.make_can_msg("CRZ_BTNS", 0, {"CAN_OFF": 1})]
+      ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(m[0], m[1], m[2]) for m in msgs])])
+    assert ret.cruiseState.available
+    ret, n = self._feed(CI, packer, n + 5, 0.2, brake=True, cancel=False)
+    assert not ret.cruiseState.available

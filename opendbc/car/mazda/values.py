@@ -34,6 +34,8 @@ class CarControllerParams:
 
   RESUME_UNLATCH_T = 0.20      # RESUME_UNLATCHING pulse width at the release
 
+  CANCEL_CONTEXT_T = 0.5       # a wheel CANCEL keeps availability drops landing this long after release
+
   # Stock relaxes its standstill command the instant the body ECU takes the hold over, not on any
   # schedule: across 13 stock holds >= 4.5 s the relax and GEAR.BRAKE_HOLD agreed to within
   # +-0.02 s in all 9 where both were visible, and the latch itself landed anywhere from 0.01 s
