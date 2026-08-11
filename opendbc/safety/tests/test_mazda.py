@@ -147,13 +147,38 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
           self.assertTrue(self._tx(common.make_msg(bus, addr, 8, dat)))
 
   def test_synthetic_lead_radar_track_gated_on_controls(self):
+    # DIST_OBJ and RELV_OBJ are free fields; the template bytes must match. The non-template
+    # frames are real on-road emissions (route 6bb2dc61c4), which a byte-exact check silently
+    # dropped -- 982 asked, 0 transmitted -- starving the camera of the track.
+    lead_frames = [
+      "0a4000001dc00000",  # the fabricated stopped lead at 10.25 m
+      "229000007dc0000e",  # lead at 34.56 m, closing slowly
+      "22d000ff7dc00004",  # lead at 34.81 m, opening slowly
+      "000000001dc00000",  # zero range, zero relv corner
+      "fff000fffdc0000f",  # max range, max relv corner
+    ]
     for bus in (0, 2):
-      for counter in range(16):
-        dat = bytes.fromhex(f"0a4000001dc0000{counter:x}")
+      for hexdat in lead_frames:
+        dat = bytes.fromhex(hexdat)
         self.safety.set_controls_allowed(False)
         self.assertFalse(self._tx(common.make_msg(bus, 0x364, 8, dat)))
         self.safety.set_controls_allowed(True)
         self.assertTrue(self._tx(common.make_msg(bus, 0x364, 8, dat)))
+
+  def test_malformed_lead_radar_track_blocked(self):
+    # each corrupts one template-owned field of a valid lead frame
+    bad_frames = [
+      "229100007dc0000e",  # data[1] low nibble not zero
+      "229001007dc0000e",  # data[2] not zero
+      "229000007cc0000e",  # data[4] template bits wrong
+      "229000007dc1000e",  # data[5] wrong
+      "229000007dc0010e",  # data[6] not zero
+      "229000007dc0100e",  # data[7] high nibble not zero
+    ]
+    self.safety.set_controls_allowed(True)
+    for bus in (0, 2):
+      for hexdat in bad_frames:
+        self.assertFalse(self._tx(common.make_msg(bus, 0x364, 8, bytes.fromhex(hexdat))))
 
   def test_unexpected_radar_tracks_blocked(self):
     bad_messages = {
