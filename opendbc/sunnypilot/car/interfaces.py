@@ -6,6 +6,7 @@ See the LICENSE.md file in the root directory for more details.
 """
 import functools
 import json
+import os
 import numpy as np
 from typing import NamedTuple
 from collections.abc import Callable
@@ -127,7 +128,7 @@ def _initialize_coop_steering(CP: structs.CarParams, CP_SP: structs.CarParamsSP,
 def _initialize_tesla_mads_screen_button(CP: structs.CarParams, CP_SP: structs.CarParamsSP,
                                          params_dict: dict[str, str]) -> None:
   if CP.brand == 'tesla' and CP_SP.flags & TeslaFlagsSP.HAS_VEHICLE_BUS:
-    selection = int(params_dict.get("TeslaMadsScreenButton", MadsScreenButtonType.THREE_FINGER))
+    selection = int(params_dict.get("TeslaMadsScreenButton", MadsScreenButtonType.OFF))
     if selection == MadsScreenButtonType.THREE_FINGER:
       CP_SP.flags |= TeslaFlagsSP.MADS_SCREEN_BUTTON_3_FINGER.value
       CP_SP.safetyParam |= TeslaSafetyFlagsSP.MADS_SCREEN_BUTTON_3_FINGER
@@ -141,6 +142,9 @@ def _initialize_tesla_mads_screen_button(CP: structs.CarParams, CP_SP: structs.C
 
 def _initialize_radar_tracks(CP: structs.CarParams, CP_SP: structs.CarParamsSP,
                              can_recv: CanRecvCallable | None = None, can_send: CanSendCallable | None = None) -> None:
+  if can_recv is None or can_send is None or os.environ.get("REPLAY"):
+    return
+
   if CP.brand == 'hyundai':
     if CP.flags & HyundaiFlags.MANDO_RADAR and (CP.radarUnavailable or CP_SP.flags & HyundaiFlagsSP.ENHANCED_SCC):
       tracks_enabled = hyundai_enable_radar_tracks(can_recv, can_send, bus=0, addr=0x7d0)
