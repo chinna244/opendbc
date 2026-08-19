@@ -22,3 +22,17 @@
 speed_bp    = [6.5, 9.5, 12.0, 16.4, 21.0, 28.0, 35.0]
 laf_bp      = [2.43, 2.93, 2.37, 1.21, 1.16, 1.53, 1.76]
 friction_bp = [0.156, 0.142, 0.124, 0.153, 0.139, 0.122, 0.108]
+
+[MAZDA_CX9_2021]
+# Same steer-to-zero EPS family as the CX-5 2022 (KSD5 firmware is in
+# STEER_TO_ZERO_EPS_FW), so the same STEER_MAX schedule (1200 below the 14.2 m/s
+# cliff, 800 above) and the same cliff-aligned bin layout apply.
+# Seeded 2026-08-19: bins 9.5/12.0/16.4 measured on route 00000004--97e4328f4f
+# (offline per-bin SVD fits, torqued admission filters, current STEER_MAX
+# schedule; 790/1.3k/450 pts). The 6.5 fit was unstable (crawl-speed noise) and
+# the 21.0+ bins got no data, so those carry the CX-5 2022 seeds. Note the
+# measured 16.4 laf (1.5-1.77) sits well above the CX-5's 1.21 there, so expect
+# the transplanted highway bins to migrate once the learner sees highway data.
+speed_bp    = [6.5, 9.5, 12.0, 16.4, 21.0, 28.0, 35.0]
+laf_bp      = [2.43, 2.37, 2.15, 1.60, 1.16, 1.53, 1.76]
+friction_bp = [0.156, 0.168, 0.135, 0.171, 0.139, 0.122, 0.108]
