@@ -1,6 +1,7 @@
 import pytest
 
 from opendbc.car import DT_CTRL, gen_empty_fingerprint
+from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams
 
@@ -149,6 +150,47 @@ class TestTwoMasterGuard:
                               radar_alive=False, start_frame=n)
     assert not ret.accFaulted
     assert ret.cruiseState.available
+
+
+class TestSpeedSignLimit:
+  """CAM_TRAFFIC_SIGNS.SPEED_SIGN_ON is a 2-bit field carrying the display unit, not a 1-bit
+  on-flag: 1 = limit displayed in mph, 2 = displayed in km/h, 0 = none. Which value an FSC
+  emits tracks its market, not the cluster's unit setting. Payloads are real captures: mph
+  frames from a US CX-5 2022 (drive_1x local set), km/h frames from a NZ CX-5 (route
+  ded445e51c0e1830|00000007--4b5a89a1ce) where the old 1-bit decode at bit 12 read 0 and SLA
+  never saw a limit."""
+
+  @pytest.mark.parametrize(("payload", "expected_ms"), [
+    ("0000000002005300", 0.0),                 # no limit displayed
+    ("0650000002005300", 25 * CV.MPH_TO_MS),   # US 25 mph
+    ("0a10000003001300", 40 * CV.MPH_TO_MS),   # US 40 mph
+    ("0b50000002005300", 45 * CV.MPH_TO_MS),   # US 45 mph
+    ("0a20000002000900", 40 * CV.KPH_TO_MS),   # NZ 40 km/h
+    ("0ca0000002000900", 50 * CV.KPH_TO_MS),   # NZ 50 km/h
+    ("1920000002010900", 100 * CV.KPH_TO_MS),  # NZ 100 km/h
+  ])
+  def test_unit_comes_from_the_frame(self, payload, expected_ms):
+    CI = _interface()
+    ret_sp = None
+    for i in range(2):
+      _, ret_sp = CI.update([(int(i * DT_CTRL * 1e9), [(0x35F, bytes.fromhex(payload), 2)])])
+    assert ret_sp.speedLimit == pytest.approx(expected_ms)
+
+  @pytest.mark.parametrize(("sign_on", "speed_sign"), [
+    (1, 120),  # above any real mph posting
+    (2, 127),  # all-ones: invalid sentinel
+    (3, 50),   # undefined state
+    (1, 0),    # displayed-but-zero
+  ])
+  def test_implausible_frames_read_as_no_limit(self, sign_on, speed_sign):
+    from opendbc.can import CANPacker
+    packer = CANPacker("mazda_2017")
+    msg = packer.make_can_msg("CAM_TRAFFIC_SIGNS", 2, {"SPEED_SIGN_ON": sign_on, "SPEED_SIGN": speed_sign})
+    CI = _interface()
+    ret_sp = None
+    for i in range(2):
+      _, ret_sp = CI.update([(int(i * DT_CTRL * 1e9), [(msg[0], msg[1], msg[2])])])
+    assert ret_sp.speedLimit == 0.0
 
 
 class TestCancelUnderBraking:
