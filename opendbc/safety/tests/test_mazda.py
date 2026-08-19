@@ -22,7 +22,7 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
   MAX_RT_DELTA = 384
 
   DRIVER_TORQUE_ALLOWANCE = 15
-  DRIVER_TORQUE_FACTOR = 1
+  DRIVER_TORQUE_FACTOR = 15
 
   # Mazda actually does not set any bit when requesting torque
   NO_STEER_REQ_BIT = True
