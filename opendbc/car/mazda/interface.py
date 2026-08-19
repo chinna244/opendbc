@@ -27,7 +27,10 @@ class CarInterface(CarInterfaceBase):
     if not steer_to_zero:
       ret.minSteerSpeed = LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS
 
-    ret.alphaLongitudinalAvailable = candidate == CAR.MAZDA_CX5_2022
+    # CX-9 2021 verified against route 00000004--97e4328f4f: same message set at the same
+    # rates, CRZ_INFO checksum holds on all 54k stock frames, radar UDS at 0x764, and the
+    # same FSC camera firmware (GSH7-67XK2-U) as the CX-5 2022 this was developed on.
+    ret.alphaLongitudinalAvailable = candidate in (CAR.MAZDA_CX5_2022, CAR.MAZDA_CX9_2021)
     ret.openpilotLongitudinalControl = alpha_long and ret.alphaLongitudinalAvailable
     if ret.openpilotLongitudinalControl:
       ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.LONG.value
