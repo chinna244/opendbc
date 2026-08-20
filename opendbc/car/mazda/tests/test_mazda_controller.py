@@ -10,7 +10,7 @@ import pytest
 from opendbc.can import CANPacker, CANParser
 from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.mazda import mazdacan
-from opendbc.car.mazda.carcontroller import CarController
+from opendbc.car.mazda.carcontroller import CarController, TJA_MRCC_UNARM_STEP
 from opendbc.car.mazda.longitudinal import LEAD_DEBOUNCE_FRAMES, RESUME_UNLATCH_FRAMES, StandstillHold
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams, MazdaSafetyFlags
@@ -767,9 +767,11 @@ class TestTjaIcbmSuppressScoping:
     return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP), CP
 
   @staticmethod
-  def _cs(*, tja_button=0):
+  def _cs(*, tja_button=0, cruise_available=False):
     return SimpleNamespace(
-      out=SimpleNamespace(vEgoRaw=12.0, steeringTorque=0, brakePressed=False),
+      out=SimpleNamespace(vEgoRaw=12.0, steeringTorque=0, brakePressed=False,
+                          cruiseState=SimpleNamespace(available=cruise_available)),
+      cruise_available=cruise_available,
       cam_lkas_live=True,
       cam_lkas={"ERR_BIT_1": 0, "ERR_BIT_2": 0, "LINE_NOT_VISIBLE": 0, "BIT_1": 1},
       cam_laneinfo={"LINE_VISIBLE": 0, "LINE_NOT_VISIBLE": 1, "LANE_LINES": 1,
@@ -826,3 +828,68 @@ class TestTjaIcbmSuppressScoping:
       cc.last_button_frame = -10_000
       _, sends = cc.update(CC, CC_SP, self._cs(tja_button=1), 0)
       assert self._crz_btns_present(sends), candidate
+
+
+class TestTjaMrccSideEffect:
+  @staticmethod
+  def _cc(candidate=CAR.MAZDA_CX5_2022):
+    CP = CarInterface.get_params(candidate, {0: {}, 1: {}, 2: {}}, [], alpha_long=False,
+                                 is_release=False, docs=False)
+    CP_SP = CarInterface.get_params_sp(CP, candidate, {0: {}, 1: {}, 2: {}}, [], False, False, False)
+    return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
+
+  @staticmethod
+  def _controls():
+    CC = structs.CarControl()
+    return CC.as_reader(), structs.CarControlSP()
+
+  @staticmethod
+  def _button_payloads(sends):
+    return [dat for addr, dat, bus in sends if addr == 0x09d and bus == 0]
+
+  def _step(self, cc, CC, CC_SP, *, tja, armed):
+    CS = TestTjaIcbmSuppressScoping._cs(tja_button=tja, cruise_available=armed)
+    return cc.update(CC, CC_SP, CS, 0)[1]
+
+  def test_tja_caused_mrcc_arm_is_undone_after_release(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False)
+    self._step(cc, CC, CC_SP, tja=1, armed=False)
+    self._step(cc, CC, CC_SP, tja=1, armed=True)
+
+    payloads = []
+    for _ in range(TJA_MRCC_UNARM_STEP + 1):
+      payloads.extend(self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True)))
+    assert payloads
+
+    cp = CANParser("mazda_2017", [("CRZ_BTNS", 0)], 0)
+    cp.update([(0, [(0x09d, payloads[0], 0)])])
+    assert cp.vl["CRZ_BTNS"]["BIT1"] == 0
+    assert cp.vl["CRZ_BTNS"]["BIT1_INV"] == 1
+    assert cp.vl["CRZ_BTNS"]["TJA_BUTTON"] == 0
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False)
+    assert not cc.tja_mrcc_unarm_pending
+
+  def test_tja_preserves_mrcc_that_was_already_armed(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+    self._step(cc, CC, CC_SP, tja=0, armed=True)
+    self._step(cc, CC, CC_SP, tja=1, armed=True)
+
+    payloads = []
+    for _ in range(TJA_MRCC_UNARM_STEP + 1):
+      payloads.extend(self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True)))
+    assert not payloads
+    assert not cc.tja_mrcc_unarm_pending
+
+  def test_non_tja_platform_never_sends_mrcc_off_tap(self):
+    cc = self._cc(CAR.MAZDA_CX9_2021)
+    CC, CC_SP = self._controls()
+    self._step(cc, CC, CC_SP, tja=1, armed=False)
+    payloads = []
+    for _ in range(TJA_MRCC_UNARM_STEP + 1):
+      payloads.extend(self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True)))
+    assert not payloads

@@ -168,6 +168,8 @@ class Buttons:
   SET_MINUS = 2
   RESUME = 3
   CANCEL = 4
+  # CX-5 2022 MRCC master is an active-low BIT1/BIT1_INV pair on CRZ_BTNS.
+  MRCC_OFF = 5
 
 
 FW_QUERY_CONFIG = FwQueryConfig(

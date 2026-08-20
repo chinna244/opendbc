@@ -17,6 +17,8 @@ LongCtrlState = structs.CarControl.Actuators.LongControlState
 # Synthetic radar frames go to the car and to the camera; the panda only forwards
 # received frames between those buses, not our own transmissions.
 LONG_BUSES = (0, 2)
+TJA_MRCC_UNARM_TIMEOUT_FRAMES = 150
+TJA_MRCC_UNARM_STEP = 10
 
 
 class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterface):
@@ -32,6 +34,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.radar_counter = 0
     self.radar_session = RadarSessionManager()
     self.accel_last = 0.
+    self.tja_button_prev = False
+    self.tja_mrcc_unarm_pending = False
+    self.tja_mrcc_saw_armed = False
+    self.tja_mrcc_unarm_frames = 0
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -68,6 +74,34 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       if self.resume_requested(CC, CS) and self.frame % 5 == 0:
         can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.RESUME, CS))
 
+    # On the CX-5 2022, the physical TJA button also arms Mazda MRCC on bus 0.
+    # Panda can strip the camera-forwarded copy, but it cannot hide a frame from ECUs
+    # already sharing bus 0. If MRCC was off before TJA, undo only that side effect with
+    # the exact captured active-low MRCC master tap after the driver releases TJA.
+    # Preserve MRCC when it was already armed before the TJA press.
+    if has_tja_mads(self.CP):
+      tja_button = bool(getattr(CS, "tja_button", 0))
+      mrcc_armed = bool(CS.cruise_available) if hasattr(CS, "cruise_available") else \
+        bool(getattr(getattr(CS.out, "cruiseState", None), "available", False))
+      if tja_button and not self.tja_button_prev:
+        self.tja_mrcc_unarm_pending = not mrcc_armed
+        self.tja_mrcc_saw_armed = False
+        self.tja_mrcc_unarm_frames = 0
+
+      if self.tja_mrcc_unarm_pending:
+        self.tja_mrcc_unarm_frames += 1
+        self.tja_mrcc_saw_armed |= mrcc_armed
+        if self.tja_mrcc_saw_armed and not mrcc_armed:
+          self.tja_mrcc_unarm_pending = False
+        elif self.tja_mrcc_unarm_frames > TJA_MRCC_UNARM_TIMEOUT_FRAMES:
+          self.tja_mrcc_unarm_pending = False
+        elif (self.tja_mrcc_saw_armed and not tja_button and
+              not CC.cruiseControl.cancel and not CC.cruiseControl.resume and
+              self.frame % TJA_MRCC_UNARM_STEP == 0):
+          can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.MRCC_OFF, CS))
+
+      self.tja_button_prev = tja_button
+
     self.apply_torque_last = apply_torque
 
     if self.CP.openpilotLongitudinalControl:
@@ -93,7 +127,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # TJA 1→0→1 edge on OP CRZ_BTNS. Non-TJA Mazdas must not let the TJA bit affect ICBM.
     icbm_suppress = (
       CC.cruiseControl.cancel or CC.cruiseControl.resume or CS.cancel_button == 1 or
-      (has_tja_mads(self.CP) and getattr(CS, "tja_button", 0) == 1)
+      (has_tja_mads(self.CP) and (getattr(CS, "tja_button", 0) == 1 or self.tja_mrcc_unarm_pending))
     )
     if not icbm_suppress:
       can_sends.extend(IntelligentCruiseButtonManagementInterface.update(self, CC_SP, CS, self.packer, self.frame, self.last_button_frame))

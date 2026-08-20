@@ -91,6 +91,22 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     values = {"CRZ_AVAILABLE": int(armed)}
     return self.packer.make_can_msg_safety("CRZ_CTRL", 0, values)
 
+  def _mrcc_off_button_msg(self):
+    values = {
+      "CAN_OFF": 0, "CAN_OFF_INV": 1,
+      "SET_P": 0, "SET_P_INV": 1,
+      "RES": 0, "RES_INV": 1,
+      "SET_M": 0, "SET_M_INV": 1,
+      "DISTANCE_LESS": 0, "DISTANCE_LESS_INV": 1,
+      "DISTANCE_MORE": 0, "DISTANCE_MORE_INV": 1,
+      "TJA_BUTTON": 0,
+      "MODE_X": 0, "MODE_X_INV": 1,
+      "MODE_Y": 0, "MODE_Y_INV": 1,
+      "BIT1": 0, "BIT1_INV": 1, "BIT2": 1, "BIT3": 1,
+      "CTR": 5,
+    }
+    return self.packer.make_can_msg_safety("CRZ_BTNS", 0, values)
+
   def test_buttons(self):
     # only cancel allows while controls not allowed
     self.safety.set_controls_allowed(0)
@@ -101,6 +117,22 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.safety.set_controls_allowed(1)
     self.assertTrue(self._tx(self._button_msg(cancel=True)))
     self.assertTrue(self._tx(self._button_msg(resume=True)))
+
+  @require_tja_mads
+  def test_mrcc_off_tap_allowed_only_while_mrcc_armed(self):
+    self.safety.set_controls_allowed(False)
+    msg = self._mrcc_off_button_msg()
+
+    self._rx(self._mrcc_armed_msg(False))
+    self.assertFalse(self._tx(msg))
+
+    self._rx(self._mrcc_armed_msg(True))
+    self.assertTrue(self._tx(msg))
+
+    # Only the exact captured active-low master pair is accepted.
+    dat = bytearray(msg.data)
+    dat[1] &= 0x7f
+    self.assertFalse(self._tx(common.make_msg(0, 0x09d, 8, dat)))
 
   @require_tja_mads
   def test_mrcc_engage_does_not_grant_or_revoke_mads_lateral(self):
@@ -412,6 +444,12 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
     values = {"CRZ_ACTIVE": active}
     return self.packer.make_can_msg_safety("CRZ_CTRL", bus, values)
 
+  def test_brake_only_sample_does_not_block_pending_mrcc_off_tap(self):
+    self.safety.set_controls_allowed(False)
+    self._rx(self._mrcc_armed_msg(True))
+    self._rx(self._user_brake_msg(True))
+    self.assertTrue(self._tx(self._mrcc_off_button_msg()))
+
   def test_camera_bus_accel_actuation_limits(self):
     # the synthetic radar frames are duplicated onto the camera bus; same limits apply there
     for accel in (self.MIN_ACCEL - 1, self.MIN_ACCEL, self.INACTIVE_ACCEL, self.MAX_ACCEL, self.MAX_ACCEL + 1):
@@ -551,6 +589,11 @@ class TestMazdaStockSteeringSafety(TestMazdaSafety):
     self._rx(msg)
     self.assertEqual(-1, self.safety.get_mads_button_press())
     self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_mrcc_off_tap_not_allowed_without_tja_mads(self):
+    self.safety.set_controls_allowed(False)
+    self._rx(self._mrcc_armed_msg(True))
+    self.assertFalse(self._tx(self._mrcc_off_button_msg()))
 
   def test_mrcc_engage_still_grants_lateral_without_tja_mads(self):
     """Upstream lateral auth via op_controls_allowed rising must remain for non-TJA Mazdas."""
