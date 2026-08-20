@@ -10,7 +10,8 @@ import pytest
 from opendbc.can import CANPacker, CANParser
 from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.mazda import mazdacan
-from opendbc.car.mazda.carcontroller import CarController, TJA_MRCC_UNARM_STEP
+from opendbc.car.mazda.carcontroller import (CarController, TJA_MRCC_RAW_OFF_CONFIRM_FRAMES,
+                                             TJA_MRCC_UNARM_STEP)
 from opendbc.car.mazda.longitudinal import LEAD_DEBOUNCE_FRAMES, RESUME_UNLATCH_FRAMES, StandstillHold
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams, MazdaSafetyFlags
@@ -767,11 +768,14 @@ class TestTjaIcbmSuppressScoping:
     return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP), CP
 
   @staticmethod
-  def _cs(*, tja_button=0, cruise_available=False):
+  def _cs(*, tja_button=0, cruise_available=False, mrcc_armed_raw=None):
+    if mrcc_armed_raw is None:
+      mrcc_armed_raw = cruise_available
     return SimpleNamespace(
       out=SimpleNamespace(vEgoRaw=12.0, steeringTorque=0, brakePressed=False,
                           cruiseState=SimpleNamespace(available=cruise_available)),
       cruise_available=cruise_available,
+      mrcc_armed_raw=mrcc_armed_raw,
       cam_lkas_live=True,
       cam_lkas={"ERR_BIT_1": 0, "ERR_BIT_2": 0, "LINE_NOT_VISIBLE": 0, "BIT_1": 1},
       cam_laneinfo={"LINE_VISIBLE": 0, "LINE_NOT_VISIBLE": 1, "LANE_LINES": 1,
@@ -847,8 +851,9 @@ class TestTjaMrccSideEffect:
   def _button_payloads(sends):
     return [dat for addr, dat, bus in sends if addr == 0x09d and bus == 0]
 
-  def _step(self, cc, CC, CC_SP, *, tja, armed):
-    CS = TestTjaIcbmSuppressScoping._cs(tja_button=tja, cruise_available=armed)
+  def _step(self, cc, CC, CC_SP, *, tja, armed, raw_armed=None):
+    CS = TestTjaIcbmSuppressScoping._cs(tja_button=tja, cruise_available=armed,
+                                        mrcc_armed_raw=raw_armed)
     return cc.update(CC, CC_SP, CS, 0)[1]
 
   def test_tja_caused_mrcc_arm_is_undone_after_release(self):
@@ -870,7 +875,8 @@ class TestTjaMrccSideEffect:
     assert cp.vl["CRZ_BTNS"]["BIT1_INV"] == 1
     assert cp.vl["CRZ_BTNS"]["TJA_BUTTON"] == 0
 
-    self._step(cc, CC, CC_SP, tja=0, armed=False)
+    for _ in range(TJA_MRCC_RAW_OFF_CONFIRM_FRAMES):
+      self._step(cc, CC, CC_SP, tja=0, armed=False)
     assert not cc.tja_mrcc_unarm_pending
 
   def test_tja_preserves_mrcc_that_was_already_armed(self):
@@ -882,6 +888,52 @@ class TestTjaMrccSideEffect:
     payloads = []
     for _ in range(TJA_MRCC_UNARM_STEP + 1):
       payloads.extend(self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True)))
+    assert not payloads
+    assert not cc.tja_mrcc_unarm_pending
+
+  def test_repeated_tja_under_brake_uses_confirmed_raw_state(self):
+    """Route 56: cruise_available stays True through a held brake after the first
+    automatic tap, but PEDALS.ACC_OFF is already zero. A later TJA press must clean up
+    its new MRCC arm instead of treating that cached True as pre-existing MRCC."""
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    # First TJA press starts with MRCC genuinely off, then TJA arms it.
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False)
+    self._step(cc, CC, CC_SP, tja=1, armed=False, raw_armed=False)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True)
+
+    # The automatic tap lands in raw PEDALS, while filtered availability remains
+    # intentionally held True for the whole brake press.
+    for _ in range(TJA_MRCC_RAW_OFF_CONFIRM_FRAMES):
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=False)
+    assert not cc.tja_mrcc_unarm_pending
+
+    # A second TJA press during the same brake hold must be recognized as starting
+    # from MRCC-off and receive another automatic off tap after release.
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=False)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True)
+    payloads = []
+    for _ in range(TJA_MRCC_UNARM_STEP + 1):
+      payloads.extend(self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True)))
+    assert payloads
+
+  def test_brief_raw_dropout_does_not_unarm_prearmed_mrcc(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True)
+    # Include the TJA edge itself in the below-threshold dropout length.
+    for _ in range(TJA_MRCC_RAW_OFF_CONFIRM_FRAMES - 2):
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=False)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=False)
+
+    payloads = []
+    for _ in range(TJA_MRCC_UNARM_STEP + 1):
+      payloads.extend(self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True)))
     assert not payloads
     assert not cc.tja_mrcc_unarm_pending
 

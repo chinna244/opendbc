@@ -19,6 +19,11 @@ LongCtrlState = structs.CarControl.Actuators.LongControlState
 LONG_BUSES = (0, 2)
 TJA_MRCC_UNARM_TIMEOUT_FRAMES = 150
 TJA_MRCC_UNARM_STEP = 10
+# PEDALS can briefly report both ACC bits low during a brake transition. Require
+# raw-off to persist before it overrides the intentionally brake-held public cruise
+# state. Route 56's real TJA cleanup stayed raw-off for seconds, so this remains well
+# inside the interval before another deliberate button press.
+TJA_MRCC_RAW_OFF_CONFIRM_FRAMES = 5
 
 
 class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterface):
@@ -38,6 +43,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.tja_mrcc_unarm_pending = False
     self.tja_mrcc_saw_armed = False
     self.tja_mrcc_unarm_frames = 0
+    self.tja_mrcc_raw_off_frames = 0
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -81,8 +87,15 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # Preserve MRCC when it was already armed before the TJA press.
     if has_tja_mads(self.CP):
       tja_button = bool(getattr(CS, "tja_button", 0))
-      mrcc_armed = bool(CS.cruise_available) if hasattr(CS, "cruise_available") else \
+      filtered_mrcc_armed = bool(CS.cruise_available) if hasattr(CS, "cruise_available") else \
         bool(getattr(getattr(CS.out, "cruiseState", None), "available", False))
+      raw_mrcc_armed = bool(getattr(CS, "mrcc_armed_raw", filtered_mrcc_armed))
+      self.tja_mrcc_raw_off_frames = 0 if raw_mrcc_armed else self.tja_mrcc_raw_off_frames + 1
+      raw_off_confirmed = self.tja_mrcc_raw_off_frames >= TJA_MRCC_RAW_OFF_CONFIRM_FRAMES
+      # The filtered state protects against momentary brake-only dropouts. Once raw-off
+      # is sustained, it is authoritative for this cleanup even if cruise_available is
+      # deliberately cached until brake release.
+      mrcc_armed = raw_mrcc_armed or (filtered_mrcc_armed and not raw_off_confirmed)
       if tja_button and not self.tja_button_prev:
         self.tja_mrcc_unarm_pending = not mrcc_armed
         self.tja_mrcc_saw_armed = False
@@ -90,8 +103,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
       if self.tja_mrcc_unarm_pending:
         self.tja_mrcc_unarm_frames += 1
-        self.tja_mrcc_saw_armed |= mrcc_armed
-        if self.tja_mrcc_saw_armed and not mrcc_armed:
+        self.tja_mrcc_saw_armed |= raw_mrcc_armed
+        if self.tja_mrcc_saw_armed and raw_off_confirmed:
           self.tja_mrcc_unarm_pending = False
         elif self.tja_mrcc_unarm_frames > TJA_MRCC_UNARM_TIMEOUT_FRAMES:
           self.tja_mrcc_unarm_pending = False

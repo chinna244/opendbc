@@ -226,6 +226,13 @@ class TestCancelUnderBraking:
     ret, n = self._feed(CI, packer, n, 1.0, brake=True, cancel=False)
     assert ret.cruiseState.available
 
+  def test_raw_mrcc_state_drops_while_public_state_is_brake_held(self):
+    CI = _interface()
+    packer, n = self._armed_and_silent(CI)
+    ret, _ = self._feed(CI, packer, n, 0.2, brake=True, cancel=False)
+    assert ret.cruiseState.available
+    assert not CI.CS.mrcc_armed_raw
+
   def test_cancel_lands_through_the_brake(self):
     CI = _interface()
     packer, n = self._armed_and_silent(CI)
