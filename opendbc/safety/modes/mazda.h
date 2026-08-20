@@ -8,6 +8,8 @@
 #define MAZDA_CRZ_INFO      0x21bU
 #define MAZDA_CRZ_CTRL      0x21cU
 #define MAZDA_CRZ_BTNS      0x09dU
+// TJA_BUTTON: DBC start bit 11, 1-bit Motorola == Intel bit 11 (byte 1 bit 3).
+#define MAZDA_TJA_BUTTON_BIT 11U
 #define MAZDA_RADAR_STATIC  0x499U
 #define MAZDA_RADAR_TRACK_1 0x361U
 #define MAZDA_RADAR_TRACK_2 0x362U
@@ -25,8 +27,12 @@
 #define MAZDA_CAM  2
 
 #define MAZDA_PARAM_LONGITUDINAL 1U
+#define MAZDA_PARAM_STEER_TO_ZERO 2U
+#define MAZDA_PARAM_TJA_MADS 4U
 
 static bool mazda_longitudinal = false;
+static bool mazda_steer_to_zero = false;
+static bool mazda_tja_mads = false;
 
 // With longitudinal control the stock radar is silenced and openpilot replays its frames,
 // so allowed tx patterns are pinned to byte-exact stock captures wherever possible.
@@ -62,6 +68,8 @@ static bool mazda_empty_radar_track_msg_valid(const CANPacket_t *msg) {
             (msg->data[2] == 0xfeU) && (msg->data[3] == 0x7fU) &&
             (msg->data[4] == 0xfbU) && (msg->data[5] == 0xffU) &&
             (msg->data[6] == 0x3fU) && ((msg->data[7] & 0xf0U) == 0xc0U);
+  } else {
+    valid = false;
   }
 
   return valid;
@@ -99,18 +107,29 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
       update_sample(&torque_driver, torque_driver_new);
     }
 
-    // enter controls on rising edge of ACC, exit controls on ACC off
+    // Longitudinal PCM: enter/exit controls_allowed on OEM MRCC engaged (CRZ_ACTIVE).
+    // When TJA_MADS is set, do not map CRZ_AVAILABLE onto acc_main_on. Mazda MADS
+    // lateral authorization is TJA-only; feeding MRCC into acc_main would grant
+    // lateral without TJA and revoke it when OEM cruise drops.
     if ((msg->addr == MAZDA_CRZ_CTRL) && !mazda_longitudinal) {
       bool cruise_engaged = msg->data[0] & 0x8U;
       pcm_cruise_check(cruise_engaged);
-      acc_main_on = GET_BIT(msg, 17U);
+      if (!mazda_tja_mads) {
+        acc_main_on = GET_BIT(msg, 17U);
+      }
     }
 
-    if ((msg->addr == MAZDA_CRZ_BTNS) && mazda_longitudinal) {
-      // ensure the driver's cancel press always exits controls
-      bool cancel = GET_BIT(msg, 0U);
-      if (cancel) {
-        controls_allowed = false;
+    if (msg->addr == MAZDA_CRZ_BTNS) {
+      if (mazda_tja_mads) {
+        mads_button_press = GET_BIT(msg, MAZDA_TJA_BUTTON_BIT) ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
+      }
+
+      if (mazda_longitudinal) {
+        // ensure the driver's cancel press always exits longitudinal controls
+        bool cancel = GET_BIT(msg, 0U);
+        if (cancel) {
+          controls_allowed = false;
+        }
       }
     }
 
@@ -129,7 +148,9 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
         bool acc_armed = GET_BIT(msg, 2U) || cruise_engaged;
 
         if (acc_armed || cruise_engaged_prev || (!brake && !brake_pressed_prev)) {
-          acc_main_on = acc_armed;
+          if (!mazda_tja_mads) {
+            acc_main_on = acc_armed;
+          }
           pcm_cruise_check(cruise_engaged);
         }
       }
@@ -139,12 +160,8 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
 }
 
 static bool mazda_tx_hook(const CANPacket_t *msg) {
-  // Envelope sized for the CX-5 2022+ EPS, which the controller commands up to (max_torque 1200,
-  // driver_torque_multiplier 15 vs upstream stock 800/1). SafetyModel.mazda is per-brand and can't
-  // see the fingerprint/EPS, so these limits apply to every Mazda. Non-CX-5-EPS Mazdas self-cap
-  // lower in the controller (values.py gates the tune on minSteerSpeed == 0), so this is only a
-  // looser backstop for them — not a behavior change. Per-car gating would need a safety param.
-  const TorqueSteeringLimits MAZDA_STEERING_LIMITS = {
+  // Lateral envelope follows STEER_TO_ZERO in safetyParam, independently of TJA_MADS.
+  const TorqueSteeringLimits MAZDA_STEERING_LIMITS_HIGH = {
     .max_torque = 1200,
     .max_rate_up = 12,
     .max_rate_down = 25,
@@ -153,6 +170,17 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     .driver_torque_allowance = 15,
     .type = TorqueDriverLimited,
   };
+  const TorqueSteeringLimits MAZDA_STEERING_LIMITS_STOCK = {
+    .max_torque = 800,
+    .max_rate_up = 10,
+    .max_rate_down = 25,
+    .max_rt_delta = 384,
+    .driver_torque_multiplier = 1,
+    .driver_torque_allowance = 15,
+    .type = TorqueDriverLimited,
+  };
+  const TorqueSteeringLimits limits = mazda_steer_to_zero ? MAZDA_STEERING_LIMITS_HIGH :
+                                                        MAZDA_STEERING_LIMITS_STOCK;
 
   // CRZ_INFO.ACCEL_CMD is raw units of 0.001 m/s2 (offset removed below), so this is the
   // ISO window: 2.0 / -3.5 m/s2. Stock MRCC itself commands down to raw -3891 in lead stops.
@@ -170,7 +198,7 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   if (main_bus && (msg->addr == MAZDA_LKAS)) {
     int desired_torque = (((msg->data[0] & 0x0FU) << 8) | msg->data[1]) - 2048U;
 
-    if (steer_torque_cmd_checks(desired_torque, -1, MAZDA_STEERING_LIMITS)) {
+    if (steer_torque_cmd_checks(desired_torque, -1, limits)) {
       tx = false;
     }
   }
@@ -184,8 +212,12 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
                          ((msg->data[6] & 0xf0U) == 0x00U) &&
                          (msg->data[7] == ((0x5dU - msg->data[6]) & 0xffU));
 
-    // 13-bit ACCEL_CMD: data[2] low bits, data[3], data[4] high bits, offset 4096
-    int desired_accel = ((((int)msg->data[2] & 0x3) << 11) | (((int)msg->data[3]) << 3) | (((int)msg->data[4]) >> 5)) - 4096;
+    // 13-bit ACCEL_CMD: data[2] low bits, data[3], data[4] high bits, offset 4096.
+    // Decode unsigned first (MISRA), then subtract the DBC offset.
+    const uint32_t raw_accel = (((uint32_t)msg->data[2] & 0x3U) << 11) |
+                               ((uint32_t)msg->data[3] << 3) |
+                               ((uint32_t)msg->data[4] >> 5);
+    int desired_accel = (int)raw_accel - 4096;
     if (!stock_standby && longitudinal_accel_checks(desired_accel, MAZDA_LONG_LIMITS)) {
       tx = false;
     }
@@ -231,6 +263,17 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   }
 
   return tx;
+}
+
+// Mutate only the bus0->bus2 forward copy of CRZ_BTNS. Panda RX and the OEM body/MRCC
+// keep the original bus0 frame, including physical TJA. Requires TJA_MADS and the MADS
+// feature (system_enabled), not heartbeat_engaged_mads, so the first button edge cannot
+// leak to the FSC during a USB-heartbeat transition.
+static void mazda_fwd_modify(int bus_num, CANPacket_t *msg) {
+  if (mazda_tja_mads && m_mads_state.system_enabled && (bus_num == MAZDA_MAIN) &&
+      (msg->addr == MAZDA_CRZ_BTNS) && (GET_LEN(msg) >= 2U)) {
+    msg->data[MAZDA_TJA_BUTTON_BIT / 8U] &= (uint8_t)~(1U << (MAZDA_TJA_BUTTON_BIT % 8U));
+  }
 }
 
 static safety_config mazda_init(uint16_t param) {
@@ -282,7 +325,11 @@ static safety_config mazda_init(uint16_t param) {
   };
 
   mazda_longitudinal = GET_FLAG(param, MAZDA_PARAM_LONGITUDINAL);
+  mazda_steer_to_zero = GET_FLAG(param, MAZDA_PARAM_STEER_TO_ZERO);
+  mazda_tja_mads = GET_FLAG(param, MAZDA_PARAM_TJA_MADS);
   acc_main_on = false;
+  // TJA is the only lateral authorization source; MRCC/pcm cruise must not grant it.
+  mads_set_op_controls_allowed_requests_lateral(!mazda_tja_mads);
 
   return mazda_longitudinal ? BUILD_SAFETY_CFG(mazda_long_rx_checks, MAZDA_LONG_TX_MSGS) :
                               BUILD_SAFETY_CFG(mazda_rx_checks, MAZDA_TX_MSGS);
@@ -292,4 +339,5 @@ const safety_hooks mazda_hooks = {
   .init = mazda_init,
   .rx = mazda_rx_hook,
   .tx = mazda_tx_hook,
+  .fwd_modify = mazda_fwd_modify,
 };

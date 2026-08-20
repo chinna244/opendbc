@@ -13,7 +13,7 @@ from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.longitudinal import LEAD_DEBOUNCE_FRAMES, RESUME_UNLATCH_FRAMES, StandstillHold
 from opendbc.car.mazda.interface import CarInterface
-from opendbc.car.mazda.values import CAR, CarControllerParams
+from opendbc.car.mazda.values import CAR, CarControllerParams, MazdaSafetyFlags
 
 
 class TestCarControllerParams:
@@ -701,3 +701,128 @@ class TestRadarSessionSequencing:
     # and settles back to silenced once quiet again
     sends = self._step(cc, stock_radar_alive=False, fsc_settled=True)
     assert SESSION_PROG_DAT not in self._uds(sends)
+
+
+def _lkas_request(dat):
+  cp = CANParser("mazda_2017", [("CAM_LKAS", float("nan"))], 0)
+  cp.update([(0, [(0x243, dat, 0)])])
+  return int(cp.vl["CAM_LKAS"]["LKAS_REQUEST"])
+
+
+class TestCamLkasTorqueGate:
+  """Stale CAM_LKAS must drop commanded torque on the wire, not only the liveness flag."""
+
+  @pytest.fixture
+  def cc_stock_long(self):
+    CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], alpha_long=False,
+                                 is_release=False, docs=False)
+    CP_SP = CarInterface.get_params_sp(CP, CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], False, False, False)
+    return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
+
+  def test_stale_cam_lkas_sends_zero_torque(self, cc_stock_long):
+    CC = structs.CarControl()
+    CC.latActive = True
+    CC.actuators.torque = 0.4
+    CC = CC.as_reader()
+    CC_SP = structs.CarControlSP()
+    CS = SimpleNamespace(
+      out=SimpleNamespace(vEgoRaw=12.0, steeringTorque=0, brakePressed=False),
+      cam_lkas_live=True,
+      cam_lkas={"ERR_BIT_1": 0, "ERR_BIT_2": 0, "LINE_NOT_VISIBLE": 0, "BIT_1": 1},
+      cam_laneinfo={"LINE_VISIBLE": 0, "LINE_NOT_VISIBLE": 1, "LANE_LINES": 1,
+                    "BIT1": 0, "BIT2": 0, "BIT3": 0, "NO_ERR_BIT": 0, "S1": 0, "S1_HBEAM": 0},
+      crz_btns_counter=0,
+      cancel_button=0,
+      tja_button=0,
+      accel_button=0,
+      decel_button=0,
+      lkas_allowed_speed=True,
+    )
+
+    now_ns = 0
+    saw_torque = False
+    for _ in range(20):
+      _, sends = cc_stock_long.update(CC, CC_SP, CS, now_ns)
+      now_ns += int(DT_CTRL * 1e9)
+      dat = next(d for a, d, _b in sends if a == 0x243)
+      if _lkas_request(dat) != 0:
+        saw_torque = True
+        break
+    assert saw_torque
+
+    CS.cam_lkas_live = False
+    _, sends = cc_stock_long.update(CC, CC_SP, CS, now_ns)
+    dat = next(d for a, d, _b in sends if a == 0x243)
+    assert _lkas_request(dat) == 0
+
+
+class TestTjaIcbmSuppressScoping:
+  """ICBM must ignore the physical TJA bit unless TJA_MADS is set."""
+
+  @staticmethod
+  def _cc(candidate, *, car_fw=None):
+    CP = CarInterface.get_params(candidate, {0: {}, 1: {}, 2: {}}, car_fw or [], alpha_long=False,
+                                 is_release=False, docs=False)
+    CP_SP = CarInterface.get_params_sp(CP, candidate, {0: {}, 1: {}, 2: {}}, car_fw or [], False, False, False)
+    return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP), CP
+
+  @staticmethod
+  def _cs(*, tja_button=0):
+    return SimpleNamespace(
+      out=SimpleNamespace(vEgoRaw=12.0, steeringTorque=0, brakePressed=False),
+      cam_lkas_live=True,
+      cam_lkas={"ERR_BIT_1": 0, "ERR_BIT_2": 0, "LINE_NOT_VISIBLE": 0, "BIT_1": 1},
+      cam_laneinfo={"LINE_VISIBLE": 0, "LINE_NOT_VISIBLE": 1, "LANE_LINES": 1,
+                    "BIT1": 0, "BIT2": 0, "BIT3": 0, "NO_ERR_BIT": 0, "S1": 0, "S1_HBEAM": 0},
+      crz_btns_counter=0,
+      cancel_button=0,
+      tja_button=tja_button,
+      accel_button=0,
+      decel_button=0,
+      lkas_allowed_speed=True,
+    )
+
+  @staticmethod
+  def _crz_btns_present(sends):
+    return any(addr == 0x09d for addr, _dat, _bus in sends)
+
+  def test_tja_mads_suppresses_icbm_while_tja_held(self):
+    cc, CP = self._cc(CAR.MAZDA_CX5_2022)
+    assert CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA_MADS
+    CC = structs.CarControl()
+    CC.latActive = False
+    CC = CC.as_reader()
+    CC_SP = structs.CarControlSP()
+    CC_SP.intelligentCruiseButtonManagement.sendButton = (
+      structs.IntelligentCruiseButtonManagement.SendButtonState.increase
+    )
+    cc.last_button_frame = -10_000
+    _, sends = cc.update(CC, CC_SP, self._cs(tja_button=1), 0)
+    assert not self._crz_btns_present(sends)
+
+  def test_non_tja_does_not_suppress_icbm_for_tja_bit(self):
+    from opendbc.car.mazda.values import STEER_TO_ZERO_EPS_FW
+
+    swapped = sorted(STEER_TO_ZERO_EPS_FW)[0]
+    fw = structs.CarParams.CarFw()
+    fw.ecu = structs.CarParams.Ecu.eps
+    fw.address = 0x730
+    fw.subAddress = 0
+    fw.fwVersion = swapped
+
+    for candidate, car_fw in (
+      (CAR.MAZDA_CX9_2021, []),
+      (CAR.MAZDA_CX5, [fw]),
+    ):
+      cc, CP = self._cc(candidate, car_fw=car_fw)
+      assert not (CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA_MADS)
+      CC = structs.CarControl()
+      CC.latActive = False
+      CC = CC.as_reader()
+      CC_SP = structs.CarControlSP()
+      CC_SP.intelligentCruiseButtonManagement.sendButton = (
+        structs.IntelligentCruiseButtonManagement.SendButtonState.increase
+      )
+      cc.last_button_frame = -10_000
+      _, sends = cc.update(CC, CC_SP, self._cs(tja_button=1), 0)
+      assert self._crz_btns_present(sends), candidate

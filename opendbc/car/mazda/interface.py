@@ -27,6 +27,13 @@ class CarInterface(CarInterfaceBase):
     if not steer_to_zero:
       ret.minSteerSpeed = LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS
 
+    if steer_to_zero:
+      ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.STEER_TO_ZERO.value
+    # Physical TJA as MADS is verified on CX-5 2022. An EPS swap does not prove the
+    # same TJA button or CRZ_BTNS layout, so TJA_MADS stays platform-scoped.
+    if candidate == CAR.MAZDA_CX5_2022:
+      ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.TJA_MADS.value
+
     # CX-9 2021 verified against route 00000004--97e4328f4f: same message set at the same
     # rates, CRZ_INFO checksum holds on all 54k stock frames, radar UDS at 0x764, and the
     # same FSC camera firmware (GSH7-67XK2-U) as the CX-5 2022 this was developed on.

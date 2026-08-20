@@ -36,6 +36,10 @@ class CarControllerParams:
 
   CANCEL_CONTEXT_T = 0.5       # a wheel CANCEL keeps availability drops landing this long after release
 
+  # FSC CAM_LKAS is expected every control cycle once the camera is up; without a measured-frequency
+  # check, float("nan") liveness leaves stale zeros looking healthy when 0x243 disappears.
+  CAM_LKAS_TIMEOUT_T = 0.2
+
   # A marginal vision lead flickers leadVisible faster than the camera can be shown a track
   # appearing and vanishing (route 6bb2dc61c4 t+400: 6 toggles in 1.4 s on a 120 m lead), so the
   # advertised lead only follows a state that has held steady, the way Hyundai debounces its
@@ -101,6 +105,12 @@ class MazdaFlags(IntFlag):
 
 class MazdaSafetyFlags(IntFlag):
   LONG = 1
+  STEER_TO_ZERO = 2
+  TJA_MADS = 4
+
+
+def has_tja_mads(CP) -> bool:
+  return any(int(sc.safetyParam) & MazdaSafetyFlags.TJA_MADS for sc in CP.safetyConfigs)
 
 
 @dataclass

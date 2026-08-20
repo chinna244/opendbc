@@ -3,7 +3,7 @@ import pytest
 from opendbc.car import structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda.interface import CarInterface
-from opendbc.car.mazda.values import CAR, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW
+from opendbc.car.mazda.values import CAR, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaSafetyFlags
 
 Ecu = structs.CarParams.Ecu
 
@@ -80,3 +80,18 @@ class TestMazdaEpsSwap:
       CP = CarInterface.get_params(candidate, {0: {}, 1: {}, 2: {}}, [], False,
                                    is_release=False, docs=True)
       assert CP.dashcamOnly, candidate
+
+  def test_steer_to_zero_safety_param_follows_eps(self):
+    flag = MazdaSafetyFlags.STEER_TO_ZERO.value
+    assert _params(CAR.MAZDA_CX5_2022).safetyConfigs[0].safetyParam & flag
+    assert _params(CAR.MAZDA_CX5, _eps_fw(SWAPPED_EPS_FW)).safetyConfigs[0].safetyParam & flag
+    assert not (_params(CAR.MAZDA_CX5, _eps_fw(STOCK_CX5_EPS_FW)).safetyConfigs[0].safetyParam & flag)
+    assert not (_params(CAR.MAZDA_CX9_2021).safetyConfigs[0].safetyParam & flag)
+
+  def test_tja_mads_is_cx5_2022_only(self):
+    flag = MazdaSafetyFlags.TJA_MADS.value
+    assert _params(CAR.MAZDA_CX5_2022).safetyConfigs[0].safetyParam & flag
+    # An EPS swap does not prove the same TJA button / CRZ_BTNS layout.
+    assert not (_params(CAR.MAZDA_CX5, _eps_fw(SWAPPED_EPS_FW)).safetyConfigs[0].safetyParam & flag)
+    assert not (_params(CAR.MAZDA_CX9_2021).safetyConfigs[0].safetyParam & flag)
+    assert not (_params(CAR.MAZDA_CX5, _eps_fw(STOCK_CX5_EPS_FW)).safetyConfigs[0].safetyParam & flag)

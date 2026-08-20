@@ -1,5 +1,6 @@
 import pytest
 
+from opendbc.can import CANPacker
 from opendbc.car import DT_CTRL, gen_empty_fingerprint
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda.interface import CarInterface
@@ -244,3 +245,66 @@ class TestCancelUnderBraking:
     assert ret.cruiseState.available
     ret, n = self._feed(CI, packer, n + 5, 0.2, brake=True, cancel=False)
     assert not ret.cruiseState.available
+
+
+class TestCamLkasLiveness:
+  def test_stale_cam_lkas_is_not_live(self):
+    CI = _interface(alpha_long=False)
+    packer = CANPacker("mazda_2017")
+    lkas = packer.make_can_msg("CAM_LKAS", 0, {
+      "ERR_BIT_1": 0, "ERR_BIT_2": 0, "LINE_NOT_VISIBLE": 0, "BIT_1": 1,
+    })
+    for i in range(5):
+      CI.update([(int(i * DT_CTRL * 1e9), [(lkas[0], lkas[1], 2), (CAM_LANEINFO, SETTLED, 2)])])
+    assert CI.CS.cam_lkas_live
+    assert not CI.CS.out.steerFaultTemporary
+    stale_frames = int(CarControllerParams.CAM_LKAS_TIMEOUT_T / DT_CTRL) + 5
+    for i in range(5, 5 + stale_frames):
+      CI.update([(int(i * DT_CTRL * 1e9), [(CAM_LANEINFO, SETTLED, 2)])])
+    assert not CI.CS.cam_lkas_live
+    assert CI.CS.out.steerFaultTemporary
+
+  def test_liveness_and_temporary_fault_share_the_same_frame(self):
+    CI = _interface(alpha_long=False)
+    packer = CANPacker("mazda_2017")
+    lkas = packer.make_can_msg("CAM_LKAS", 0, {
+      "ERR_BIT_1": 0, "ERR_BIT_2": 0, "LINE_NOT_VISIBLE": 0, "BIT_1": 1,
+    })
+    for i in range(5):
+      ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(lkas[0], lkas[1], 2), (CAM_LANEINFO, SETTLED, 2)])])
+      assert CI.CS.cam_lkas_live
+      assert not ret.steerFaultTemporary
+
+    timeout_frames = int(CarControllerParams.CAM_LKAS_TIMEOUT_T / DT_CTRL)
+    for i in range(5, 5 + timeout_frames):
+      ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(CAM_LANEINFO, SETTLED, 2)])])
+      assert CI.CS.cam_lkas_live
+      assert not ret.steerFaultTemporary
+
+    expire = 5 + timeout_frames
+    ret, _ = CI.update([(int(expire * DT_CTRL * 1e9), [(CAM_LANEINFO, SETTLED, 2)])])
+    assert not CI.CS.cam_lkas_live
+    assert ret.steerFaultTemporary
+
+    ret, _ = CI.update([(int((expire + 1) * DT_CTRL * 1e9), [(lkas[0], lkas[1], 2), (CAM_LANEINFO, SETTLED, 2)])])
+    assert CI.CS.cam_lkas_live
+    assert not ret.steerFaultTemporary
+
+  def test_missing_cam_lkas_before_first_frame_is_not_a_fault(self):
+    CI = _interface(alpha_long=False)
+    CI.update([(0, [(CAM_LANEINFO, SETTLED, 2)])])
+    assert not CI.CS.cam_lkas_seen
+    assert not CI.CS.cam_lkas_live
+    assert not CI.CS.out.steerFaultTemporary
+
+
+class TestCamLkasFaults:
+  @pytest.mark.parametrize("err1, err2", [(1, 0), (0, 1), (1, 1)])
+  def test_camera_err_bits_are_permanent_faults(self, err1, err2):
+    CI = _interface(alpha_long=False)
+    packer = CANPacker("mazda_2017")
+    lkas = packer.make_can_msg("CAM_LKAS", 0, {
+      "ERR_BIT_1": err1, "ERR_BIT_2": err2, "LINE_NOT_VISIBLE": 0, "BIT_1": 1,
+    })
+    CI.update([(0, [(lkas[0], lkas[1], 2), (CAM_LANEINFO, SETTLED, 2)])])
+    assert CI.CS.out.steerFaultPermanent

@@ -1,5 +1,5 @@
 from opendbc.car.can_definitions import CanData
-from opendbc.car.mazda.values import Buttons, MazdaFlags
+from opendbc.car.mazda.values import Buttons, MazdaFlags, has_tja_mads
 
 # Radar frames the body ECU expects to keep receiving for stop-and-go to work. Byte-exact
 # captures from a 0x764 radar with no objects in view; only the counter nibble in the last
@@ -103,12 +103,13 @@ def create_radar_frames(bus, counter, lead):
   return frames
 
 
+def fsc_cam_lkas_allows_steer(lkas) -> bool:
+  # FSC ERR_BIT_1/2 is a real camera fault (steerFaultPermanent). Do not keep
+  # requesting torque against that. LINE_NOT_VISIBLE is not a steering-permission gate.
+  return int(lkas.get("ERR_BIT_1", 0)) == 0 and int(lkas.get("ERR_BIT_2", 0)) == 0
+
+
 def create_steering_control(packer, CP, frame, apply_torque, lkas):
-
-  tmp = apply_torque + 2048
-
-  lo = tmp & 0xFF
-  hi = tmp >> 8
 
   # copy values from camera
   b1 = int(lkas["BIT_1"])
@@ -116,6 +117,14 @@ def create_steering_control(packer, CP, frame, apply_torque, lkas):
   lnv = 0
   ldw = 0
   er2 = int(lkas["ERR_BIT_2"])
+
+  if not fsc_cam_lkas_allows_steer(lkas):
+    apply_torque = 0
+
+  tmp = apply_torque + 2048
+
+  lo = tmp & 0xFF
+  hi = tmp >> 8
 
   # Some older models do have these, newer models don't.
   # Either way, they all work just fine if set to zero.
@@ -190,12 +199,21 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool)
   return packer.make_can_msg("CAM_LANEINFO", 0, values)
 
 
-def create_button_cmd(packer, CP, counter, button):
+def create_button_cmd(packer, CP, counter, button, CS=None):
 
   can = int(button == Buttons.CANCEL)
   res = int(button == Buttons.RESUME)
   inc = int(button == Buttons.SET_PLUS)
   dec = int(button == Buttons.SET_MINUS)
+  # Live TJA/MODE copy is TJA_MADS-only. Upstream packs MODE_X/Y=0 and leaves TJA clear.
+  if has_tja_mads(CP):
+    tja = int(getattr(CS, "tja_button", 0) == 1)
+    mode_x = int(getattr(CS, "mode_x", 0) == 1)
+    mode_y = int(getattr(CS, "mode_y", 0) == 1)
+  else:
+    tja = 0
+    mode_x = 0
+    mode_y = 0
 
   if CP.flags & MazdaFlags.GEN1:
     values = {
@@ -217,11 +235,13 @@ def create_button_cmd(packer, CP, counter, button):
       "DISTANCE_MORE": 0,
       "DISTANCE_MORE_INV": 1,
 
-      "MODE_X": 0,
-      "MODE_X_INV": 1,
-
-      "MODE_Y": 0,
-      "MODE_Y_INV": 1,
+      # TJA_MADS: copy live wheel bits so OP CRZ_BTNS cannot fabricate a TJA 1→0→1
+      # edge or drop MODE_X/Y while cancel/resume/ICBM is on the bus.
+      "TJA_BUTTON": tja,
+      "MODE_X": mode_x,
+      "MODE_X_INV": (mode_x + 1) % 2,
+      "MODE_Y": mode_y,
+      "MODE_Y_INV": (mode_y + 1) % 2,
 
       "BIT1": 1,
       "BIT2": 1,

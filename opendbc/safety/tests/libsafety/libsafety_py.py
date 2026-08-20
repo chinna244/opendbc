@@ -59,6 +59,7 @@ ffi.cdef("""
 bool safety_rx_hook(CANPacket_t *msg);
 bool safety_tx_hook(CANPacket_t *msg);
 int safety_fwd_hook(int bus_num, int addr);
+void safety_fwd_modify(int bus_num, CANPacket_t *msg);
 int set_safety_hooks(uint16_t mode, uint16_t param);
 
 void set_controls_allowed(bool c);
@@ -139,6 +140,8 @@ int mads_get_current_disengage_reason(void);
 int get_temp_debug(void);
 uint32_t get_acc_main_on_mismatches(void);
 void set_mads_params(bool enable_mads, bool disengage_lateral_on_brake, bool pause_lateral_on_brake);
+void mads_set_op_controls_allowed_requests_lateral(bool enable);
+bool get_op_controls_allowed_requests_lateral(void);
 void mads_apply_alternative_experience(int mode);
 void tick_mads_state(bool vm, bool acc_main, bool op_allowed, bool braking, bool steering_disengage);
 void set_heartbeat_engaged_mads(bool c);

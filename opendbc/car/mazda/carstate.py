@@ -2,7 +2,7 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, DT_CTRL, create_button_events, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.mazda.values import DBC, LKAS_LIMITS, CarControllerParams
+from opendbc.car.mazda.values import DBC, LKAS_LIMITS, CarControllerParams, has_tja_mads
 from opendbc.sunnypilot.car.mazda.carstate_ext import CarStateExt
 
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -11,6 +11,7 @@ FSC_SETTLE_FRAMES = int(CarControllerParams.FSC_SETTLE_T / DT_CTRL)
 STOCK_RADAR_ALIVE_FRAMES = int(CarControllerParams.STOCK_RADAR_ALIVE_T / DT_CTRL)
 STOCK_RADAR_GUARD_FRAMES = int(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CTRL)
 CANCEL_CONTEXT_FRAMES = int(CarControllerParams.CANCEL_CONTEXT_T / DT_CTRL)
+CAM_LKAS_STALE_FRAMES = int(CarControllerParams.CAM_LKAS_TIMEOUT_T / DT_CTRL)
 
 
 class CarState(CarStateBase, CarStateExt):
@@ -31,6 +32,9 @@ class CarState(CarStateBase, CarStateExt):
     self.cancel_button = 0
     self.resume_button = 0
     self.main_button = 0
+    self.tja_button = 0
+    self.mode_x = 0
+    self.mode_y = 0
 
     self.cruise_available = False
     self.cruise_enabled = False
@@ -40,8 +44,14 @@ class CarState(CarStateBase, CarStateExt):
     self.cancel_context_frames = 0
     self.cam_laneinfo_seen = False
     self.fsc_settled_frames = 0
+    self.cam_lkas_seen = False
+    self.cam_lkas_stale_frames = CAM_LKAS_STALE_FRAMES + 1
     # the body ECU has taken the standstill hold over and is holding the brakes itself
     self.brake_hold = False
+
+  @property
+  def cam_lkas_live(self) -> bool:
+    return self.cam_lkas_seen and self.cam_lkas_stale_frames <= CAM_LKAS_STALE_FRAMES
 
   @property
   def fsc_settled(self) -> bool:
@@ -197,29 +207,40 @@ class CarState(CarStateBase, CarStateExt):
     # Check if LKAS is disabled due to lack of driver torque when all other states indicate
     # it should be enabled (steer lockout). Don't warn until we actually get lkas active
     # and lose it again, i.e, after initial lkas activation
-    if self.CP.minSteerSpeed > 0:
-      ret.steerFaultTemporary = self.lkas_allowed_speed and lkas_blocked
-    else:
-      # CX-5 2022: EPS accepts steering at all speeds regardless of LKAS_BLOCK.
-      # Verified across 5.5M frames: LKAS_BLOCK never indicates a real steering failure.
-      ret.steerFaultTemporary = False
-
     self.acc_active_last = ret.cruiseState.enabled
 
     self.crz_btns_counter = cp.vl["CRZ_BTNS"]["CTR"]
 
-    # camera signals
+    # camera signals: update liveness before steerFaultTemporary so the alert matches
+    # the same control frame as cam_lkas_live / CarController torque gating.
+    if len(cp_cam.vl_all["CAM_LKAS"]["ERR_BIT_1"]) > 0:
+      self.cam_lkas_seen = True
+      self.cam_lkas_stale_frames = 0
+    elif self.cam_lkas_seen:
+      self.cam_lkas_stale_frames += 1
+
     self.cam_lkas = cp_cam.vl["CAM_LKAS"]
     self.cam_laneinfo = cp_cam.vl["CAM_LANEINFO"]
-    ret.steerFaultPermanent = cp_cam.vl["CAM_LKAS"]["ERR_BIT_1"] == 1
+    ret.steerFaultPermanent = (cp_cam.vl["CAM_LKAS"]["ERR_BIT_1"] == 1 or
+                               cp_cam.vl["CAM_LKAS"]["ERR_BIT_2"] == 1)
 
-    # cruise control button events: distance, inc, dec, resume, cancel, and main
+    cam_lkas_lost = self.cam_lkas_seen and not self.cam_lkas_live
+    if self.CP.minSteerSpeed > 0:
+      ret.steerFaultTemporary = (self.lkas_allowed_speed and lkas_blocked) or cam_lkas_lost
+    else:
+      # CX-5 2022: EPS accepts steering at all speeds regardless of LKAS_BLOCK.
+      # Verified across 5.5M frames: LKAS_BLOCK never indicates a real steering failure.
+      # After the first CAM_LKAS, a stale camera stream is a temporary steering fault.
+      ret.steerFaultTemporary = cam_lkas_lost
+
+    # cruise control button events: distance, inc, dec, resume, cancel, TJA or main
     prev_distance_button = self.distance_button
     prev_accel_button = self.accel_button
     prev_decel_button = self.decel_button
     prev_cancel_button = self.cancel_button
     prev_resume_button = self.resume_button
     prev_main_button = self.main_button
+    prev_tja_button = self.tja_button
     self.distance_button = cp.vl["CRZ_BTNS"]["DISTANCE_LESS"]
     # On CX-5 2022 the wheel "+" button toggles SET_P (not RES); RES is the resume button.
     # Verified against route 0000019c--84a5408a38 seg2/3: holding "+" emits SET_P=1, body ECU increments CRZ_SPEED.
@@ -230,15 +251,25 @@ class CarState(CarStateBase, CarStateExt):
     # body ECU treats the latest non-cancel frame as authoritative. Critical for cancel-safety.
     self.cancel_button = cp.vl["CRZ_BTNS"]["CAN_OFF"]
     self.resume_button = cp.vl["CRZ_BTNS"]["RES"]
-    self.main_button = int(cp.vl["CRZ_BTNS"]["MODE_X"] == 1 and cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
+    self.mode_x = int(cp.vl["CRZ_BTNS"]["MODE_X"] == 1)
+    self.mode_y = int(cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
+    self.tja_button = int(cp.vl["CRZ_BTNS"]["TJA_BUTTON"] == 1)
+    self.main_button = int(self.mode_x and self.mode_y)
 
+    # TJA_MADS: physical TJA is the only MADS toggle (ButtonType.lkas). MODE_X/Y are
+    # copied onto OP CRZ_BTNS TX but must not emit ButtonType.mainCruise.
+    extra_events = (
+      create_button_events(self.tja_button, prev_tja_button, {1: ButtonType.lkas})
+      if has_tja_mads(self.CP) else
+      create_button_events(self.main_button, prev_main_button, {1: ButtonType.mainCruise})
+    )
     ret.buttonEvents = [
       *create_button_events(self.distance_button, prev_distance_button, {1: ButtonType.gapAdjustCruise}),
       *create_button_events(self.accel_button, prev_accel_button, {1: ButtonType.accelCruise}),
       *create_button_events(self.decel_button, prev_decel_button, {1: ButtonType.decelCruise}),
       *create_button_events(self.cancel_button, prev_cancel_button, {1: ButtonType.cancel}),
       *create_button_events(self.resume_button, prev_resume_button, {1: ButtonType.resumeCruise}),
-      *create_button_events(self.main_button, prev_main_button, {1: ButtonType.mainCruise}),
+      *extra_events,
     ]
 
     CarStateExt.update(self, ret, ret_sp, can_parsers)
@@ -255,6 +286,10 @@ class CarState(CarStateBase, CarStateExt):
     cam_messages = [
       # read through vl_all, which unlike vl has no lazy registration
       ("CAM_LANEINFO", 0),
+      # FSC CAM_LKAS must be subscribed, not lazy-registered after the first
+      # parse, so ERR_BIT_* are available the same frame CarController decides
+      # whether a steer request is coherent.
+      ("CAM_LKAS", float("nan")),
       ("CAM_TRAFFIC_SIGNS", 0),
     ]
     return {
