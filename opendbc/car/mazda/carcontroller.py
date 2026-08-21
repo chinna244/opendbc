@@ -110,14 +110,18 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       tja_released = not tja_button and self.tja_button_prev
 
       if tja_pressed:
-        # PEDALS may already show the TJA-induced arm in the same update as the button
-        # edge. The previous stable sample is the state that existed before the press.
-        mrcc_armed_before_press = self.tja_mrcc_armed_prev if self.tja_mrcc_armed_prev is not None else mrcc_armed
-        self.tja_mrcc_unarm_pending = not mrcc_armed_before_press
-        self.tja_mrcc_saw_armed = False
+        if not self.tja_mrcc_unarm_pending:
+          # PEDALS may already show the TJA-induced arm in the same update as the button
+          # edge. The previous stable sample is the state that existed before the press.
+          mrcc_armed_before_press = self.tja_mrcc_armed_prev if self.tja_mrcc_armed_prev is not None else mrcc_armed
+          self.tja_mrcc_unarm_pending = not mrcc_armed_before_press
+          self.tja_mrcc_saw_armed = False
+          self.tja_mrcc_tx_frames = 0
+        # Route 5d: a second TJA press can arrive before raw PEDALS acknowledges
+        # the first cleanup. Preserve that transaction and its bounded TX count,
+        # but pause it until the newest physical press is released.
         self.tja_mrcc_release_counter = None
         self.tja_mrcc_release_wait_frames = 0
-        self.tja_mrcc_tx_frames = 0
 
       if self.tja_mrcc_unarm_pending:
         self.tja_mrcc_saw_armed |= raw_mrcc_armed

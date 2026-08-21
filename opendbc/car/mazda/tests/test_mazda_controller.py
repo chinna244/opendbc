@@ -975,6 +975,61 @@ class TestTjaMrccSideEffect:
     assert not self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True))
     assert len(self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True))) == 1
 
+  def test_route_5d_double_tap_before_first_cleanup_preserves_transaction(self):
+    """Route 5d at 123.101/123.263: the second press landed before the first
+    cleanup frame. Wait for the final release, then clean up exactly once."""
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=2)
+    for _ in range(5):
+      assert not self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=3))
+
+    assert not self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=4))
+    payloads = self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=5))
+    assert len(payloads) == 1
+    assert cc.tja_mrcc_tx_frames == 1
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=6)
+    assert not cc.tja_mrcc_unarm_pending
+
+  def test_route_5d_double_tap_after_ignored_cleanup_preserves_retry_budget(self):
+    """Route 5d at 106.637/106.807: the second press landed after a cleanup
+    frame but before its acknowledgement. Resume the same bounded transaction."""
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+    assert len(self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=3))) == 1
+    assert cc.tja_mrcc_tx_frames == 1
+
+    # The second press must not clear the pending transaction or reset its cap.
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=3)
+    for _ in range(5):
+      assert not self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=4))
+    assert cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_tx_frames == 1
+
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=5)
+    assert not self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=6))
+    assert len(self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=7))) == 1
+    assert cc.tja_mrcc_tx_frames == 2
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=8)
+    assert not cc.tja_mrcc_unarm_pending
+
   def test_manual_mrcc_off_before_tja_release_is_never_toggled_on(self):
     cc = self._cc()
     CC, CC_SP = self._controls()
