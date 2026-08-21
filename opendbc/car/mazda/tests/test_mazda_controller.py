@@ -11,7 +11,7 @@ from opendbc.can import CANPacker, CANParser
 from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.carcontroller import (CarController, TJA_MRCC_RAW_OFF_CONFIRM_FRAMES,
-                                             TJA_MRCC_RELEASE_WAIT_FRAMES)
+                                             TJA_MRCC_MAX_TX_FRAMES, TJA_MRCC_RELEASE_WAIT_FRAMES)
 from opendbc.car.mazda.longitudinal import LEAD_DEBOUNCE_FRAMES, RESUME_UNLATCH_FRAMES, StandstillHold
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams, MazdaSafetyFlags
@@ -882,9 +882,10 @@ class TestTjaMrccSideEffect:
       self._step(cc, CC, CC_SP, tja=0, armed=False)
     assert not cc.tja_mrcc_unarm_pending
 
-    # MRCC feedback may lag, but a toggle must never be repeated.
+    # Once raw feedback confirms off, the bounded hold must not continue.
     for _ in range(50):
-      assert not self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True))
+      assert not self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False))
 
   def test_tja_preserves_mrcc_that_was_already_armed(self):
     cc = self._cc()
@@ -1018,3 +1019,78 @@ class TestTjaMrccSideEffect:
       self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=6))
     assert len(self._button_payloads(
       self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=7))) == 1
+
+  def test_route_5b_ignored_first_frame_gets_bounded_followup(self):
+    """Route 5b at 177.214, 239.571, and 248.071: Mazda received one
+    counter-correct frame but stayed armed. Keep the logical press asserted on the
+    next fresh counter, then stop immediately when raw PEDALS confirms MRCC off."""
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=7)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=8)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=9)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=10)
+
+    payloads = []
+    payloads.extend(self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=11)))
+    # The first counter after a transmitted frame is reserved for raw feedback.
+    assert not self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=12))
+    # First frame was ignored, so the following fresh counter gets one follow-up.
+    payloads.extend(self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=13)))
+    # Mazda accepted the second frame. Raw-off stops the transaction before another tap.
+    payloads.extend(self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=14)))
+
+    assert len(payloads) == 2
+    cp = CANParser("mazda_2017", [("CRZ_BTNS", 0)], 0)
+    counters = []
+    for dat in payloads:
+      cp.update([(0, [(0x09d, dat, 0)])])
+      counters.append(cp.vl["CRZ_BTNS"]["CTR"])
+    assert counters == [12, 14]
+    assert not cc.tja_mrcc_unarm_pending
+
+  def test_cleanup_is_hard_capped_at_physical_button_length(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+
+    payloads = []
+    for counter in range(3, 16):
+      payloads.extend(self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+
+    assert len(payloads) == TJA_MRCC_MAX_TX_FRAMES
+    assert not cc.tja_mrcc_unarm_pending
+
+  def test_final_cleanup_frame_still_suppresses_icbm(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=3)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=4)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=5)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=6)
+
+    CC_SP.intelligentCruiseButtonManagement.sendButton = (
+      structs.IntelligentCruiseButtonManagement.SendButtonState.increase
+    )
+    cc.last_button_frame = -10_000
+    payloads = self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=7))
+    assert len(payloads) == 1
+
+    cp = CANParser("mazda_2017", [("CRZ_BTNS", 0)], 0)
+    cp.update([(0, [(0x09d, payloads[0], 0)])])
+    assert cp.vl["CRZ_BTNS"]["BIT1"] == 0
+    assert cp.vl["CRZ_BTNS"]["SET_P"] == 0

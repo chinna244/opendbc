@@ -18,6 +18,8 @@ LongCtrlState = structs.CarControl.Actuators.LongControlState
 # received frames between those buses, not our own transmissions.
 LONG_BUSES = (0, 2)
 TJA_MRCC_RELEASE_WAIT_FRAMES = 25
+TJA_MRCC_MAX_TX_FRAMES = 3
+TJA_MRCC_RETRY_COUNTER_GAP = 2
 # PEDALS can briefly report both ACC bits low during a brake transition. Require
 # raw-off to persist before it overrides the intentionally brake-held public cruise
 # state. Route 56's real TJA cleanup stayed raw-off for seconds, so this remains well
@@ -43,11 +45,13 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.tja_mrcc_saw_armed = False
     self.tja_mrcc_release_counter: int | None = None
     self.tja_mrcc_release_wait_frames = 0
+    self.tja_mrcc_tx_frames = 0
     self.tja_mrcc_armed_prev: bool | None = None
     self.tja_mrcc_raw_off_frames = 0
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
+    tja_mrcc_cleanup_tx = False
 
     apply_torque = 0
 
@@ -85,8 +89,11 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # Panda can strip the camera-forwarded copy, but it cannot hide a frame from ECUs
     # already sharing bus 0. If MRCC was off before TJA, undo only that side effect with
     # the exact captured active-low MRCC master tap after the driver releases TJA.
-    # This is a single transaction, not a retry loop: repeated master-button taps can
-    # toggle MRCC back on. Preserve MRCC when it was already armed before TJA.
+    # Keep this one bounded transaction, not a feedback-driven retry loop. A physical
+    # MRCC press produces about three asserted frames; route 5b proved that Mazda
+    # occasionally ignores a single injected frame. Stop as soon as raw MRCC goes off
+    # and never transmit more than the captured three-frame physical-button length.
+    # Preserve MRCC when it was already armed before TJA.
     if has_tja_mads(self.CP):
       tja_button = bool(getattr(CS, "tja_button", 0))
       crz_btns_counter = int(CS.crz_btns_counter)
@@ -110,6 +117,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         self.tja_mrcc_saw_armed = False
         self.tja_mrcc_release_counter = None
         self.tja_mrcc_release_wait_frames = 0
+        self.tja_mrcc_tx_frames = 0
 
       if self.tja_mrcc_unarm_pending:
         self.tja_mrcc_saw_armed |= raw_mrcc_armed
@@ -121,20 +129,36 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
           self.tja_mrcc_release_counter = crz_btns_counter
           self.tja_mrcc_release_wait_frames = 0
         elif self.tja_mrcc_release_counter is not None:
-          retry_unblocked = not CC.cruiseControl.cancel and not CC.cruiseControl.resume
-          if not retry_unblocked:
+          if not raw_mrcc_armed:
+            # Raw-off is sufficient to stop an in-flight transaction. Waiting for the
+            # filtered state here could send another toggle after a manual/accepted off.
+            self.tja_mrcc_unarm_pending = False
+          elif CC.cruiseControl.cancel or CC.cruiseControl.resume:
             # If another button command owns this frame, wait for a new OEM counter
             # after it clears rather than sending from an old retained sample.
             self.tja_mrcc_release_counter = crz_btns_counter
             self.tja_mrcc_release_wait_frames = 0
           else:
             self.tja_mrcc_release_wait_frames += 1
-            if crz_btns_counter != self.tja_mrcc_release_counter:
+            counter_delta = (crz_btns_counter - self.tja_mrcc_release_counter) % 16
+            # The first attempt uses the next counter. Give raw PEDALS two complete
+            # OEM counter periods to acknowledge each later attempt before another
+            # toggle is permitted; route 5b's successful acknowledgements all arrived
+            # within one period.
+            required_delta = 1 if self.tja_mrcc_tx_frames == 0 else TJA_MRCC_RETRY_COUNTER_GAP
+            if counter_delta >= required_delta:
               # Raw-off means the driver or Mazda already disabled MRCC. Never send a
               # toggle in that state: it could turn MRCC back on.
               if raw_mrcc_armed:
                 can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, crz_btns_counter, Buttons.MRCC_OFF, CS))
-              self.tja_mrcc_unarm_pending = False
+                tja_mrcc_cleanup_tx = True
+                self.tja_mrcc_tx_frames += 1
+                self.tja_mrcc_release_counter = crz_btns_counter
+                self.tja_mrcc_release_wait_frames = 0
+                if self.tja_mrcc_tx_frames >= TJA_MRCC_MAX_TX_FRAMES:
+                  self.tja_mrcc_unarm_pending = False
+              else:
+                self.tja_mrcc_unarm_pending = False
             elif self.tja_mrcc_release_wait_frames > TJA_MRCC_RELEASE_WAIT_FRAMES:
               # A dead/stale CRZ_BTNS stream must not suppress ICBM indefinitely.
               self.tja_mrcc_unarm_pending = False
@@ -167,7 +191,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # TJA 1→0→1 edge on OP CRZ_BTNS. Non-TJA Mazdas must not let the TJA bit affect ICBM.
     icbm_suppress = (
       CC.cruiseControl.cancel or CC.cruiseControl.resume or CS.cancel_button == 1 or
-      (has_tja_mads(self.CP) and (getattr(CS, "tja_button", 0) == 1 or self.tja_mrcc_unarm_pending))
+      (has_tja_mads(self.CP) and
+       (getattr(CS, "tja_button", 0) == 1 or self.tja_mrcc_unarm_pending or tja_mrcc_cleanup_tx))
     )
     if not icbm_suppress:
       can_sends.extend(IntelligentCruiseButtonManagementInterface.update(self, CC_SP, CS, self.packer, self.frame, self.last_button_frame))
