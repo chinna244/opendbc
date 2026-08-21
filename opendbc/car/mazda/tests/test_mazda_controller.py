@@ -11,7 +11,7 @@ from opendbc.can import CANPacker, CANParser
 from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.carcontroller import (CarController, TJA_MRCC_RAW_OFF_CONFIRM_FRAMES,
-                                             TJA_MRCC_UNARM_STEP)
+                                             TJA_MRCC_RELEASE_WAIT_FRAMES)
 from opendbc.car.mazda.longitudinal import LEAD_DEBOUNCE_FRAMES, RESUME_UNLATCH_FRAMES, StandstillHold
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams, MazdaSafetyFlags
@@ -768,7 +768,7 @@ class TestTjaIcbmSuppressScoping:
     return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP), CP
 
   @staticmethod
-  def _cs(*, tja_button=0, cruise_available=False, mrcc_armed_raw=None):
+  def _cs(*, tja_button=0, cruise_available=False, mrcc_armed_raw=None, crz_btns_counter=0):
     if mrcc_armed_raw is None:
       mrcc_armed_raw = cruise_available
     return SimpleNamespace(
@@ -780,7 +780,7 @@ class TestTjaIcbmSuppressScoping:
       cam_lkas={"ERR_BIT_1": 0, "ERR_BIT_2": 0, "LINE_NOT_VISIBLE": 0, "BIT_1": 1},
       cam_laneinfo={"LINE_VISIBLE": 0, "LINE_NOT_VISIBLE": 1, "LANE_LINES": 1,
                     "BIT1": 0, "BIT2": 0, "BIT3": 0, "NO_ERR_BIT": 0, "S1": 0, "S1_HBEAM": 0},
-      crz_btns_counter=0,
+      crz_btns_counter=crz_btns_counter,
       cancel_button=0,
       tja_button=tja_button,
       accel_button=0,
@@ -851,9 +851,12 @@ class TestTjaMrccSideEffect:
   def _button_payloads(sends):
     return [dat for addr, dat, bus in sends if addr == 0x09d and bus == 0]
 
-  def _step(self, cc, CC, CC_SP, *, tja, armed, raw_armed=None):
+  def _step(self, cc, CC, CC_SP, *, tja, armed, raw_armed=None, counter=None):
+    if counter is None:
+      counter = (getattr(cc, "_test_crz_btns_counter", -1) + 1) % 16
+    cc._test_crz_btns_counter = counter
     CS = TestTjaIcbmSuppressScoping._cs(tja_button=tja, cruise_available=armed,
-                                        mrcc_armed_raw=raw_armed)
+                                        mrcc_armed_raw=raw_armed, crz_btns_counter=counter)
     return cc.update(CC, CC_SP, CS, 0)[1]
 
   def test_tja_caused_mrcc_arm_is_undone_after_release(self):
@@ -864,10 +867,10 @@ class TestTjaMrccSideEffect:
     self._step(cc, CC, CC_SP, tja=1, armed=False)
     self._step(cc, CC, CC_SP, tja=1, armed=True)
 
-    payloads = []
-    for _ in range(TJA_MRCC_UNARM_STEP + 1):
-      payloads.extend(self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True)))
-    assert payloads
+    # Release records the current counter; the following fresh counter gets one tap.
+    assert not self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True))
+    payloads = self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True))
+    assert len(payloads) == 1
 
     cp = CANParser("mazda_2017", [("CRZ_BTNS", 0)], 0)
     cp.update([(0, [(0x09d, payloads[0], 0)])])
@@ -879,6 +882,10 @@ class TestTjaMrccSideEffect:
       self._step(cc, CC, CC_SP, tja=0, armed=False)
     assert not cc.tja_mrcc_unarm_pending
 
+    # MRCC feedback may lag, but a toggle must never be repeated.
+    for _ in range(50):
+      assert not self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True))
+
   def test_tja_preserves_mrcc_that_was_already_armed(self):
     cc = self._cc()
     CC, CC_SP = self._controls()
@@ -886,7 +893,7 @@ class TestTjaMrccSideEffect:
     self._step(cc, CC, CC_SP, tja=1, armed=True)
 
     payloads = []
-    for _ in range(TJA_MRCC_UNARM_STEP + 1):
+    for _ in range(3):
       payloads.extend(self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True)))
     assert not payloads
     assert not cc.tja_mrcc_unarm_pending
@@ -914,11 +921,9 @@ class TestTjaMrccSideEffect:
     # from MRCC-off and receive another automatic off tap after release.
     self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=False)
     self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True)
-    payloads = []
-    for _ in range(TJA_MRCC_UNARM_STEP + 1):
-      payloads.extend(self._button_payloads(
-        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True)))
-    assert payloads
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True)
+    payloads = self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True))
+    assert len(payloads) == 1
 
   def test_brief_raw_dropout_does_not_unarm_prearmed_mrcc(self):
     cc = self._cc()
@@ -931,7 +936,7 @@ class TestTjaMrccSideEffect:
     self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=False)
 
     payloads = []
-    for _ in range(TJA_MRCC_UNARM_STEP + 1):
+    for _ in range(3):
       payloads.extend(self._button_payloads(
         self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True)))
     assert not payloads
@@ -942,6 +947,74 @@ class TestTjaMrccSideEffect:
     CC, CC_SP = self._controls()
     self._step(cc, CC, CC_SP, tja=1, armed=False)
     payloads = []
-    for _ in range(TJA_MRCC_UNARM_STEP + 1):
+    for _ in range(3):
       payloads.extend(self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True)))
     assert not payloads
+
+  def test_same_frame_tja_arm_uses_pre_press_mrcc_state(self):
+    """The TJA frame and PEDALS arm can reach CarState together. The previous
+    stable sample, not the already-armed edge sample, owns the cleanup decision."""
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True)
+    assert len(self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True))) == 1
+
+  def test_long_hold_does_not_consume_cleanup(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False)
+    self._step(cc, CC, CC_SP, tja=1, armed=False, raw_armed=False)
+    for _ in range(TJA_MRCC_RELEASE_WAIT_FRAMES + 100):
+      assert not self._button_payloads(self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True))
+
+    assert not self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True))
+    assert len(self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True))) == 1
+
+  def test_manual_mrcc_off_before_tja_release_is_never_toggled_on(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False)
+    self._step(cc, CC, CC_SP, tja=1, armed=False, raw_armed=False)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True)
+    # The driver turns MRCC off while TJA remains held. Filtered availability can
+    # still be cached true under braking, so the raw bit must suppress the toggle.
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=False)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=False)
+    for _ in range(20):
+      assert not self._button_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=False))
+
+  def test_cleanup_waits_for_fresh_counter_and_times_out_silently(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=3)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=4)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=5)
+    for _ in range(TJA_MRCC_RELEASE_WAIT_FRAMES + 1):
+      assert not self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=5))
+    assert not cc.tja_mrcc_unarm_pending
+
+  def test_cancel_defers_cleanup_until_a_later_fresh_counter(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=3)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=4)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=5)
+
+    CC_cancel = structs.CarControl()
+    CC_cancel.cruiseControl.cancel = True
+    assert not self._button_payloads(
+      self._step(cc, CC_cancel.as_reader(), CC_SP, tja=0, armed=True, raw_armed=True, counter=6))
+
+    # Clearing cancel on the retained counter is not fresh enough for the cleanup.
+    assert not self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=6))
+    assert len(self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=7))) == 1
