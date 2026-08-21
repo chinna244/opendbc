@@ -199,6 +199,51 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.assertTrue(self.safety.get_controls_allowed_lateral())
 
   @require_tja_mads
+  def test_tja_rising_edge_resets_stale_heartbeat_mismatches(self):
+    """A quick MADS off->on press must get a fresh heartbeat grace window."""
+    self.safety.set_mads_params(True, False, False)
+    self._rx(self._lkas_button_msg(True))
+    self._rx(self._lkas_button_msg(False))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    # Model two old disengaged-heartbeat samples accumulated after userspace
+    # disabled MADS, while panda still temporarily retains lateral authorization.
+    self.safety.set_heartbeat_engaged_mads(False)
+    for _ in range(2):
+      self.safety.mads_heartbeat_engaged_check()
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    # A new physical TJA request arrives before the heartbeat catches up. The
+    # next check must be sample one of a fresh window, not the old third sample.
+    self._rx(self._lkas_button_msg(True))
+    self.safety.mads_heartbeat_engaged_check()
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    # The new engaged heartbeat catches up and clears the fresh sample.
+    self.safety.set_heartbeat_engaged_mads(True)
+    self.safety.mads_heartbeat_engaged_check()
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  @require_tja_mads
+  def test_tja_rising_edge_does_not_hide_persistent_heartbeat_failure(self):
+    """The reset grants grace, not indefinite authorization without a heartbeat."""
+    self.safety.set_mads_params(True, False, False)
+    self._rx(self._lkas_button_msg(True))
+    self._rx(self._lkas_button_msg(False))
+    self.safety.set_heartbeat_engaged_mads(False)
+
+    for _ in range(2):
+      self.safety.mads_heartbeat_engaged_check()
+    self._rx(self._lkas_button_msg(True))
+
+    for _ in range(2):
+      self.safety.mads_heartbeat_engaged_check()
+      self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    self.safety.mads_heartbeat_engaged_check()
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  @require_tja_mads
   def test_tja_grants_lateral_while_mrcc_already_armed(self):
     self.safety.set_mads_params(True, False, False)
 

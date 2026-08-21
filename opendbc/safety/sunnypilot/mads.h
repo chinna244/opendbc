@@ -93,6 +93,15 @@ inline void m_update_control_state(void) {
   // engagement (pcm cruise) cannot authorize lateral without a TJA press.
   const bool op_allowed_lat_request = m_mads_state.op_controls_allowed_requests_lateral &&
                                       (m_mads_state.op_controls_allowed.transition == MADS_EDGE_RISING);
+
+  // A fresh physical MADS request starts a new heartbeat-agreement window. Without
+  // this reset, mismatch samples left over from a recent disable can revoke lateral
+  // controls immediately after a quick off->on button cycle, before the new heartbeat
+  // reaches panda. A genuinely missing heartbeat still disengages after three new checks.
+  if (m_mads_state.mads_button.transition == MADS_EDGE_RISING) {
+    heartbeat_engaged_mads_mismatches = 0U;
+  }
+
   if ((m_mads_state.acc_main.transition == MADS_EDGE_RISING) ||
       (m_mads_state.mads_button.transition == MADS_EDGE_RISING) ||
       op_allowed_lat_request) {
