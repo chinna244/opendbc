@@ -35,6 +35,8 @@ class CarState(CarStateBase, CarStateExt):
     self.tja_button = 0
     self.mode_x = 0
     self.mode_y = 0
+    # Active-low wheel MRCC master (CRZ_BTNS.BIT1). Parsed from bus 0 only.
+    self.mrcc_button = 0
 
     self.cruise_available = False
     self.cruise_enabled = False
@@ -260,6 +262,9 @@ class CarState(CarStateBase, CarStateExt):
     self.mode_x = int(cp.vl["CRZ_BTNS"]["MODE_X"] == 1)
     self.mode_y = int(cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
     self.tja_button = int(cp.vl["CRZ_BTNS"]["TJA_BUTTON"] == 1)
+    # BIT1 is active-low. The pt parser is bus 0, so panda TX loopback (src 128) never
+    # updates this; a 0 here is the wheel, not our synthetic MRCC-off frame.
+    self.mrcc_button = int(cp.vl["CRZ_BTNS"]["BIT1"] == 0)
     self.main_button = int(self.mode_x and self.mode_y)
 
     # TJA_MADS: physical TJA is the only MADS toggle (ButtonType.lkas). MODE_X/Y are

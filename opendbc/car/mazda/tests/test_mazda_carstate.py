@@ -315,3 +315,22 @@ class TestCamLkasFaults:
     })
     CI.update([(0, [(lkas[0], lkas[1], 2), (CAM_LANEINFO, SETTLED, 2)])])
     assert CI.CS.out.steerFaultPermanent
+
+
+class TestPhysicalMrccBit1Source:
+  def test_wheel_bit1_is_src0_and_tx_loopback_is_ignored(self):
+    CI = _interface(alpha_long=False)
+    packer = CANPacker("mazda_2017")
+    wheel_press = packer.make_can_msg("CRZ_BTNS", 0, {"BIT1": 0, "BIT1_INV": 1})
+    # First update lazy-registers CRZ_BTNS; the second actually parses it.
+    CI.update([(0, [(wheel_press[0], wheel_press[1], 0)])])
+    CI.update([(int(DT_CTRL * 1e9), [(wheel_press[0], wheel_press[1], 0)])])
+    assert CI.CS.mrcc_button == 1
+
+    wheel_idle = packer.make_can_msg("CRZ_BTNS", 0, {"BIT1": 1, "BIT1_INV": 0})
+    CI.update([(int(DT_CTRL * 1e9), [(wheel_idle[0], wheel_idle[1], 0)])])
+    assert CI.CS.mrcc_button == 0
+
+    tx_off = packer.make_can_msg("CRZ_BTNS", 0, {"BIT1": 0, "BIT1_INV": 1})
+    CI.update([(int(2 * DT_CTRL * 1e9), [(tx_off[0], tx_off[1], 128)])])
+    assert CI.CS.mrcc_button == 0

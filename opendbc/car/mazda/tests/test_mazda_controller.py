@@ -768,7 +768,8 @@ class TestTjaIcbmSuppressScoping:
     return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP), CP
 
   @staticmethod
-  def _cs(*, tja_button=0, cruise_available=False, mrcc_armed_raw=None, crz_btns_counter=0):
+  def _cs(*, tja_button=0, cruise_available=False, mrcc_armed_raw=None, crz_btns_counter=0,
+          cancel_button=0, resume_button=0, accel_button=0, decel_button=0, mrcc_button=0):
     if mrcc_armed_raw is None:
       mrcc_armed_raw = cruise_available
     return SimpleNamespace(
@@ -781,10 +782,12 @@ class TestTjaIcbmSuppressScoping:
       cam_laneinfo={"LINE_VISIBLE": 0, "LINE_NOT_VISIBLE": 1, "LANE_LINES": 1,
                     "BIT1": 0, "BIT2": 0, "BIT3": 0, "NO_ERR_BIT": 0, "S1": 0, "S1_HBEAM": 0},
       crz_btns_counter=crz_btns_counter,
-      cancel_button=0,
+      cancel_button=cancel_button,
+      resume_button=resume_button,
       tja_button=tja_button,
-      accel_button=0,
-      decel_button=0,
+      accel_button=accel_button,
+      decel_button=decel_button,
+      mrcc_button=mrcc_button,
       lkas_allowed_speed=True,
     )
 
@@ -851,13 +854,40 @@ class TestTjaMrccSideEffect:
   def _button_payloads(sends):
     return [dat for addr, dat, bus in sends if addr == 0x09d and bus == 0]
 
-  def _step(self, cc, CC, CC_SP, *, tja, armed, raw_armed=None, counter=None):
+  def _step(self, cc, CC, CC_SP, *, tja, armed, raw_armed=None, counter=None, **cs_kw):
+    assert TJA_MRCC_MAX_TX_FRAMES == 3
     if counter is None:
       counter = (getattr(cc, "_test_crz_btns_counter", -1) + 1) % 16
     cc._test_crz_btns_counter = counter
     CS = TestTjaIcbmSuppressScoping._cs(tja_button=tja, cruise_available=armed,
-                                        mrcc_armed_raw=raw_armed, crz_btns_counter=counter)
-    return cc.update(CC, CC_SP, CS, 0)[1]
+                                        mrcc_armed_raw=raw_armed, crz_btns_counter=counter,
+                                        **cs_kw)
+    sends = cc.update(CC, CC_SP, CS, 0)[1]
+    assert 0 <= cc.tja_mrcc_tx_frames <= TJA_MRCC_MAX_TX_FRAMES
+    return sends
+
+  @staticmethod
+  def _payload_ctrs(payloads):
+    cp = CANParser("mazda_2017", [("CRZ_BTNS", 0)], 0)
+    counters = []
+    for dat in payloads:
+      cp.update([(0, [(0x09d, dat, 0)])])
+      counters.append(int(cp.vl["CRZ_BTNS"]["CTR"]))
+    return counters
+
+  def _mrcc_off_payloads(self, sends):
+    payloads = []
+    cp = CANParser("mazda_2017", [("CRZ_BTNS", 0)], 0)
+    for dat in self._button_payloads(sends):
+      cp.update([(0, [(0x09d, dat, 0)])])
+      if int(cp.vl["CRZ_BTNS"]["BIT1"]) == 0:
+        payloads.append(dat)
+    return payloads
+
+  @staticmethod
+  def _assert_episode_budget(payloads):
+    assert TJA_MRCC_MAX_TX_FRAMES == 3
+    assert len(payloads) <= TJA_MRCC_MAX_TX_FRAMES
 
   def test_tja_caused_mrcc_arm_is_undone_after_release(self):
     cc = self._cc()
@@ -977,7 +1007,7 @@ class TestTjaMrccSideEffect:
 
   def test_route_5d_double_tap_before_first_cleanup_preserves_transaction(self):
     """Route 5d at 123.101/123.263: the second press landed before the first
-    cleanup frame. Wait for the final release, then clean up exactly once."""
+    cleanup frame. Wait for the final release, then start one continuous press."""
     cc = self._cc()
     CC, CC_SP = self._controls()
 
@@ -986,48 +1016,109 @@ class TestTjaMrccSideEffect:
     self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
     self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=2)
     for _ in range(5):
-      assert not self._button_payloads(
+      assert not self._mrcc_off_payloads(
         self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=3))
+    assert cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_tx_frames == 0
 
-    assert not self._button_payloads(
+    assert not self._mrcc_off_payloads(
       self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=4))
-    payloads = self._button_payloads(
-      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=5))
-    assert len(payloads) == 1
-    assert cc.tja_mrcc_tx_frames == 1
-
-    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=6)
+    payloads = []
+    for counter in (5, 6, 7, 8):
+      payloads.extend(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    assert len(payloads) == TJA_MRCC_MAX_TX_FRAMES
+    self._assert_episode_budget(payloads)
+    assert self._payload_ctrs(payloads) == [6, 7, 8]
+    assert cc.tja_mrcc_tx_frames == TJA_MRCC_MAX_TX_FRAMES
     assert not cc.tja_mrcc_unarm_pending
 
-  def test_route_5d_double_tap_after_ignored_cleanup_preserves_retry_budget(self):
-    """Route 5d at 106.637/106.807: the second press landed after a cleanup
-    frame but before its acknowledgement. Resume the same bounded transaction."""
+  def test_route_5d_interrupted_after_one_frame_delayed_raw_off_sends_no_replacement(self):
+    """Route 5d: delayed acknowledgement during TJA2 ends ownership before release."""
     cc = self._cc()
     CC, CC_SP = self._controls()
 
     self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
     self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
     self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
-    assert len(self._button_payloads(
-      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=3))) == 1
+    payloads = self._mrcc_off_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=3))
+    assert self._payload_ctrs(payloads) == [4]
     assert cc.tja_mrcc_tx_frames == 1
+    assert cc.tja_mrcc_press_frames == 1
 
-    # The second press must not clear the pending transaction or reset its cap.
     self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=3)
-    for _ in range(5):
-      assert not self._button_payloads(
-        self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=4))
+    assert cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_tx_frames == 1
+    assert cc.tja_mrcc_press_frames == 0
+    # Keep this below the existing five-frame confirmed-off threshold so the
+    # replacement-release path itself must observe immediate raw-off.
+    for _ in range(2):
+      assert not self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=False, counter=4))
     assert cc.tja_mrcc_unarm_pending
     assert cc.tja_mrcc_tx_frames == 1
 
-    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=5)
-    assert not self._button_payloads(
-      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=6))
-    assert len(self._button_payloads(
-      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=7))) == 1
+    payloads.extend(self._mrcc_off_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=False, counter=5)))
+    assert self._payload_ctrs(payloads) == [4]
+    self._assert_episode_budget(payloads)
+    assert not cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_tx_frames == 1
+
+  def test_route_5d_interrupted_after_one_frame_uses_only_remaining_budget(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+    payloads = self._mrcc_off_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=3))
+    assert self._payload_ctrs(payloads) == [4]
+
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=3)
+    assert cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_tx_frames == 1
+    assert cc.tja_mrcc_press_frames == 0
+    for _ in range(3):
+      assert not self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=4))
+
+    assert not self._mrcc_off_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=5))
+    for counter in (6, 7, 8, 9):
+      payloads.extend(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    assert self._payload_ctrs(payloads) == [4, 7, 8]
+    self._assert_episode_budget(payloads)
+    assert cc.tja_mrcc_tx_frames == TJA_MRCC_MAX_TX_FRAMES
+    assert not cc.tja_mrcc_unarm_pending
+
+  def test_route_5d_interrupted_after_two_frames_has_one_remaining(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+    payloads = []
+    for counter in (3, 4):
+      payloads.extend(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    assert self._payload_ctrs(payloads) == [4, 5]
     assert cc.tja_mrcc_tx_frames == 2
 
-    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=8)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=4)
+    assert cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_press_frames == 0
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=6)
+    for counter in (7, 8, 9):
+      payloads.extend(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    assert self._payload_ctrs(payloads) == [4, 5, 8]
+    self._assert_episode_budget(payloads)
+    assert cc.tja_mrcc_tx_frames == TJA_MRCC_MAX_TX_FRAMES
     assert not cc.tja_mrcc_unarm_pending
 
   def test_manual_mrcc_off_before_tja_release_is_never_toggled_on(self):
@@ -1063,22 +1154,97 @@ class TestTjaMrccSideEffect:
     self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=3)
     self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=4)
     self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=5)
+    assert cc.tja_mrcc_tx_frames == 0
 
     CC_cancel = structs.CarControl()
     CC_cancel.cruiseControl.cancel = True
-    assert not self._button_payloads(
+    assert not self._mrcc_off_payloads(
       self._step(cc, CC_cancel.as_reader(), CC_SP, tja=0, armed=True, raw_armed=True, counter=6))
 
     # Clearing cancel on the retained counter is not fresh enough for the cleanup.
-    assert not self._button_payloads(
+    assert not self._mrcc_off_payloads(
       self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=6))
-    assert len(self._button_payloads(
-      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=7))) == 1
+    payloads = self._mrcc_off_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=7))
+    assert len(payloads) == 1
+    assert cc.tja_mrcc_unarm_pending
 
-  def test_route_5b_ignored_first_frame_gets_bounded_followup(self):
-    """Route 5b at 177.214, 239.571, and 248.071: Mazda received one
-    counter-correct frame but stayed armed. Keep the logical press asserted on the
-    next fresh counter, then stop immediately when raw PEDALS confirms MRCC off."""
+  def test_resume_defers_cleanup_until_a_later_fresh_counter(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=3)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=4)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=5)
+    assert cc.tja_mrcc_tx_frames == 0
+
+    CC_resume = structs.CarControl()
+    CC_resume.cruiseControl.resume = True
+    assert not self._mrcc_off_payloads(
+      self._step(cc, CC_resume.as_reader(), CC_SP, tja=0, armed=True, raw_armed=True, counter=6))
+    assert cc.tja_mrcc_unarm_pending
+    assert not self._mrcc_off_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=6))
+    payloads = self._mrcc_off_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=7))
+    assert len(payloads) == 1
+    assert cc.tja_mrcc_tx_frames == 1
+
+  def test_op_cancel_and_resume_abort_after_press_started(self):
+    for which in ("cancel", "resume"):
+      cc = self._cc()
+      CC, CC_SP = self._controls()
+      self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+      self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+      assert len(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=3))) == 1
+      assert cc.tja_mrcc_tx_frames == 1
+
+      CC_btn = structs.CarControl()
+      setattr(CC_btn.cruiseControl, which, True)
+      assert not self._mrcc_off_payloads(
+        self._step(cc, CC_btn.as_reader(), CC_SP, tja=0, armed=True, raw_armed=True, counter=4))
+      assert not cc.tja_mrcc_unarm_pending
+
+      leftover = []
+      for counter in range(5, 16):
+        leftover.extend(self._mrcc_off_payloads(
+          self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+      assert leftover == [], which
+
+  @pytest.mark.parametrize("which", ("cancel", "resume"))
+  def test_op_cancel_and_resume_abort_during_tja_hold_after_press_started(self, which):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+    assert len(self._mrcc_off_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=3))) == 1
+
+    # TJA2 interrupts the press and clears the release anchor.
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=3)
+    assert cc.tja_mrcc_release_counter is None
+    assert cc.tja_mrcc_unarm_pending
+
+    CC_btn = structs.CarControl()
+    setattr(CC_btn.cruiseControl, which, True)
+    assert not self._mrcc_off_payloads(
+      self._step(cc, CC_btn.as_reader(), CC_SP, tja=1, armed=True, raw_armed=True, counter=4))
+    assert not cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_press_frames == 0
+    assert cc.tja_mrcc_tx_frames == 1
+
+    leftover = []
+    for counter in range(5, 13):
+      leftover.extend(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    assert leftover == [], which
+
+  def test_ignored_first_frame_keeps_press_on_next_consecutive_counter(self):
+    """If the first asserted frame is ignored, hold the same press on the next
+    consecutive counter, then stop immediately when raw PEDALS confirms off."""
     cc = self._cc()
     CC, CC_SP = self._controls()
 
@@ -1090,23 +1256,13 @@ class TestTjaMrccSideEffect:
     payloads = []
     payloads.extend(self._button_payloads(
       self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=11)))
-    # The first counter after a transmitted frame is reserved for raw feedback.
-    assert not self._button_payloads(
-      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=12))
-    # First frame was ignored, so the following fresh counter gets one follow-up.
     payloads.extend(self._button_payloads(
-      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=13)))
-    # Mazda accepted the second frame. Raw-off stops the transaction before another tap.
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=12)))
     payloads.extend(self._button_payloads(
-      self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=14)))
+      self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=13)))
 
     assert len(payloads) == 2
-    cp = CANParser("mazda_2017", [("CRZ_BTNS", 0)], 0)
-    counters = []
-    for dat in payloads:
-      cp.update([(0, [(0x09d, dat, 0)])])
-      counters.append(cp.vl["CRZ_BTNS"]["CTR"])
-    assert counters == [12, 14]
+    assert self._payload_ctrs(payloads) == [12, 13]
     assert not cc.tja_mrcc_unarm_pending
 
   def test_cleanup_is_hard_capped_at_physical_button_length(self):
@@ -1123,7 +1279,357 @@ class TestTjaMrccSideEffect:
         self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
 
     assert len(payloads) == TJA_MRCC_MAX_TX_FRAMES
+    assert self._payload_ctrs(payloads) == [4, 5, 6]
     assert not cc.tja_mrcc_unarm_pending
+
+  def test_hard_cap_sends_nothing_after_three_frames_despite_delayed_feedback(self):
+    """Route 61: after the three-frame press is spent, leftover armed PEDALS
+    must not start another synthetic press."""
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+    for counter in range(3, 6):
+      assert len(self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter))) == 1
+    assert cc.tja_mrcc_tx_frames == TJA_MRCC_MAX_TX_FRAMES
+    assert not cc.tja_mrcc_unarm_pending
+
+    leftover = []
+    for counter in range(6, 16):
+      leftover.extend(self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    assert leftover == []
+
+  def test_driver_set_aborts_in_flight_cleanup(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+    assert len(self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=3))) == 1
+    assert not self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=4, accel_button=1))
+    assert not cc.tja_mrcc_unarm_pending
+    leftover = []
+    for counter in range(5, 16):
+      leftover.extend(self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    assert leftover == []
+
+  def test_counter_jump_after_first_frame_aborts_without_continuation(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+    assert len(self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=3))) == 1
+    assert cc.tja_mrcc_tx_frames == 1
+    assert not self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=5))
+    assert not cc.tja_mrcc_unarm_pending
+    leftover = []
+    for counter in (6, 7, 8):
+      leftover.extend(self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    assert leftover == []
+
+    # The partial spent budget is not reset or resurrected by a later TJA while
+    # the unresolved MRCC state remains armed.
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=9)
+    for counter in (10, 11, 12):
+      leftover.extend(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    assert leftover == []
+    assert cc.tja_mrcc_tx_frames == 1
+
+  def test_counter_jump_before_first_frame_reanchors_and_starts_press(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+    assert cc.tja_mrcc_tx_frames == 0
+    assert not self._mrcc_off_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=4))
+    assert cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_tx_frames == 0
+
+    payloads = []
+    for counter in (5, 6, 7, 8, 9):
+      payloads.extend(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    assert self._payload_ctrs(payloads) == [6, 7, 8]
+    assert cc.tja_mrcc_tx_frames == TJA_MRCC_MAX_TX_FRAMES
+    assert not cc.tja_mrcc_unarm_pending
+
+  def test_repeated_pre_start_counter_jumps_time_out_and_unsuppress_icbm(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+    assert cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_tx_frames == 0
+
+    counter = 4
+    leftover = []
+    for _ in range(TJA_MRCC_RELEASE_WAIT_FRAMES + 1):
+      leftover.extend(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+      counter = (counter + 2) % 16
+    assert leftover == []
+    assert not cc.tja_mrcc_unarm_pending
+
+    CC_SP.intelligentCruiseButtonManagement.sendButton = (
+      structs.IntelligentCruiseButtonManagement.SendButtonState.increase
+    )
+    cc.last_button_frame = -10_000
+    payloads = self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter))
+    assert len(payloads) == 1
+    cp = CANParser("mazda_2017", [("CRZ_BTNS", 0)], 0)
+    cp.update([(0, [(0x09d, payloads[0], 0)])])
+    assert int(cp.vl["CRZ_BTNS"]["BIT1"]) == 1
+    assert int(cp.vl["CRZ_BTNS"]["SET_P"]) == 1
+
+  def test_route_61_tja_from_off_uses_consecutive_not_spaced_counters(self):
+    """Route 61 at 98.760: TJA from MRCC-off, Mazda stayed armed. Old spaced
+    retries used delta 2. The held press must occupy consecutive CS counters."""
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=8)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=9)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=10)
+    payloads = []
+    for counter in (11, 12, 13, 14, 15, 0, 1):
+      payloads.extend(self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    assert len(payloads) == TJA_MRCC_MAX_TX_FRAMES
+    assert self._payload_ctrs(payloads) == [12, 13, 14]
+    assert not cc.tja_mrcc_unarm_pending
+
+  def test_physical_mrcc_during_hold_aborts_before_pedals_off(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+    assert len(self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=3))) == 1
+    assert not self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=4, mrcc_button=1))
+    assert not cc.tja_mrcc_unarm_pending
+    leftover = []
+    for counter in range(5, 12):
+      leftover.extend(self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    assert leftover == []
+
+  @pytest.mark.parametrize("button", (
+    {"accel_button": 1},
+    {"decel_button": 1},
+    {"resume_button": 1},
+    {"cancel_button": 1},
+    {"mrcc_button": 1},
+  ))
+  @pytest.mark.parametrize("phase, spent", (("initial", 0), ("after_one", 1), ("after_two", 2)))
+  def test_physical_button_aborts_ownership_while_tja_held(self, button, phase, spent):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+
+    if phase == "initial":
+      physical_counter = 2
+    else:
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+      for counter in range(3, 3 + spent):
+        assert len(self._mrcc_off_payloads(
+          self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter))) == 1
+      # TJA2 interrupts the current press and clears the release anchor.
+      interrupted_counter = 2 + spent
+      self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=interrupted_counter)
+      assert cc.tja_mrcc_release_counter is None
+      physical_counter = interrupted_counter + 1
+
+    assert cc.tja_mrcc_unarm_pending
+    assert not self._mrcc_off_payloads(
+      self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True,
+                 counter=physical_counter, **button))
+    assert not cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_press_frames == 0
+    assert cc.tja_mrcc_tx_frames == spent
+
+    leftover = []
+    counter = physical_counter + 1
+    for _ in range(8):
+      leftover.extend(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter % 16)))
+      counter += 1
+    assert leftover == [], (button, phase)
+
+  def test_raw_off_after_first_frame_stops_before_second(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+    assert len(self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=3))) == 1
+    assert not self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=4))
+    assert not cc.tja_mrcc_unarm_pending
+
+  def test_manual_mrcc_off_during_press_never_sends_followup(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+    assert len(self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=3))) == 1
+    leftover = []
+    for counter in range(4, 10):
+      leftover.extend(self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=False, counter=counter)))
+    assert leftover == []
+    assert not cc.tja_mrcc_unarm_pending
+
+  def test_counter_wrap_sends_consecutive_15_then_0(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=13)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=14)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=15)
+    payloads = []
+    for counter in (0, 1, 2):
+      payloads.extend(self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    assert len(payloads) == 3
+    assert self._payload_ctrs(payloads) == [1, 2, 3]
+    leftover = []
+    for counter in range(3, 8):
+      leftover.extend(self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    assert leftover == []
+
+  def test_cleanup_output_counters_wrap_15_0_1(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=12)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=13)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=13)
+    payloads = []
+    for counter in (14, 15, 0, 1, 2):
+      payloads.extend(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    assert self._payload_ctrs(payloads) == [15, 0, 1]
+    assert cc.tja_mrcc_tx_frames == TJA_MRCC_MAX_TX_FRAMES
+    assert not cc.tja_mrcc_unarm_pending
+
+  def test_physical_res_and_cancel_abort_in_flight_cleanup(self):
+    for kw in ({"resume_button": 1}, {"cancel_button": 1}, {"decel_button": 1}):
+      cc = self._cc()
+      CC, CC_SP = self._controls()
+      self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+      self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+      assert len(self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=3))) == 1
+      assert not self._button_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=4, **kw))
+      assert not cc.tja_mrcc_unarm_pending
+      leftover = []
+      for counter in range(5, 16):
+        leftover.extend(self._button_payloads(
+          self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+      assert leftover == [], kw
+
+  def test_failed_three_frame_press_does_not_leak_into_later_tja(self):
+    """Budget exhaustion survives repeated TJA presses until confirmed raw-off."""
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+    for counter in range(3, 6):
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)
+    assert cc.tja_mrcc_tx_frames == TJA_MRCC_MAX_TX_FRAMES
+    assert not cc.tja_mrcc_unarm_pending
+
+    # TJA2 after all three frames, then TJA3/TJA4: no replacement, no reset.
+    leftover = []
+    counter = 6
+    for _ in range(3):
+      self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=counter)
+      counter += 1
+      for _ in range(2):
+        leftover.extend(self._mrcc_off_payloads(
+          self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+        counter += 1
+    assert leftover == []
+    assert not cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_tx_frames == TJA_MRCC_MAX_TX_FRAMES
+
+    # Confirmed raw-off permits a genuinely new ownership episode and only that
+    # physical TJA rising edge resets the cumulative budget.
+    for _ in range(TJA_MRCC_RAW_OFF_CONFIRM_FRAMES):
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=False, counter=counter)
+    assert cc.tja_mrcc_tx_frames == TJA_MRCC_MAX_TX_FRAMES
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=counter)
+    assert cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_tx_frames == 0
+    counter = (counter + 1) % 16
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)
+    counter = (counter + 1) % 16
+    assert len(self._button_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter))) == 1
+    assert cc.tja_mrcc_tx_frames == 1
+
+  def test_brief_raw_dropout_does_not_reset_spent_budget(self):
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
+    payloads = []
+    for counter in (3, 4, 5):
+      payloads.extend(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    self._assert_episode_budget(payloads)
+    assert cc.tja_mrcc_tx_frames == TJA_MRCC_MAX_TX_FRAMES
+
+    # Four raw-off samples including the TJA edge are below the five-frame
+    # ownership-classification threshold.
+    for counter in (6, 7, 8):
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=False, counter=counter)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=False, counter=9)
+    assert not cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_tx_frames == TJA_MRCC_MAX_TX_FRAMES
+
+    leftover = []
+    for counter in (10, 11, 12, 13):
+      leftover.extend(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=counter)))
+    assert leftover == []
+    assert cc.tja_mrcc_tx_frames == TJA_MRCC_MAX_TX_FRAMES
 
   def test_final_cleanup_frame_still_suppresses_icbm(self):
     cc = self._cc()
@@ -1134,15 +1640,13 @@ class TestTjaMrccSideEffect:
     self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)
     self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=3)
     self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=4)
-    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=5)
-    self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=6)
 
     CC_SP.intelligentCruiseButtonManagement.sendButton = (
       structs.IntelligentCruiseButtonManagement.SendButtonState.increase
     )
     cc.last_button_frame = -10_000
     payloads = self._button_payloads(
-      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=7))
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=5))
     assert len(payloads) == 1
 
     cp = CANParser("mazda_2017", [("CRZ_BTNS", 0)], 0)
