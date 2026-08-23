@@ -18,6 +18,7 @@ LongCtrlState = structs.CarControl.Actuators.LongControlState
 # received frames between those buses, not our own transmissions.
 LONG_BUSES = (0, 2)
 TJA_MRCC_RELEASE_WAIT_FRAMES = 25
+TJA_MRCC_FIRST_TX_DELAY_NANOS = 50_000_000
 TJA_MRCC_MAX_TX_FRAMES = 3
 # PEDALS can briefly report both ACC bits low during a brake transition. Require
 # raw-off to persist before it overrides the intentionally brake-held public cruise
@@ -44,6 +45,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.tja_mrcc_saw_armed = False
     self.tja_mrcc_release_counter: int | None = None
     self.tja_mrcc_release_wait_frames = 0
+    self.tja_mrcc_first_tx_not_before_nanos: int | None = None
+    self.tja_mrcc_wait_for_fresh_counter_after_op = False
     self.tja_mrcc_press_frames = 0
     self.tja_mrcc_tx_frames = 0
     self.tja_mrcc_armed_prev: bool | None = None
@@ -129,6 +132,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         # Keep ownership and wait for the newest release. No TX while TJA is held.
         self.tja_mrcc_release_counter = None
         self.tja_mrcc_release_wait_frames = 0
+        self.tja_mrcc_first_tx_not_before_nanos = None
+        self.tja_mrcc_wait_for_fresh_counter_after_op = False
 
       if self.tja_mrcc_unarm_pending:
         self.tja_mrcc_saw_armed |= raw_mrcc_armed
@@ -153,10 +158,14 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
             self.tja_mrcc_unarm_pending = False
             self.tja_mrcc_press_frames = 0
           else:
-            # Wait for the next OEM wheel-button counter. Sending counter+1 immediately
-            # after that frame avoids the duplicate-counter race seen on the morning route.
+            # Experimentally delay only the first actual MRCC_OFF frame. Replacement
+            # holds after transmission retain the existing consecutive-counter behavior.
             self.tja_mrcc_release_counter = crz_btns_counter
             self.tja_mrcc_release_wait_frames = 0
+            self.tja_mrcc_first_tx_not_before_nanos = (
+              now_nanos + TJA_MRCC_FIRST_TX_DELAY_NANOS if self.tja_mrcc_tx_frames == 0 else None
+            )
+            self.tja_mrcc_wait_for_fresh_counter_after_op = False
         elif self.tja_mrcc_release_counter is not None:
           if not raw_mrcc_armed:
             # Raw-off is sufficient to stop an in-flight transaction. Waiting for the
@@ -168,14 +177,38 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
             # command clears rather than sending from an old retained sample.
             self.tja_mrcc_release_counter = crz_btns_counter
             self.tja_mrcc_release_wait_frames = 0
+            self.tja_mrcc_wait_for_fresh_counter_after_op = True
           elif self.tja_mrcc_tx_frames >= TJA_MRCC_MAX_TX_FRAMES:
             self.tja_mrcc_unarm_pending = False
             self.tja_mrcc_press_frames = 0
           else:
             self.tja_mrcc_release_wait_frames += 1
             counter_delta = (crz_btns_counter - self.tja_mrcc_release_counter) % 16
-            # Held press: only the immediately next OEM counter.
-            if counter_delta == 1:
+            first_tx_waiting = (
+              self.tja_mrcc_tx_frames == 0 and
+              self.tja_mrcc_first_tx_not_before_nanos is not None
+            )
+            first_tx_due = (
+              first_tx_waiting and
+              now_nanos >= self.tja_mrcc_first_tx_not_before_nanos and
+              not self.tja_mrcc_wait_for_fresh_counter_after_op
+            )
+            if first_tx_waiting:
+              if self.tja_mrcc_wait_for_fresh_counter_after_op:
+                if counter_delta == 1:
+                  self.tja_mrcc_wait_for_fresh_counter_after_op = False
+                elif counter_delta > 1:
+                  self.tja_mrcc_release_counter = crz_btns_counter
+              if not self.tja_mrcc_wait_for_fresh_counter_after_op:
+                # Keep the release anchor synchronized with the latest OEM counter.
+                # At the deadline, create_button_cmd packs latest_counter + 1.
+                self.tja_mrcc_release_counter = crz_btns_counter
+                self.tja_mrcc_release_wait_frames = 0
+                first_tx_due = now_nanos >= self.tja_mrcc_first_tx_not_before_nanos
+
+            # Experimental change: the delayed first frame is deadline-gated rather
+            # than counter-delta-gated. Follow-ups retain the delta == 1 requirement.
+            if first_tx_due or (not first_tx_waiting and counter_delta == 1):
               if raw_mrcc_armed:
                 can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, crz_btns_counter, Buttons.MRCC_OFF, CS))
                 tja_mrcc_cleanup_tx = True
@@ -183,10 +216,16 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
                 self.tja_mrcc_press_frames += 1
                 self.tja_mrcc_release_counter = crz_btns_counter
                 self.tja_mrcc_release_wait_frames = 0
+                self.tja_mrcc_first_tx_not_before_nanos = None
+                self.tja_mrcc_wait_for_fresh_counter_after_op = False
                 if self.tja_mrcc_tx_frames >= TJA_MRCC_MAX_TX_FRAMES:
                   self.tja_mrcc_unarm_pending = False
                   self.tja_mrcc_press_frames = 0
               else:
+                self.tja_mrcc_unarm_pending = False
+                self.tja_mrcc_press_frames = 0
+            elif first_tx_waiting:
+              if self.tja_mrcc_release_wait_frames > TJA_MRCC_RELEASE_WAIT_FRAMES:
                 self.tja_mrcc_unarm_pending = False
                 self.tja_mrcc_press_frames = 0
             elif counter_delta > 1:
@@ -206,6 +245,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
               # A dead/stale CRZ_BTNS stream must not suppress ICBM indefinitely.
               self.tja_mrcc_unarm_pending = False
               self.tja_mrcc_press_frames = 0
+
+      if not self.tja_mrcc_unarm_pending:
+        self.tja_mrcc_first_tx_not_before_nanos = None
+        self.tja_mrcc_wait_for_fresh_counter_after_op = False
 
       self.tja_button_prev = tja_button
       self.tja_mrcc_armed_prev = mrcc_armed
