@@ -25,8 +25,10 @@
 #define MAZDA_CAM  2
 
 #define MAZDA_PARAM_LONGITUDINAL 1U
+#define MAZDA_PARAM_TJA_MADS 4U
 
 static bool mazda_longitudinal = false;
+static bool mazda_tja_mads = false;
 
 // With longitudinal control the stock radar is silenced and openpilot replays its frames,
 // so allowed tx patterns are pinned to byte-exact stock captures wherever possible.
@@ -282,6 +284,7 @@ static safety_config mazda_init(uint16_t param) {
   };
 
   mazda_longitudinal = GET_FLAG(param, MAZDA_PARAM_LONGITUDINAL);
+  mazda_tja_mads = GET_FLAG(param, MAZDA_PARAM_TJA_MADS);
   acc_main_on = false;
 
   return mazda_longitudinal ? BUILD_SAFETY_CFG(mazda_long_rx_checks, MAZDA_LONG_TX_MSGS) :

@@ -101,6 +101,7 @@ class MazdaFlags(IntFlag):
 
 class MazdaSafetyFlags(IntFlag):
   LONG = 1
+  TJA_MADS = 4
 
 
 @dataclass

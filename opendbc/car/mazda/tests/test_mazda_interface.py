@@ -3,7 +3,7 @@ import pytest
 from opendbc.car import structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda.interface import CarInterface
-from opendbc.car.mazda.values import CAR, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW
+from opendbc.car.mazda.values import CAR, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaSafetyFlags
 
 Ecu = structs.CarParams.Ecu
 
@@ -80,3 +80,9 @@ class TestMazdaEpsSwap:
       CP = CarInterface.get_params(candidate, {0: {}, 1: {}, 2: {}}, [], False,
                                    is_release=False, docs=True)
       assert CP.dashcamOnly, candidate
+
+
+@pytest.mark.parametrize("candidate", CAR)
+def test_tja_mads_is_cx5_2022_only(candidate):
+  enabled = bool(_params(candidate).safetyConfigs[0].safetyParam & MazdaSafetyFlags.TJA_MADS)
+  assert enabled == (candidate == CAR.MAZDA_CX5_2022)
