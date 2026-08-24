@@ -1,11 +1,13 @@
 from dataclasses import dataclass, field
-from enum import IntFlag
+from enum import IntFlag, StrEnum
 
 from opendbc.car import Bus, CarSpecs, DbcDict, DT_CTRL, PlatformConfig, Platforms
+from opendbc.car.carlog import carlog
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.structs import CarParams
 from opendbc.car.docs_definitions import CarHarness, CarDocs, CarParts
 from opendbc.car.fw_query_definitions import FwQueryConfig, Request, StdQueries
+from opendbc.car.vin import Vin, is_valid_vin
 
 Ecu = CarParams.Ecu
 
@@ -103,36 +105,51 @@ class MazdaSafetyFlags(IntFlag):
   LONG = 1
 
 
+class WMI(StrEnum):
+  JAPAN_PASSENGER = "JM1"   # Japan-built passenger cars
+  JAPAN_CROSSOVER = "JM3"   # Japan-built crossovers
+  MEXICO_PASSENGER = "3MZ"  # Mazda de Mexico (Mazda 3)
+
+
 @dataclass
 class MazdaPlatformConfig(PlatformConfig):
   dbc_dict: DbcDict = field(default_factory=lambda: {Bus.pt: 'mazda_2017', Bus.radar: 'mazda_2017'})
   flags: int = MazdaFlags.GEN1
+  wmis: set[WMI] = field(default_factory=set)
+  chassis_codes: set[str] = field(default_factory=set)
+  years: set[str] = field(default_factory=set)
 
 
 class CAR(Platforms):
   MAZDA_CX5 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-5 2017-21")],
-    MazdaCarSpecs(mass=3655 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=15.5)
+    MazdaCarSpecs(mass=3655 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=15.5),
+    wmis={WMI.JAPAN_CROSSOVER}, chassis_codes={'KF'}, years={'H', 'J', 'K', 'L', 'M'},  # 2017-21
   )
   MAZDA_CX9 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-9 2016-20")],
-    MazdaCarSpecs(mass=4217 * CV.LB_TO_KG, wheelbase=2.93, steerRatio=17.6)
+    MazdaCarSpecs(mass=4217 * CV.LB_TO_KG, wheelbase=2.93, steerRatio=17.6),
+    wmis={WMI.JAPAN_CROSSOVER}, chassis_codes={'TC'}, years={'G', 'H', 'J', 'K', 'L'},  # 2016-20
   )
   MAZDA_3 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda 3 2017-18")],
-    MazdaCarSpecs(mass=2875 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=14.0)
+    MazdaCarSpecs(mass=2875 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=14.0),
+    wmis={WMI.JAPAN_PASSENGER, WMI.MEXICO_PASSENGER}, chassis_codes={'BN'}, years={'H', 'J'},  # 2017-18
   )
   MAZDA_6 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda 6 2017-20")],
-    MazdaCarSpecs(mass=3443 * CV.LB_TO_KG, wheelbase=2.83, steerRatio=15.5)
+    MazdaCarSpecs(mass=3443 * CV.LB_TO_KG, wheelbase=2.83, steerRatio=15.5),
+    wmis={WMI.JAPAN_PASSENGER}, chassis_codes={'GL'}, years={'H', 'J', 'K', 'L', 'M'},  # 2017-21
   )
   MAZDA_CX9_2021 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-9 2021-23", video="https://youtu.be/dA3duO4a0O4")],
-    MazdaCarSpecs(mass=4409 * CV.LB_TO_KG, wheelbase=2.93, steerRatio=17.6)
+    MazdaCarSpecs(mass=4409 * CV.LB_TO_KG, wheelbase=2.93, steerRatio=17.6),
+    wmis={WMI.JAPAN_CROSSOVER}, chassis_codes={'TC'}, years={'M', 'N', 'P'},  # 2021-23
   )
   MAZDA_CX5_2022 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-5 2022-25")],
     MazdaCX5_2022CarSpecs(mass=3728 * CV.LB_TO_KG, wheelbase=2.698, steerRatio=18.1),  # 15.5 is factory spec; 18.1 from paramsd learner (2.9M samples)
+    wmis={WMI.JAPAN_CROSSOVER}, chassis_codes={'KF'}, years={'N', 'P', 'R', 'S'},  # 2022-25
   )
 
 
@@ -160,6 +177,49 @@ class Buttons:
   CANCEL = 4
 
 
+def match_fw_to_car_fuzzy(live_fw_versions, vin, offline_fw_versions) -> set[str]:
+  # A donor EPS (steer-to-zero swaps) breaks every exact FW match; the VIN names
+  # the chassis through any ECU swap. Runs only after exact and fuzzy FW fail.
+  # Model line is VIN positions 4-5, model year code is position 10.
+  if is_valid_vin(vin):
+    vin_obj = Vin(vin)
+    chassis_code = vin_obj.vds[0:2]
+    year = vin_obj.vis[0]
+
+    candidates = set()
+    for platform in CAR:
+      platform_config = platform.config
+      if vin_obj.wmi in platform_config.wmis and chassis_code in platform_config.chassis_codes and year in platform_config.years:
+        candidates.add(platform)
+
+    if len(candidates) == 1:
+      carlog.error(f"Fingerprinted {next(iter(candidates))} by VIN")
+      return {str(c) for c in candidates}
+
+    # a known Mazda WMI that names no platform identified an unsupported model
+    # (BP, DM, KE, out-of-range years): never second-guess it with the engine.
+    # WMIs outside the table (e.g. 7MM, CX-50) keep the fallback and its
+    # collision risk; pinned by test.
+    if vin_obj.wmi in {wmi for platform in CAR for wmi in platform.config.wmis}:
+      return set()
+
+  # Oceania VINs encode no model year and never decode; engine firmware is
+  # unique per platform (asserted by test), so it names the chassis instead.
+  # A lone responding address is not a car to name.
+  if len(live_fw_versions) < 2:
+    return set()
+
+  engine_fw = live_fw_versions.get((0x7e0, None), set())
+  candidates = set()
+  for platform, ecus in offline_fw_versions.items():
+    if engine_fw & set(ecus.get((Ecu.engine, 0x7e0, None), [])):
+      candidates.add(platform)
+
+  if len(candidates) == 1:
+    carlog.error(f"Fingerprinted {next(iter(candidates))} by engine firmware")
+  return {str(c) for c in candidates}
+
+
 FW_QUERY_CONFIG = FwQueryConfig(
   fw_version_regex=br"[A-Z0-9-]{11,16}\x00{8,13}",
   requests=[
@@ -170,6 +230,7 @@ FW_QUERY_CONFIG = FwQueryConfig(
       bus=0,
     ),
   ],
+  match_fw_to_car_fuzzy=match_fw_to_car_fuzzy,
 )
 
 DBC = CAR.create_dbc_map()
