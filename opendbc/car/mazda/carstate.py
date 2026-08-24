@@ -2,7 +2,7 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, DT_CTRL, create_button_events, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.mazda.values import DBC, LKAS_LIMITS, CarControllerParams
+from opendbc.car.mazda.values import DBC, LKAS_LIMITS, CarControllerParams, has_tja_mads
 from opendbc.sunnypilot.car.mazda.carstate_ext import CarStateExt
 
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -31,6 +31,9 @@ class CarState(CarStateBase, CarStateExt):
     self.cancel_button = 0
     self.resume_button = 0
     self.main_button = 0
+    self.tja_button = 0
+    self.mode_x = 0
+    self.mode_y = 0
 
     self.cruise_available = False
     self.cruise_enabled = False
@@ -213,13 +216,14 @@ class CarState(CarStateBase, CarStateExt):
     self.cam_laneinfo = cp_cam.vl["CAM_LANEINFO"]
     ret.steerFaultPermanent = cp_cam.vl["CAM_LKAS"]["ERR_BIT_1"] == 1
 
-    # cruise control button events: distance, inc, dec, resume, cancel, and main
+    # cruise control button events: distance, inc, dec, resume, cancel, TJA or main
     prev_distance_button = self.distance_button
     prev_accel_button = self.accel_button
     prev_decel_button = self.decel_button
     prev_cancel_button = self.cancel_button
     prev_resume_button = self.resume_button
     prev_main_button = self.main_button
+    prev_tja_button = self.tja_button
     self.distance_button = cp.vl["CRZ_BTNS"]["DISTANCE_LESS"]
     # On CX-5 2022 the wheel "+" button toggles SET_P (not RES); RES is the resume button.
     # Verified against route 0000019c--84a5408a38 seg2/3: holding "+" emits SET_P=1, body ECU increments CRZ_SPEED.
@@ -230,15 +234,23 @@ class CarState(CarStateBase, CarStateExt):
     # body ECU treats the latest non-cancel frame as authoritative. Critical for cancel-safety.
     self.cancel_button = cp.vl["CRZ_BTNS"]["CAN_OFF"]
     self.resume_button = cp.vl["CRZ_BTNS"]["RES"]
-    self.main_button = int(cp.vl["CRZ_BTNS"]["MODE_X"] == 1 and cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
+    self.mode_x = int(cp.vl["CRZ_BTNS"]["MODE_X"] == 1)
+    self.mode_y = int(cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
+    self.tja_button = int(cp.vl["CRZ_BTNS"]["TJA_BUTTON"] == 1)
+    self.main_button = int(self.mode_x and self.mode_y)
 
+    extra_events = (
+      create_button_events(self.tja_button, prev_tja_button, {1: ButtonType.lkas})
+      if has_tja_mads(self.CP) else
+      create_button_events(self.main_button, prev_main_button, {1: ButtonType.mainCruise})
+    )
     ret.buttonEvents = [
       *create_button_events(self.distance_button, prev_distance_button, {1: ButtonType.gapAdjustCruise}),
       *create_button_events(self.accel_button, prev_accel_button, {1: ButtonType.accelCruise}),
       *create_button_events(self.decel_button, prev_decel_button, {1: ButtonType.decelCruise}),
       *create_button_events(self.cancel_button, prev_cancel_button, {1: ButtonType.cancel}),
       *create_button_events(self.resume_button, prev_resume_button, {1: ButtonType.resumeCruise}),
-      *create_button_events(self.main_button, prev_main_button, {1: ButtonType.mainCruise}),
+      *extra_events,
     ]
 
     CarStateExt.update(self, ret, ret_sp, can_parsers)

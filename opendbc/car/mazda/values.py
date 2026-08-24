@@ -104,6 +104,10 @@ class MazdaSafetyFlags(IntFlag):
   TJA_MADS = 4
 
 
+def has_tja_mads(CP) -> bool:
+  return any(int(sc.safetyParam) & MazdaSafetyFlags.TJA_MADS for sc in CP.safetyConfigs)
+
+
 @dataclass
 class MazdaPlatformConfig(PlatformConfig):
   dbc_dict: DbcDict = field(default_factory=lambda: {Bus.pt: 'mazda_2017', Bus.radar: 'mazda_2017'})

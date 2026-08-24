@@ -214,6 +214,114 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
       self.assertTrue(self._tx(self._crz_ctrl_cmd_msg(True, bus)))
 
 
+class TestMazdaTjaMadsSafety(TestMazdaSafety):
+  SAFETY_PARAM = MazdaSafetyFlags.TJA_MADS
+
+  def setUp(self):
+    self.packer = CANPackerSafety("mazda_2017")
+    self.safety = libsafety_py.libsafety
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, int(self.SAFETY_PARAM))
+    self.safety.init_tests()
+
+  def _tja_msg(self, pressed):
+    return self.packer.make_can_msg_safety("CRZ_BTNS", 0, {
+      "TJA_BUTTON": pressed, "BIT1": 1, "BIT2": 1, "BIT3": 1,
+    })
+
+  @staticmethod
+  def _packet_bytes(msg):
+    return bytes(msg[0].data[0:8])
+
+  def test_tja_is_the_only_lateral_request_source(self):
+    self.safety.set_mads_params(True, False, False)
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    self._rx(self._tja_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self._rx(self._tja_msg(False))
+    self._rx(self._pcm_status_msg(False))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_forward_copy_strips_only_tja_and_preserves_original(self):
+    self.safety.set_mads_params(True, False, False)
+    msg = self.packer.make_can_msg_safety("CRZ_BTNS", 0, {
+      "TJA_BUTTON": 1, "SET_P": 1, "RES": 1, "MODE_X": 1,
+      "BIT1": 1, "BIT2": 1, "BIT3": 1,
+    })
+    original = self._packet_bytes(msg)
+    forwarded = libsafety_py.make_CANPacket(0x09d, 0, original)
+    self.safety.safety_fwd_modify(0, forwarded)
+    forwarded_bytes = self._packet_bytes(forwarded)
+
+    expected = bytearray(original)
+    expected[1] &= ~0x08
+    self.assertEqual(bytes(expected), forwarded_bytes)
+    self.assertEqual(original, self._packet_bytes(msg))
+
+    self._rx(msg)
+    self.assertEqual(1, self.safety.get_mads_button_press())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_forward_mutation_is_scoped_by_bus_address_and_feature(self):
+    original = self._packet_bytes(self._tja_msg(True))
+    for enabled, bus, addr, should_strip in (
+      (False, 0, 0x09d, False),
+      (True, 2, 0x09d, False),
+      (True, 0, 0x21c, False),
+      (True, 0, 0x09d, True),
+    ):
+      self.safety.set_mads_params(enabled, False, False)
+      forwarded = libsafety_py.make_CANPacket(addr, bus, original)
+      self.safety.safety_fwd_modify(bus, forwarded)
+      self.assertEqual(should_strip, self._packet_bytes(forwarded) != original)
+
+  def test_forward_mutation_preserves_every_non_tja_bit(self):
+    self.safety.set_mads_params(True, False, False)
+    for seed in range(32):
+      original = bytes((seed * 17 + index * 29) & 0xff for index in range(8))
+      forwarded = libsafety_py.make_CANPacket(0x09d, 0, original)
+      self.safety.safety_fwd_modify(0, forwarded)
+      expected = bytearray(original)
+      expected[1] &= ~0x08
+      self.assertEqual(bytes(expected), self._packet_bytes(forwarded))
+
+  def test_non_tja_mode_keeps_existing_lateral_source(self):
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, 0)
+    self.safety.init_tests()
+    self.safety.set_mads_params(True, False, False)
+    self.assertTrue(self.safety.get_op_controls_allowed_requests_lateral())
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_non_tja_wheel_buttons_do_not_request_lateral(self):
+    self.safety.set_mads_params(True, False, False)
+    for values in (
+      {"SET_P": 1, "SET_P_INV": 0},
+      {"SET_M": 1, "SET_M_INV": 0},
+      {"RES": 1, "RES_INV": 0},
+      {"CAN_OFF": 1, "CAN_OFF_INV": 0},
+      {"MODE_X": 1, "MODE_X_INV": 0, "MODE_Y": 1, "MODE_Y_INV": 0},
+    ):
+      message = self.packer.make_can_msg_safety("CRZ_BTNS", 0, {
+        **values, "TJA_BUTTON": 0, "BIT1": 1, "BIT2": 1, "BIT3": 1,
+      })
+      self._rx(message)
+      self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_mrcc_falling_does_not_revoke_tja_lateral(self):
+    self.safety.set_mads_params(True, False, False)
+    self._rx(self._tja_msg(True))
+    self._rx(self._tja_msg(False))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    self._rx(self.packer.make_can_msg_safety("CRZ_CTRL", 0, {"CRZ_AVAILABLE": 1}))
+    self._rx(self.packer.make_can_msg_safety("CRZ_CTRL", 0, {"CRZ_AVAILABLE": 0}))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+
 class TestMazdaIgnition(unittest.TestCase):
   TX_MSGS: list = []
 

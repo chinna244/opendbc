@@ -480,6 +480,8 @@ int set_safety_hooks(uint16_t mode, uint16_t param) {
   reset_sample(&curvature_state.meas);
 
   controls_allowed = false;
+  // Preserve existing behavior unless the selected car mode opts out.
+  mads_set_op_controls_allowed_requests_lateral(true);
   relay_malfunction_reset();
   safety_rx_checks_invalid = false;
 

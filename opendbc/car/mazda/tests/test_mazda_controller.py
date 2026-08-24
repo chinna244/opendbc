@@ -701,3 +701,45 @@ class TestRadarSessionSequencing:
     # and settles back to silenced once quiet again
     sends = self._step(cc, stock_radar_alive=False, fsc_settled=True)
     assert SESSION_PROG_DAT not in self._uds(sends)
+
+
+class TestTjaIcbmScoping:
+  @staticmethod
+  def _controller(candidate):
+    fingerprint = {0: {}, 1: {}, 2: {}}
+    CP = CarInterface.get_params(candidate, fingerprint, [], alpha_long=False, is_release=False, docs=False)
+    CP_SP = CarInterface.get_params_sp(CP, candidate, fingerprint, [], False, False, False)
+    return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
+
+  @staticmethod
+  def _state():
+    return SimpleNamespace(
+      out=SimpleNamespace(vEgoRaw=12.0, steeringTorque=0, brakePressed=False),
+      cam_lkas={"ERR_BIT_1": 0, "ERR_BIT_2": 0, "LINE_NOT_VISIBLE": 0, "BIT_1": 1},
+      cam_laneinfo={
+        "LINE_VISIBLE": 0, "LINE_NOT_VISIBLE": 1, "LANE_LINES": 1,
+        "BIT1": 0, "BIT2": 0, "BIT3": 0, "NO_ERR_BIT": 0, "S1": 0, "S1_HBEAM": 0,
+      },
+      crz_btns_counter=0,
+      cancel_button=0,
+      tja_button=1,
+      accel_button=0,
+      decel_button=0,
+      lkas_allowed_speed=True,
+    )
+
+  @pytest.mark.parametrize("candidate,should_suppress", [
+    (CAR.MAZDA_CX5_2022, True),
+    (CAR.MAZDA_CX5, False),
+  ])
+  def test_tja_hold_suppression_is_platform_scoped(self, candidate, should_suppress):
+    controller = self._controller(candidate)
+    control = structs.CarControl()
+    control_sp = structs.CarControlSP()
+    control_sp.intelligentCruiseButtonManagement.sendButton = (
+      structs.IntelligentCruiseButtonManagement.SendButtonState.increase
+    )
+    controller.last_button_frame = -10_000
+    sends = controller.update(control.as_reader(), control_sp, self._state(), 0)[1]
+    button_present = any(address == 0x09d and bus == 0 for address, _data, bus in sends)
+    assert button_present is not should_suppress

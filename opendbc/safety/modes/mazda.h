@@ -8,6 +8,8 @@
 #define MAZDA_CRZ_INFO      0x21bU
 #define MAZDA_CRZ_CTRL      0x21cU
 #define MAZDA_CRZ_BTNS      0x09dU
+// DBC start bit 11, 1-bit Motorola, is byte 1 bit 3.
+#define MAZDA_TJA_BUTTON_BIT 11U
 #define MAZDA_RADAR_STATIC  0x499U
 #define MAZDA_RADAR_TRACK_1 0x361U
 #define MAZDA_RADAR_TRACK_2 0x362U
@@ -101,18 +103,25 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
       update_sample(&torque_driver, torque_driver_new);
     }
 
-    // enter controls on rising edge of ACC, exit controls on ACC off
     if ((msg->addr == MAZDA_CRZ_CTRL) && !mazda_longitudinal) {
       bool cruise_engaged = msg->data[0] & 0x8U;
       pcm_cruise_check(cruise_engaged);
-      acc_main_on = GET_BIT(msg, 17U);
+      if (!mazda_tja_mads) {
+        acc_main_on = GET_BIT(msg, 17U);
+      }
     }
 
-    if ((msg->addr == MAZDA_CRZ_BTNS) && mazda_longitudinal) {
-      // ensure the driver's cancel press always exits controls
-      bool cancel = GET_BIT(msg, 0U);
-      if (cancel) {
-        controls_allowed = false;
+    if (msg->addr == MAZDA_CRZ_BTNS) {
+      if (mazda_tja_mads) {
+        mads_button_press = GET_BIT(msg, MAZDA_TJA_BUTTON_BIT) ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
+      }
+
+      if (mazda_longitudinal) {
+        // ensure the driver's cancel press always exits controls
+        bool cancel = GET_BIT(msg, 0U);
+        if (cancel) {
+          controls_allowed = false;
+        }
       }
     }
 
@@ -131,7 +140,9 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
         bool acc_armed = GET_BIT(msg, 2U) || cruise_engaged;
 
         if (acc_armed || cruise_engaged_prev || (!brake && !brake_pressed_prev)) {
-          acc_main_on = acc_armed;
+          if (!mazda_tja_mads) {
+            acc_main_on = acc_armed;
+          }
           pcm_cruise_check(cruise_engaged);
         }
       }
@@ -235,6 +246,15 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   return tx;
 }
 
+// Strip TJA only from the bus0->bus2 forwarding copy. The original RX packet
+// remains available to Mazda safety and the body/MRCC controller.
+static void mazda_fwd_modify(int bus_num, CANPacket_t *msg) {
+  if (mazda_tja_mads && m_mads_state.system_enabled && (bus_num == MAZDA_MAIN) &&
+      (msg->addr == MAZDA_CRZ_BTNS) && (GET_LEN(msg) >= 2U)) {
+    msg->data[MAZDA_TJA_BUTTON_BIT / 8U] &= (uint8_t)~(1U << (MAZDA_TJA_BUTTON_BIT % 8U));
+  }
+}
+
 static safety_config mazda_init(uint16_t param) {
   static const CanMsg MAZDA_TX_MSGS[] = {
     {MAZDA_LKAS, 0, 8, .check_relay = true},
@@ -286,6 +306,8 @@ static safety_config mazda_init(uint16_t param) {
   mazda_longitudinal = GET_FLAG(param, MAZDA_PARAM_LONGITUDINAL);
   mazda_tja_mads = GET_FLAG(param, MAZDA_PARAM_TJA_MADS);
   acc_main_on = false;
+  // Physical TJA is the sole lateral request source on this platform.
+  mads_set_op_controls_allowed_requests_lateral(!mazda_tja_mads);
 
   return mazda_longitudinal ? BUILD_SAFETY_CFG(mazda_long_rx_checks, MAZDA_LONG_TX_MSGS) :
                               BUILD_SAFETY_CFG(mazda_rx_checks, MAZDA_TX_MSGS);
@@ -295,4 +317,5 @@ const safety_hooks mazda_hooks = {
   .init = mazda_init,
   .rx = mazda_rx_hook,
   .tx = mazda_tx_hook,
+  .fwd_modify = mazda_fwd_modify,
 };
