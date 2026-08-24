@@ -10,7 +10,8 @@ import pytest
 from opendbc.can import CANPacker, CANParser
 from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.mazda import mazdacan
-from opendbc.car.mazda.carcontroller import CarController
+from opendbc.car.mazda.carcontroller import (TJA_MRCC_FIRST_TX_DELAY_NANOS, TJA_MRCC_MAX_TX_FRAMES,
+                                             CarController)
 from opendbc.car.mazda.longitudinal import LEAD_DEBOUNCE_FRAMES, RESUME_UNLATCH_FRAMES, StandstillHold
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams
@@ -703,43 +704,337 @@ class TestRadarSessionSequencing:
     assert SESSION_PROG_DAT not in self._uds(sends)
 
 
-class TestTjaIcbmScoping:
+class TestTjaMrccCleanup:
   @staticmethod
-  def _controller(candidate):
+  def _controller(candidate=CAR.MAZDA_CX5_2022):
     fingerprint = {0: {}, 1: {}, 2: {}}
     CP = CarInterface.get_params(candidate, fingerprint, [], alpha_long=False, is_release=False, docs=False)
     CP_SP = CarInterface.get_params_sp(CP, candidate, fingerprint, [], False, False, False)
     return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
 
   @staticmethod
-  def _state():
+  def _controls(*, cancel=False, resume=False):
+    control = structs.CarControl()
+    control.cruiseControl.cancel = cancel
+    control.cruiseControl.resume = resume
+    return control.as_reader(), structs.CarControlSP()
+
+  @staticmethod
+  def _state(*, tja=False, armed=False, active=False, raw_armed=None, counter=0, **buttons):
+    if raw_armed is None:
+      raw_armed = armed
     return SimpleNamespace(
-      out=SimpleNamespace(vEgoRaw=12.0, steeringTorque=0, brakePressed=False),
+      out=SimpleNamespace(
+        vEgoRaw=12.0,
+        steeringTorque=0,
+        brakePressed=False,
+        cruiseState=SimpleNamespace(available=armed, enabled=active),
+      ),
+      cruise_available=armed,
+      mrcc_armed_raw=raw_armed,
       cam_lkas={"ERR_BIT_1": 0, "ERR_BIT_2": 0, "LINE_NOT_VISIBLE": 0, "BIT_1": 1},
       cam_laneinfo={
         "LINE_VISIBLE": 0, "LINE_NOT_VISIBLE": 1, "LANE_LINES": 1,
         "BIT1": 0, "BIT2": 0, "BIT3": 0, "NO_ERR_BIT": 0, "S1": 0, "S1_HBEAM": 0,
       },
-      crz_btns_counter=0,
-      cancel_button=0,
-      tja_button=1,
-      accel_button=0,
-      decel_button=0,
+      crz_btns_counter=counter,
+      cancel_button=buttons.get("cancel_button", 0),
+      resume_button=buttons.get("resume_button", 0),
+      tja_button=int(tja),
+      accel_button=buttons.get("accel_button", 0),
+      decel_button=buttons.get("decel_button", 0),
+      mrcc_button=buttons.get("mrcc_button", 0),
       lkas_allowed_speed=True,
     )
+
+  def _step(self, controller, *, tja=False, armed=False, active=False, raw_armed=None, counter=None,
+            advance_nanos=None, control=None, **buttons):
+    if counter is None:
+      counter = (getattr(controller, "_test_counter", -1) + 1) % 16
+    if advance_nanos is None:
+      advance_nanos = round(DT_CTRL * 1e9)
+    controller._test_counter = counter
+    controller._test_now = getattr(controller, "_test_now", 0) + advance_nanos
+    CC, CC_SP = control or self._controls()
+    sends = controller.update(
+      CC, CC_SP,
+      self._state(tja=tja, armed=armed, active=active, raw_armed=raw_armed, counter=counter, **buttons),
+      controller._test_now,
+    )[1]
+    assert controller.tja_mrcc_tx_frames <= TJA_MRCC_MAX_TX_FRAMES
+    return sends
+
+  @staticmethod
+  def _mrcc_off_payloads(sends):
+    parser = CANParser("mazda_2017", [("CRZ_BTNS", 10)], 0)
+    payloads = []
+    for address, data, bus in sends:
+      if address != 0x09d or bus != 0:
+        continue
+      parser.update([(0, [(address, data, bus)])])
+      if parser.vl["CRZ_BTNS"]["BIT1"] == 0:
+        payloads.append(data)
+    return payloads
+
+  @staticmethod
+  def _button_payloads(sends):
+    return [data for address, data, bus in sends if address == 0x09d and bus == 0]
+
+  @staticmethod
+  def _payload_counters(payloads):
+    parser = CANParser("mazda_2017", [("CRZ_BTNS", 10)], 0)
+    counters = []
+    for data in payloads:
+      parser.update([(0, [(0x09d, data, 0)])])
+      counters.append(int(parser.vl["CRZ_BTNS"]["CTR"]))
+    return counters
+
+  def _start_owned_cleanup(self, controller, *, start_counter=0):
+    self._step(controller, tja=False, armed=False, raw_armed=False, counter=start_counter)
+    self._step(controller, tja=True, armed=True, raw_armed=True, counter=(start_counter + 1) % 16)
+    sends = self._step(controller, tja=False, armed=True, raw_armed=True, counter=(start_counter + 2) % 16)
+    assert not self._mrcc_off_payloads(sends)
+
+  def _reach_first_deadline(self, controller, *, counter):
+    step_nanos = round(DT_CTRL * 1e9)
+    assert TJA_MRCC_FIRST_TX_DELAY_NANOS == 5 * step_nanos
+    for _ in range(4):
+      assert not self._mrcc_off_payloads(
+        self._step(controller, armed=True, raw_armed=True, counter=counter, advance_nanos=step_nanos)
+      )
+    return self._step(controller, armed=True, raw_armed=True, counter=counter, advance_nanos=step_nanos)
+
+  @pytest.mark.parametrize(("state", "prearmed", "active"), [
+    ("off", False, False),
+    ("armed", True, False),
+    ("active", True, True),
+  ])
+  def test_cleanup_ownership_depends_on_pre_tja_state(self, state, prearmed, active):
+    controller = self._controller()
+    self._step(controller, armed=prearmed, active=active, raw_armed=prearmed, counter=0)
+    self._step(controller, tja=True, armed=True, raw_armed=True, counter=1)
+    self._step(controller, armed=True, raw_armed=True, counter=2)
+    sends = self._reach_first_deadline(controller, counter=3)
+    assert bool(self._mrcc_off_payloads(sends)) == (state == "off")
+
+  def test_first_attempt_is_delayed_and_hold_is_capped_at_three_frames(self):
+    controller = self._controller()
+    self._start_owned_cleanup(controller)
+    payloads = self._mrcc_off_payloads(self._reach_first_deadline(controller, counter=3))
+    for counter in range(4, 12):
+      payloads.extend(self._mrcc_off_payloads(
+        self._step(controller, armed=True, raw_armed=True, counter=counter % 16)
+      ))
+    assert len(payloads) == 3
+    assert controller.tja_mrcc_tx_frames == 3
+
+  @pytest.mark.parametrize("button", [
+    {"cancel_button": 1},
+    {"resume_button": 1},
+    {"accel_button": 1},
+    {"decel_button": 1},
+    {"mrcc_button": 1},
+  ])
+  def test_physical_driver_button_aborts_cleanup(self, button):
+    controller = self._controller()
+    self._start_owned_cleanup(controller)
+    self._step(controller, armed=True, raw_armed=True, counter=3, **button)
+    assert not controller.tja_mrcc_unarm_pending
+    for counter in range(4, 12):
+      assert not self._mrcc_off_payloads(
+        self._step(controller, armed=True, raw_armed=True, counter=counter, **button)
+      )
+
+  def test_raw_off_stops_in_flight_cleanup_despite_filtered_brake_hold(self):
+    controller = self._controller()
+    self._start_owned_cleanup(controller)
+    assert len(self._mrcc_off_payloads(self._reach_first_deadline(controller, counter=3))) == 1
+    assert not self._mrcc_off_payloads(
+      self._step(controller, armed=True, raw_armed=False, counter=4)
+    )
+    assert not controller.tja_mrcc_unarm_pending
+
+  @pytest.mark.parametrize("spent_before_repress", [1, 2])
+  def test_double_tja_preserves_ownership_and_cumulative_budget(self, spent_before_repress):
+    controller = self._controller()
+    self._start_owned_cleanup(controller)
+    payloads = self._mrcc_off_payloads(self._reach_first_deadline(controller, counter=3))
+    counter = 4
+    if spent_before_repress == 2:
+      payloads.extend(self._mrcc_off_payloads(
+        self._step(controller, armed=True, raw_armed=True, counter=counter)
+      ))
+      counter += 1
+    self._step(controller, tja=True, armed=True, raw_armed=True, counter=counter)
+    counter += 1
+    self._step(controller, tja=False, armed=True, raw_armed=True, counter=counter)
+    counter += 1
+    for follow_counter in range(counter, counter + 8):
+      payloads.extend(self._mrcc_off_payloads(
+        self._step(controller, armed=True, raw_armed=True, counter=follow_counter % 16)
+      ))
+    assert len(payloads) == 3
+    assert controller.tja_mrcc_tx_frames == 3
+
+  @pytest.mark.parametrize("action", ["cancel", "resume"])
+  def test_op_command_before_first_tx_defers_until_fresh_counter(self, action):
+    controller = self._controller()
+    self._start_owned_cleanup(controller)
+    op_command = self._controls(**{action: True})
+    for _ in range(6):
+      assert not self._mrcc_off_payloads(
+        self._step(controller, armed=True, raw_armed=True, counter=2, control=op_command)
+      )
+    assert not self._mrcc_off_payloads(
+      self._step(controller, armed=True, raw_armed=True, counter=2)
+    )
+    sends = self._step(controller, armed=True, raw_armed=True, counter=3)
+    assert len(self._mrcc_off_payloads(sends)) == 1
+
+  @pytest.mark.parametrize("action", ["cancel", "resume"])
+  def test_op_command_after_first_tx_aborts_replacement_hold(self, action):
+    controller = self._controller()
+    self._start_owned_cleanup(controller)
+    assert len(self._mrcc_off_payloads(self._reach_first_deadline(controller, counter=3))) == 1
+    sends = self._step(
+      controller, armed=True, raw_armed=True, counter=4,
+      control=self._controls(**{action: True}),
+    )
+    assert not self._mrcc_off_payloads(sends)
+    assert not controller.tja_mrcc_unarm_pending
+
+  def test_counter_jump_after_hold_starts_aborts_without_budget_reset(self):
+    controller = self._controller()
+    self._start_owned_cleanup(controller)
+    assert len(self._mrcc_off_payloads(self._reach_first_deadline(controller, counter=3))) == 1
+    assert not self._mrcc_off_payloads(
+      self._step(controller, armed=True, raw_armed=True, counter=6)
+    )
+    assert not controller.tja_mrcc_unarm_pending
+    assert controller.tja_mrcc_tx_frames == 1
+
+  def test_cleanup_counter_wrap_is_consecutive(self):
+    controller = self._controller()
+    self._start_owned_cleanup(controller, start_counter=12)
+    payloads = self._mrcc_off_payloads(self._reach_first_deadline(controller, counter=14))
+    payloads.extend(self._mrcc_off_payloads(
+      self._step(controller, armed=True, raw_armed=True, counter=15)
+    ))
+    payloads.extend(self._mrcc_off_payloads(
+      self._step(controller, armed=True, raw_armed=True, counter=0)
+    ))
+    assert self._payload_counters(payloads) == [15, 0, 1]
+
+  @pytest.mark.parametrize("button", [
+    {"mrcc_button": 1},
+    {"cancel_button": 1},
+    {"resume_button": 1},
+    {"accel_button": 1},
+    {"decel_button": 1},
+  ])
+  def test_driver_input_wins_at_exact_first_tx_deadline(self, button):
+    controller = self._controller()
+    self._start_owned_cleanup(controller)
+    step_nanos = round(DT_CTRL * 1e9)
+    for _ in range(4):
+      self._step(controller, armed=True, raw_armed=True, counter=3, advance_nanos=step_nanos)
+    sends = self._step(
+      controller, armed=True, raw_armed=True, counter=3,
+      advance_nanos=step_nanos, **button,
+    )
+    assert not self._mrcc_off_payloads(sends)
+    assert not controller.tja_mrcc_unarm_pending
+
+  def test_tja_repress_wins_at_exact_first_tx_deadline(self):
+    controller = self._controller()
+    self._start_owned_cleanup(controller)
+    step_nanos = round(DT_CTRL * 1e9)
+    for _ in range(4):
+      self._step(controller, armed=True, raw_armed=True, counter=3, advance_nanos=step_nanos)
+    sends = self._step(
+      controller, tja=True, armed=True, raw_armed=True, counter=3,
+      advance_nanos=step_nanos,
+    )
+    assert not self._mrcc_off_payloads(sends)
+    assert controller.tja_mrcc_unarm_pending
+    assert controller.tja_mrcc_release_counter is None
+
+  def test_brief_raw_dropout_does_not_claim_prearmed_mrcc(self):
+    controller = self._controller()
+    self._step(controller, armed=True, raw_armed=True, counter=0)
+    for counter in range(1, 4):
+      self._step(controller, armed=True, raw_armed=False, counter=counter)
+    self._step(controller, tja=True, armed=True, raw_armed=True, counter=4)
+    self._step(controller, armed=True, raw_armed=True, counter=5)
+    sends = self._reach_first_deadline(controller, counter=6)
+    assert not self._mrcc_off_payloads(sends)
+    assert not controller.tja_mrcc_unarm_pending
+
+  def test_final_cleanup_frame_suppresses_icbm(self):
+    controller = self._controller()
+    self._start_owned_cleanup(controller)
+    self._reach_first_deadline(controller, counter=3)
+    self._step(controller, armed=True, raw_armed=True, counter=4)
+
+    CC, CC_SP = self._controls()
+    CC_SP.intelligentCruiseButtonManagement.sendButton = (
+      structs.IntelligentCruiseButtonManagement.SendButtonState.increase
+    )
+    controller.last_button_frame = -10_000
+    sends = self._step(
+      controller, armed=True, raw_armed=True, counter=5, control=(CC, CC_SP),
+    )
+    assert len(self._mrcc_off_payloads(sends)) == 1
+    assert len(self._button_payloads(sends)) == 1
+
+  def test_exhausted_budget_cannot_leak_into_later_armed_tja(self):
+    controller = self._controller()
+    self._start_owned_cleanup(controller)
+    self._reach_first_deadline(controller, counter=3)
+    self._step(controller, armed=True, raw_armed=True, counter=4)
+    self._step(controller, armed=True, raw_armed=True, counter=5)
+    assert controller.tja_mrcc_tx_frames == 3
+
+    self._step(controller, tja=True, armed=True, raw_armed=True, counter=6)
+    self._step(controller, armed=True, raw_armed=True, counter=7)
+    for counter in range(8, 16):
+      assert not self._mrcc_off_payloads(
+        self._step(controller, armed=True, raw_armed=True, counter=counter)
+      )
+    assert controller.tja_mrcc_tx_frames == 3
 
   @pytest.mark.parametrize("candidate,should_suppress", [
     (CAR.MAZDA_CX5_2022, True),
     (CAR.MAZDA_CX5, False),
   ])
-  def test_tja_hold_suppression_is_platform_scoped(self, candidate, should_suppress):
+  def test_icbm_tja_hold_suppression_is_platform_scoped(self, candidate, should_suppress):
     controller = self._controller(candidate)
-    control = structs.CarControl()
-    control_sp = structs.CarControlSP()
-    control_sp.intelligentCruiseButtonManagement.sendButton = (
+    CC, CC_SP = self._controls()
+    CC_SP.intelligentCruiseButtonManagement.sendButton = (
       structs.IntelligentCruiseButtonManagement.SendButtonState.increase
     )
     controller.last_button_frame = -10_000
-    sends = controller.update(control.as_reader(), control_sp, self._state(), 0)[1]
-    button_present = any(address == 0x09d and bus == 0 for address, _data, bus in sends)
-    assert button_present is not should_suppress
+    sends = self._step(
+      controller, tja=True, armed=False, raw_armed=False, counter=0,
+      control=(CC, CC_SP),
+    )
+    assert bool(self._button_payloads(sends)) is not should_suppress
+
+  def test_non_target_and_long_repetition_never_leave_stale_ownership(self):
+    non_target = self._controller(CAR.MAZDA_CX5)
+    for counter in range(40):
+      sends = self._step(
+        non_target,
+        tja=counter % 4 == 1,
+        armed=counter % 4 != 0,
+        raw_armed=counter % 4 != 0,
+        counter=counter % 16,
+      )
+      assert not self._mrcc_off_payloads(sends)
+    assert not non_target.tja_mrcc_unarm_pending
+
+    target = self._controller()
+    self._start_owned_cleanup(target)
+    for counter in range(3, 40):
+      self._step(target, armed=False, raw_armed=False, counter=counter % 16)
+    assert not target.tja_mrcc_unarm_pending

@@ -196,6 +196,7 @@ def create_button_cmd(packer, CP, counter, button, CS=None):
   res = int(button == Buttons.RESUME)
   inc = int(button == Buttons.SET_PLUS)
   dec = int(button == Buttons.SET_MINUS)
+  mrcc_button = int(button == Buttons.MRCC_OFF)
   if has_tja_mads(CP):
     tja = int(getattr(CS, "tja_button", 0) == 1)
     mode_x = int(getattr(CS, "mode_x", 0) == 1)
@@ -233,7 +234,8 @@ def create_button_cmd(packer, CP, counter, button, CS=None):
       "MODE_Y": mode_y,
       "MODE_Y_INV": (mode_y + 1) % 2,
 
-      "BIT1": 1,
+      "BIT1": 1 - mrcc_button,
+      "BIT1_INV": mrcc_button,
       "BIT2": 1,
       "BIT3": 1,
       "CTR": (counter + 1) % 16,

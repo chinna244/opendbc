@@ -163,6 +163,8 @@ class Buttons:
   SET_MINUS = 2
   RESUME = 3
   CANCEL = 4
+  # Active-low MRCC master pair on the CX-5 2022 steering wheel.
+  MRCC_OFF = 5
 
 
 FW_QUERY_CONFIG = FwQueryConfig(

@@ -34,9 +34,11 @@ class CarState(CarStateBase, CarStateExt):
     self.tja_button = 0
     self.mode_x = 0
     self.mode_y = 0
+    self.mrcc_button = 0
 
     self.cruise_available = False
     self.cruise_enabled = False
+    self.mrcc_armed_raw = False
     self.brake_pressed_prev = False
     self.stock_radar_silent_frames = 0
     self.radar_was_silenced = False
@@ -111,14 +113,16 @@ class CarState(CarStateBase, CarStateExt):
     else:
       self.lkas_allowed_speed = True
 
+    acc_armed = cp.vl["PEDALS"]["ACC_OFF"] == 1
+    acc_active = cp.vl["PEDALS"]["ACC_ACTIVE"] == 1
+    self.mrcc_armed_raw = acc_armed or acc_active
+
     if self.CP.openpilotLongitudinalControl:
       # The radar teardown silences the radar-owned CRZ_CTRL frame, so cruise state comes
       # from PEDALS: ACC_OFF means MRCC is armed but idle, ACC_ACTIVE means it is engaged.
       # Brake-only samples can arrive with both bits low mid-press; mirror the panda rx
       # guard and hold the previous state through them, else MADS sees a false
       # availability drop and force-disengages lateral.
-      acc_armed = cp.vl["PEDALS"]["ACC_OFF"] == 1
-      acc_active = cp.vl["PEDALS"]["ACC_ACTIVE"] == 1
       brake_free = not ret.brakePressed and not self.brake_pressed_prev
       # The brake hold below exists for brake-only PEDALS samples that arrive with both bits
       # low mid-press. A wheel CANCEL is different: it turns the MRCC main state off for real,
@@ -237,6 +241,8 @@ class CarState(CarStateBase, CarStateExt):
     self.mode_x = int(cp.vl["CRZ_BTNS"]["MODE_X"] == 1)
     self.mode_y = int(cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
     self.tja_button = int(cp.vl["CRZ_BTNS"]["TJA_BUTTON"] == 1)
+    # The pt parser accepts only bus-0 wheel frames, not panda TX loopback.
+    self.mrcc_button = int(cp.vl["CRZ_BTNS"]["BIT1"] == 0)
     self.main_button = int(self.mode_x and self.mode_y)
 
     extra_events = (

@@ -1,5 +1,6 @@
 import pytest
 
+from opendbc.can import CANPacker
 from opendbc.car import DT_CTRL, gen_empty_fingerprint
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda.interface import CarInterface
@@ -225,6 +226,13 @@ class TestCancelUnderBraking:
     ret, n = self._feed(CI, packer, n, 1.0, brake=True, cancel=False)
     assert ret.cruiseState.available
 
+  def test_raw_mrcc_state_drops_while_public_state_is_brake_held(self):
+    CI = _interface()
+    packer, n = self._armed_and_silent(CI)
+    ret, _ = self._feed(CI, packer, n, 0.2, brake=True, cancel=False)
+    assert ret.cruiseState.available
+    assert not CI.CS.mrcc_armed_raw
+
   def test_cancel_lands_through_the_brake(self):
     CI = _interface()
     packer, n = self._armed_and_silent(CI)
@@ -244,3 +252,18 @@ class TestCancelUnderBraking:
     assert ret.cruiseState.available
     ret, n = self._feed(CI, packer, n + 5, 0.2, brake=True, cancel=False)
     assert not ret.cruiseState.available
+
+
+def test_physical_mrcc_button_ignores_tx_loopback():
+  CI = _interface(alpha_long=False)
+  packer = CANPacker("mazda_2017")
+  pressed = packer.make_can_msg("CRZ_BTNS", 0, {"BIT1": 0, "BIT1_INV": 1})
+  released = packer.make_can_msg("CRZ_BTNS", 0, {"BIT1": 1, "BIT1_INV": 0})
+
+  CI.update([(0, [(pressed[0], pressed[1], 0)])])
+  CI.update([(int(DT_CTRL * 1e9), [(pressed[0], pressed[1], 0)])])
+  assert CI.CS.mrcc_button == 1
+  CI.update([(int(2 * DT_CTRL * 1e9), [(released[0], released[1], 0)])])
+  assert CI.CS.mrcc_button == 0
+  CI.update([(int(3 * DT_CTRL * 1e9), [(pressed[0], pressed[1], 128)])])
+  assert CI.CS.mrcc_button == 0

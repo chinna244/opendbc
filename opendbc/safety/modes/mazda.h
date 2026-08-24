@@ -31,6 +31,15 @@
 
 static bool mazda_longitudinal = false;
 static bool mazda_tja_mads = false;
+static bool mazda_acc_armed = false;
+
+static bool mazda_mrcc_off_msg_valid(const CANPacket_t *msg) {
+  // Byte-exact physical MRCC master tap; only the counter bits may vary.
+  return (GET_LEN(msg) == 8U) && (msg->data[0] == 0x00U) &&
+         (msg->data[1] == 0x81U) && (msg->data[2] == 0xfeU) &&
+         ((msg->data[3] & 0xc3U) == 0xc0U) && (msg->data[4] == 0x00U) &&
+         (msg->data[5] == 0x00U) && (msg->data[6] == 0x00U) && (msg->data[7] == 0x00U);
+}
 
 // With longitudinal control the stock radar is silenced and openpilot replays its frames,
 // so allowed tx patterns are pinned to byte-exact stock captures wherever possible.
@@ -106,6 +115,7 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
     if ((msg->addr == MAZDA_CRZ_CTRL) && !mazda_longitudinal) {
       bool cruise_engaged = msg->data[0] & 0x8U;
       pcm_cruise_check(cruise_engaged);
+      mazda_acc_armed = GET_BIT(msg, 17U);
       if (!mazda_tja_mads) {
         acc_main_on = GET_BIT(msg, 17U);
       }
@@ -140,6 +150,7 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
         bool acc_armed = GET_BIT(msg, 2U) || cruise_engaged;
 
         if (acc_armed || cruise_engaged_prev || (!brake && !brake_pressed_prev)) {
+          mazda_acc_armed = acc_armed;
           if (!mazda_tja_mads) {
             acc_main_on = acc_armed;
           }
@@ -238,7 +249,8 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     // allow resume spamming while controls allowed, but
     // only allow cancel while controls not allowed
     bool cancel_cmd = (msg->data[0] == 0x1U);
-    if (!controls_allowed && !cancel_cmd) {
+    const bool mrcc_off_cmd = mazda_tja_mads && mazda_acc_armed && mazda_mrcc_off_msg_valid(msg);
+    if (!controls_allowed && !cancel_cmd && !mrcc_off_cmd) {
       tx = false;
     }
   }
@@ -305,6 +317,7 @@ static safety_config mazda_init(uint16_t param) {
 
   mazda_longitudinal = GET_FLAG(param, MAZDA_PARAM_LONGITUDINAL);
   mazda_tja_mads = GET_FLAG(param, MAZDA_PARAM_TJA_MADS);
+  mazda_acc_armed = false;
   acc_main_on = false;
   // Physical TJA is the sole lateral request source on this platform.
   mads_set_op_controls_allowed_requests_lateral(!mazda_tja_mads);

@@ -228,6 +228,21 @@ class TestMazdaTjaMadsSafety(TestMazdaSafety):
       "TJA_BUTTON": pressed, "BIT1": 1, "BIT2": 1, "BIT3": 1,
     })
 
+  def _mrcc_off_msg(self):
+    return self.packer.make_can_msg_safety("CRZ_BTNS", 0, {
+      "CAN_OFF": 0, "CAN_OFF_INV": 1,
+      "SET_P": 0, "SET_P_INV": 1,
+      "RES": 0, "RES_INV": 1,
+      "SET_M": 0, "SET_M_INV": 1,
+      "DISTANCE_LESS": 0, "DISTANCE_LESS_INV": 1,
+      "DISTANCE_MORE": 0, "DISTANCE_MORE_INV": 1,
+      "TJA_BUTTON": 0,
+      "MODE_X": 0, "MODE_X_INV": 1,
+      "MODE_Y": 0, "MODE_Y_INV": 1,
+      "BIT1": 0, "BIT1_INV": 1, "BIT2": 1, "BIT3": 1,
+      "CTR": 5,
+    })
+
   @staticmethod
   def _packet_bytes(msg):
     return bytes(msg[0].data[0:8])
@@ -295,6 +310,35 @@ class TestMazdaTjaMadsSafety(TestMazdaSafety):
     self.assertTrue(self.safety.get_op_controls_allowed_requests_lateral())
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_mrcc_off_is_allowed_only_for_tja_mads_while_armed(self):
+    message = self._mrcc_off_msg()
+    self.safety.set_controls_allowed(False)
+    self.assertFalse(self._tx(message))
+
+    armed = self.packer.make_can_msg_safety("CRZ_CTRL", 0, {"CRZ_AVAILABLE": 1})
+    self._rx(armed)
+    self.assertTrue(self._tx(message))
+
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, 0)
+    self.safety.init_tests()
+    self._rx(armed)
+    self.assertFalse(self._tx(message))
+
+  def test_longitudinal_raw_armed_state_allows_cleanup_during_braking(self):
+    param = int(MazdaSafetyFlags.LONG | MazdaSafetyFlags.TJA_MADS)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, param)
+    self.safety.init_tests()
+    self.safety.set_controls_allowed(False)
+    armed = self.packer.make_can_msg_safety("PEDALS", 0, {
+      "ACC_OFF": 1, "ACC_ACTIVE": 0, "BRAKE_ON": 0,
+    })
+    brake_only = self.packer.make_can_msg_safety("PEDALS", 0, {
+      "ACC_OFF": 0, "ACC_ACTIVE": 0, "BRAKE_ON": 1,
+    })
+    self._rx(armed)
+    self._rx(brake_only)
+    self.assertTrue(self._tx(self._mrcc_off_msg()))
 
   def test_non_tja_wheel_buttons_do_not_request_lateral(self):
     self.safety.set_mads_params(True, False, False)
