@@ -18,8 +18,9 @@ LEAD_TRACK_ADDR = 0x364
 # create_lead_track only rewrites DIST_OBJ and RELV_OBJ; the rest is the radar's track-valid
 # pattern, which is not understood well enough to synthesize.
 LEAD_TRACK_TEMPLATE = bytes.fromhex("0a4000001dc00000")
-LEAD_TRACK_DIST = 10.25   # m, the template's own range
+LEAD_TRACK_DIST = 10.25   # m, the range LEAD_TRACK_TEMPLATE was captured at; not a control value
 DIST_OBJ_SCALE = 0.0625   # m per bit, DIST_OBJ and RELV_OBJ share it
+DIST_OBJ_MAX = 255.875    # m, the full-scale DIST_OBJ reading a track can carry
 
 
 def crz_info_checksum(dat: bytes) -> int:
@@ -83,7 +84,7 @@ def create_lead_track(d_rel: float, v_rel: float) -> bytes:
   with zero closing speed while the car is commanded to drive off, which its own view of the
   lead pulling away contradicts. RELV_OBJ carries the same sign as vRel, positive opening.
   """
-  dist = round(min(max(d_rel, 0.), 255.875) / DIST_OBJ_SCALE)
+  dist = round(min(max(d_rel, 0.), DIST_OBJ_MAX) / DIST_OBJ_SCALE)
   relv = round(min(max(v_rel, -64.), 63.9375) / DIST_OBJ_SCALE) & 0x7ff
   dat = bytearray(LEAD_TRACK_TEMPLATE)
   dat[0] = dist >> 4

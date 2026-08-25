@@ -11,7 +11,8 @@ from opendbc.can import CANPacker, CANParser
 from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.carcontroller import CarController
-from opendbc.car.mazda.longitudinal import LEAD_DEBOUNCE_FRAMES, RESUME_UNLATCH_FRAMES, StandstillHold
+from opendbc.car.mazda.longitudinal import (LEAD_DEBOUNCE_FRAMES, RESUME_UNLATCH_FRAMES, AdvertisedLead,
+                                            StandstillHold)
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams
 
@@ -195,7 +196,7 @@ class TestStandstillHold:
   @staticmethod
   def run(sm, frames, **kwargs):
     defaults = dict(long_active=True, stopping=False, standstill=False, plan_accel=-1.024,
-                    brake_hold=False, lead_visible=True)
+                    brake_hold=False)
     defaults.update(kwargs)
     for _ in range(frames):
       sm.update(**defaults)
@@ -206,7 +207,6 @@ class TestStandstillHold:
     assert not sm.holding
     self.run(sm, 1, stopping=True)
     assert sm.holding and sm.stop_bits and sm.acc_active_2
-    assert sm.ctrl_phase() == 3
     # arriving at a standstill changes nothing: the plan is still asking for the brakes
     self.run(sm, 500, stopping=True, standstill=True)
     assert sm.holding and sm.stop_bits
@@ -237,7 +237,6 @@ class TestStandstillHold:
     self.run(sm, 1, standstill=True, plan_accel=0.1)
     assert not sm.holding and not sm.car_has_hold
     assert sm.resume_unlatching
-    assert sm.ctrl_phase() == 2
 
   def test_release_holds_for_as_long_as_the_plan_wants_to_move(self, sm):
     # the failed-resume regression: no release window to run out from under the plan
@@ -276,30 +275,61 @@ class TestStandstillHold:
     self.run(sm, 1, stopping=False, plan_accel=0.3)
     assert not sm.holding
 
-  def test_lead_follows_only_a_steady_state(self, sm):
-    # a lead is adopted once leadVisible has held for the debounce window, not before
-    self.run(sm, LEAD_DEBOUNCE_FRAMES - 1, lead_visible=True)
-    assert not sm.radar_has_lead() and sm.ctrl_phase() == 1
-    self.run(sm, 1, lead_visible=True)
-    assert sm.radar_has_lead() and sm.ctrl_phase() == 2
-    # and dropped the same way
-    self.run(sm, LEAD_DEBOUNCE_FRAMES - 1, lead_visible=False)
-    assert sm.radar_has_lead()
-    self.run(sm, 1, lead_visible=False)
-    assert not sm.radar_has_lead()
 
-  def test_lead_flicker_never_reaches_the_bus(self, sm):
+class TestAdvertisedLead:
+  """has_lead, the phase and the track slot are one decision, so they are asserted together."""
+
+  @pytest.fixture
+  def al(self):
+    return AdvertisedLead()
+
+  @staticmethod
+  def run(al, frames, **kwargs):
+    defaults = dict(long_engaged=True, lead_visible=True, d_rel=40.0, v_rel=0.0, holding=False)
+    defaults.update(kwargs)
+    for _ in range(frames):
+      al.update(**defaults)
+    return al
+
+  def test_lead_follows_only_a_steady_state(self, al):
+    # a lead is adopted once leadVisible has held for the debounce window, not before
+    self.run(al, LEAD_DEBOUNCE_FRAMES - 1)
+    assert not al.has_lead and al.ctrl_phase == 0
+    self.run(al, 1)
+    assert al.has_lead and al.lead == (40.0, 0.0) and al.ctrl_phase == 2
+    # and dropped the same way
+    self.run(al, LEAD_DEBOUNCE_FRAMES - 1, lead_visible=False, d_rel=0.)
+    assert al.has_lead
+    self.run(al, 1, lead_visible=False, d_rel=0.)
+    assert not al.has_lead and al.ctrl_phase == 0
+
+  def test_lead_flicker_never_reaches_the_bus(self, al):
     # the measured failure: a marginal 120 m vision lead toggled leadVisible 6 times in 1.4 s
     # (route 6bb2dc61c4 t+400); none of it may reach RADAR_HAS_LEAD or the track slot
     for frames, visible in ((15, True), (5, False), (7, True), (13, False), (10, True)):
-      self.run(sm, frames, lead_visible=visible)
-      assert not sm.radar_has_lead(), "a flickering lead leaked through the debounce"
+      self.run(al, frames, lead_visible=visible)
+      assert not al.has_lead, "a flickering lead leaked through the debounce"
 
-  def test_disengage_resets_the_lead(self, sm):
-    self.run(sm, 2 * LEAD_DEBOUNCE_FRAMES, lead_visible=True)
-    assert sm.radar_has_lead()
-    self.run(sm, 1, long_active=False)
-    assert not sm.radar_has_lead()
+  def test_measurement_is_coasted_across_a_dropout(self, al):
+    # leadOne goes to zero the instant vision drops the lead, well before the debounce expires.
+    # Advertising a fabricated stand-in there put a stationary object 10.25 m dead ahead on the
+    # bus at 22 m/s; the last real measurement carries the gap instead.
+    self.run(al, 2 * LEAD_DEBOUNCE_FRAMES, d_rel=120.0, v_rel=0.5)
+    assert al.lead == (120.0, 0.5)
+    self.run(al, LEAD_DEBOUNCE_FRAMES - 1, lead_visible=False, d_rel=0., v_rel=0.)
+    assert al.lead == (120.0, 0.5), "dropped the measurement inside the debounce window"
+
+  def test_holding_reports_the_stop_phase_only_with_a_lead(self, al):
+    self.run(al, 2 * LEAD_DEBOUNCE_FRAMES, holding=True)
+    assert al.ctrl_phase == 3
+    self.run(al, 2 * LEAD_DEBOUNCE_FRAMES, lead_visible=False, d_rel=0., holding=True)
+    assert not al.has_lead and al.ctrl_phase == 0
+
+  def test_disengage_resets_the_lead(self, al):
+    self.run(al, 2 * LEAD_DEBOUNCE_FRAMES)
+    assert al.has_lead
+    self.run(al, 1, long_engaged=False)
+    assert not al.has_lead and al.lead is None and al.ctrl_phase == 0
 
 
 def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas=False, override=False,
@@ -352,11 +382,39 @@ def _long_frames(sends):
   return decode_accel_cmd_raw(info), cp.vl["CRZ_INFO"]["ACC_ACTIVE"], cp.vl["CRZ_CTRL"]["CRZ_ACTIVE"]
 
 
+# create_radar_frames stamps the counter into the last byte, so an empty slot is the first seven
+_EMPTY_TRACK = mazdacan.RADAR_TRACK_MSGS[0x364][:7]
+
+
+def _decode(msg, addr, dat):
+  """CANParser view of a single frame."""
+  cp = CANParser("mazda_2017", [(msg, float("nan"))], 0)
+  cp.update([(0, [(addr, dat, 0)])])
+  return cp.vl[msg]
+
+
+def _frames(sends, addr, bus=0):
+  return [d for a, d, b in sends if a == addr and b == bus]
+
+
+def _frame(sends, addr, bus=0):
+  return next(iter(_frames(sends, addr, bus)), None)
+
+
+def _track_occupied(dat):
+  return dat[:7] != _EMPTY_TRACK
+
+
+def _crz_ctrl(dat):
+  """(RADAR_HAS_LEAD, RADAR_LEAD_RELATIVE_DISTANCE) from a CRZ_CTRL frame."""
+  v = _decode("CRZ_CTRL", 0x21c, dat)
+  return int(v["RADAR_HAS_LEAD"]), int(v["RADAR_LEAD_RELATIVE_DISTANCE"])
+
+
 def _lead_track(dat):
   """(DIST_OBJ, RELV_OBJ) decoded from a 0x364 track frame."""
-  cp = CANParser("mazda_2017", [("RADAR_TRACK_364", float("nan"))], 0)
-  cp.update([(0, [(0x364, dat, 0)])])
-  return cp.vl["RADAR_TRACK_364"]["DIST_OBJ"], cp.vl["RADAR_TRACK_364"]["RELV_OBJ"]
+  v = _decode("RADAR_TRACK_364", 0x364, dat)
+  return v["DIST_OBJ"], v["RELV_OBJ"]
 
 
 def _step(cc, **kw):
@@ -537,29 +595,63 @@ class TestLongitudinalIntegration:
     assert all(a > b for a, b in zip(dists, dists[1:], strict=False)), f"range did not close with the lead: {dists}"
     assert all(v == pytest.approx(-1.5, abs=0.0625) for _, v in seen)
 
-  def test_hold_fabricates_a_lead_but_drops_it_on_release(self, cc):
-    # with no lead in view the hold still needs something to hold against, but carrying that
-    # fabricated object through the release is what the camera latches on
+  def test_hold_with_nothing_ahead_advertises_nothing(self, cc):
+    # No fabricated object. The body does not decide the latch on the advertisement: across 32
+    # stock engaged standstills the radar said has_lead=1 in every one, yet 23 latched
+    # GEAR.BRAKE_HOLD and 9 did not (one held 104 s), and 89 of 115 stock latches happened at
+    # has_lead=0 / phase=0. A phantom the camera can refute is the SCBS trigger.
     long = structs.CarControl.Actuators.LongControlState
+    held, ctrls = [], []
+    for _ in range(400):
+      sends = _step(cc, long_state=long.stopping, accel=-1.024, standstill=True,
+                    lead_visible=False, lead_d_rel=0.0, cruise_engaged=True)
+      held += _frames(sends, 0x364)
+      ctrls += _frames(sends, 0x21c)
+    assert held and ctrls
+    assert not any(map(_track_occupied, held)), "fabricated a lead for a hold with nothing ahead"
+    assert all(_crz_ctrl(d) == (0, 0) for d in ctrls), "advertised a lead with nothing in view"
+    # and the hold itself is untouched: the plan's brake and the stop bits still go out
+    assert cc.stop_and_go.holding and cc.stop_and_go.stop_bits
 
-    def tracks(sends):
-      return [d for a, d, b in sends if a == 0x364 and b == 0]
+  def test_vision_lead_dropout_does_not_fabricate_a_lead_at_speed(self, cc):
+    # leadOne goes to zero the instant the vision lead drops while sm.lead_visible is still
+    # latched. Falling through to the hold fallback there put a stationary object 10.25 m dead
+    # ahead on the bus at 22 m/s, 20 times across the two 2026-08-25 drives.
+    long = structs.CarControl.Actuators.LongControlState
+    for _ in range(200):  # settle a real lead at 120 m while cruising
+      _step(cc, long_state=long.pid, accel=0.5, lead_visible=True, lead_d_rel=120.0,
+            lead_v_rel=0.5, cruise_engaged=True)
 
-    held = []
-    for _ in range(int(3.0 / 0.01)):
-      held += tracks(_step(cc, long_state=long.stopping, accel=-1.5, standstill=True,
-                           lead_visible=False, cruise_engaged=True))
-    assert held
-    assert all(_lead_track(d)[0] == pytest.approx(mazdacan.LEAD_TRACK_DIST) for d in held)
+    dropped = []
+    for _ in range(int(LEAD_DEBOUNCE_FRAMES * 0.8)):  # inside the debounce window
+      dropped += _frames(_step(cc, long_state=long.pid, accel=0.5, lead_visible=False,
+                               lead_d_rel=0.0, lead_v_rel=0.0, cruise_engaged=True), 0x364)
+    assert dropped
+    for d in dropped:
+      dist = _lead_track(d)[0]
+      assert dist == pytest.approx(120.0, abs=1.0), f"track teleported to {dist} m"
 
-    released = []
-    for _ in range(50):
-      released += tracks(_step(cc, long_state=long.pid, accel=0.3, standstill=True,
-                               lead_visible=False, cruise_engaged=True))
-    assert released
-    empty = mazdacan.RADAR_TRACK_MSGS[0x364]
-    assert all(d[:7] == empty[:7] for d in released), \
-      f"fabricated lead survived the release: {released[0].hex()}"
+  def test_has_lead_phase_and_track_never_disagree(self, cc):
+    # stock pairs all three absolutely: has_lead=0 <=> phase=0, and RADAR_HAS_LEAD=1 with all six
+    # slots empty appears 8 times in 1,095,826 stock samples. We shipped has_lead=0 with phase=1
+    # for 22-84% of every engaged drive before this was derived from one decision.
+    long = structs.CarControl.Actuators.LongControlState
+    cases = [
+      dict(long_state=long.pid, accel=0.5, lead_visible=True, lead_d_rel=40.0),
+      dict(long_state=long.pid, accel=0.5, lead_visible=False, lead_d_rel=0.0),
+      dict(long_state=long.stopping, accel=-1.024, standstill=True, lead_visible=False, lead_d_rel=0.0),
+      dict(long_state=long.pid, accel=0.3, standstill=True, lead_visible=False, lead_d_rel=0.0),
+      dict(long_state=long.pid, accel=0.5, lead_visible=True, lead_d_rel=0.0),
+    ]
+    for kw in cases:
+      for _ in range(120):
+        sends = _step(cc, cruise_engaged=True, **kw)
+        trk, ctl = _frame(sends, 0x364), _frame(sends, 0x21c)
+        if trk is None or ctl is None:
+          continue
+        has_lead, phase = _crz_ctrl(ctl)
+        assert bool(has_lead) == _track_occupied(trk), f"has_lead/track disagree for {kw}"
+        assert (phase == 0) == (has_lead == 0), f"has_lead/phase disagree for {kw}"
 
   def test_no_resume_button_while_openpilot_owns_longitudinal(self, cc):
     # We are the ACC here, so the hold is released in-protocol. The car's own MRCC never presses

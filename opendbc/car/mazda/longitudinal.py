@@ -2,6 +2,7 @@ from enum import StrEnum
 
 from opendbc.car import DT_CTRL, uds
 from opendbc.car.can_definitions import CanData
+from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.values import CarControllerParams
 
 RADAR_ADDR = 0x764
@@ -98,25 +99,12 @@ class StandstillHold:
     self.holding = False
     self.car_has_hold = False
     self.unlatch_frames = 0
-    self.lead_visible = False
-    self.lead_flip_frames = 0
 
   def update(self, long_active: bool, stopping: bool, standstill: bool,
-             plan_accel: float, brake_hold: bool, lead_visible: bool) -> None:
+             plan_accel: float, brake_hold: bool) -> None:
     if not long_active:
       self._reset()
       return
-
-    # the advertised lead follows leadVisible only once it has held steady: the camera
-    # cross-checks the track slot against RADAR_HAS_LEAD, and a marginal vision lead can
-    # flicker both faster than any real radar ever would
-    if lead_visible != self.lead_visible:
-      self.lead_flip_frames += 1
-      if self.lead_flip_frames >= LEAD_DEBOUNCE_FRAMES:
-        self.lead_visible = lead_visible
-        self.lead_flip_frames = 0
-    else:
-      self.lead_flip_frames = 0
 
     was_holding = self.holding
     # the plan asking for acceleration is the only thing that releases the hold
@@ -148,12 +136,61 @@ class StandstillHold:
     # stock drops ACC_ACTIVE_2 together with the command relax
     return not self.car_has_hold
 
-  def radar_has_lead(self) -> bool:
-    return self.lead_visible or self.holding
 
+class AdvertisedLead:
+  """The lead we tell the camera about: CRZ_CTRL's two lead fields and the 0x364 track slot.
+
+  All three describe one fact, and stock pairs them absolutely -- RADAR_HAS_LEAD=1 never came
+  with all six slots empty, and has_lead=0 always came with phase=0 -- so they are read off one
+  piece of state here rather than computed separately and kept in step by hand.
+
+  Two things make that state more than a copy of leadVisible. A marginal vision lead flickers
+  faster than any real radar ever would (route 6bb2dc61c4 t+400: 6 toggles in 1.4 s on a 120 m
+  lead), so visibility is adopted only once it has held steady, the way Hyundai debounces its
+  lead bit. And leadOne drops to zero the instant vision loses the lead, well before that
+  debounce expires; advertising a fabricated stand-in over the gap put a stationary object
+  10.25 m dead ahead on the bus at 22 m/s, so the last real measurement is coasted across it
+  instead, the way a radar coasts a track.
+  """
+
+  def __init__(self):
+    self._reset()
+
+  def _reset(self):
+    self.visible = False
+    self.flip_frames = 0
+    self.holding = False
+    self.lead = None
+    self._measured = None
+
+  def update(self, long_engaged: bool, lead_visible: bool, d_rel: float, v_rel: float,
+             holding: bool) -> None:
+    if not long_engaged:
+      self._reset()
+      return
+
+    if lead_visible != self.visible:
+      self.flip_frames += 1
+      if self.flip_frames >= LEAD_DEBOUNCE_FRAMES:
+        self.visible = lead_visible
+        self.flip_frames = 0
+    else:
+      self.flip_frames = 0
+
+    if 0. < d_rel <= mazdacan.DIST_OBJ_MAX:
+      self._measured = (d_rel, v_rel)
+    self.lead = self._measured if self.visible else None
+    self.holding = holding
+
+  @property
+  def has_lead(self) -> bool:
+    return self.lead is not None
+
+  @property
   def ctrl_phase(self) -> int:
-    # RADAR_LEAD_RELATIVE_DISTANCE: 1 cruise, 2 follow, 3 stop/hold. Stock holds a constant stop
-    # phase through the whole hold and drops to follow on release.
-    if self.holding:
-      return 3
-    return 2 if self.lead_visible else 1
+    # RADAR_LEAD_RELATIVE_DISTANCE: 0 nothing to describe, 1 cruise, 2 follow, 3 stop/hold.
+    # We shipped has_lead=0 with phase=1 for 22-84% of every engaged drive before this was a
+    # read off the advertised lead instead of a second, separate computation.
+    if not self.has_lead:
+      return 0
+    return 3 if self.holding else 2

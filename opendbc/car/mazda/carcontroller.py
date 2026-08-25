@@ -5,8 +5,8 @@ from opendbc.car import Bus, make_tester_present_msg, rate_limit, structs, uds
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.mazda import mazdacan
-from opendbc.car.mazda.longitudinal import (RADAR_ADDR, RadarSessionManager, RadarSessionState, StandstillHold,
-                                            create_radar_session_msg)
+from opendbc.car.mazda.longitudinal import (RADAR_ADDR, AdvertisedLead, RadarSessionManager, RadarSessionState,
+                                            StandstillHold, create_radar_session_msg)
 from opendbc.car.mazda.values import CarControllerParams, Buttons
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
@@ -28,6 +28,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.brake_counter = 0
     self.stop_and_go = StandstillHold()
+    self.lead_adv = AdvertisedLead()
     self.long_counter = 0
     self.radar_counter = 0
     self.radar_session = RadarSessionManager()
@@ -153,8 +154,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     gas_override = CC.enabled and (CC.cruiseControl.override or CS.out.gasPressed)
     long_engaged = CC.longActive or gas_override
     sm = self.stop_and_go
-    sm.update(long_engaged, stopping, CS.out.standstill, CC.actuators.accel, CS.brake_hold,
-              CC.hudControl.leadVisible)
+    sm.update(long_engaged, stopping, CS.out.standstill, CC.actuators.accel, CS.brake_hold)
+    # after the hold: the advertised phase is a stop phase only while we are actually holding
+    self.lead_adv.update(long_engaged, CC.hudControl.leadVisible, CC_SP.leadOne.dRel,
+                         CC_SP.leadOne.vRel, sm.holding)
 
     accel = 0.
     if CC.longActive:
@@ -168,39 +171,23 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         accel = CarControllerParams.ACCEL_HOLD_LATCHED
     self.accel_last = accel
 
-    # The track slot and CRZ_CTRL's RADAR_HAS_LEAD have to agree: the camera cross-checks them,
-    # and advertising a lead on one but not the other latches an SCBS fault. A real lead is
-    # reported as measured; the hold falls back to a fabricated stopped one only for as long as
-    # it needs a lead to hold against, and never through the release.
-    has_lead = long_engaged and sm.radar_has_lead()
-    if not has_lead:
-      lead = None
-    elif sm.lead_visible and 0. < CC_SP.leadOne.dRel <= 255.875:
-      lead = (CC_SP.leadOne.dRel, CC_SP.leadOne.vRel)
-    else:
-      lead = (mazdacan.LEAD_TRACK_DIST, 0.)
-
     if radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:
       for bus in LONG_BUSES:
-        can_sends.extend(mazdacan.create_radar_frames(bus, self.radar_counter, lead))
+        can_sends.extend(mazdacan.create_radar_frames(bus, self.radar_counter, self.lead_adv.lead))
       self.radar_counter += 1
 
     if radar_master and self.frame % CarControllerParams.LONG_STEP == 0:
       acc_available = CS.out.cruiseState.available
       # mirror the driver's distance setting on the dash; stock shows gap 2 by default
       gap = (int(CC.hudControl.leadDistanceBars) or 2) if (long_engaged or acc_available) else 0
-      if long_engaged:
-        phase = sm.ctrl_phase()
-        acc_active_2 = sm.acc_active_2
-      else:
-        phase = 0
-        acc_active_2 = False
+      acc_active_2 = sm.acc_active_2 if long_engaged else False
       for bus in LONG_BUSES:
         can_sends.append(mazdacan.create_acc_command(self.packer, bus, self.long_counter, accel,
                                                      long_engaged, acc_available,
                                                      stopping=sm.stop_bits, resume_unlatching=sm.resume_unlatching))
         can_sends.append(mazdacan.create_crz_ctrl(self.packer, bus, long_engaged, acc_available, gap,
-                                                  has_lead, phase, acc_active_2))
+                                                  self.lead_adv.has_lead, self.lead_adv.ctrl_phase,
+                                                  acc_active_2))
       self.long_counter += 1
 
     return can_sends
