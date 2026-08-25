@@ -10,6 +10,7 @@ from opendbc.car.mazda.longitudinal import (RADAR_ADDR, RadarSessionManager, Rad
 from opendbc.car.mazda.values import CarControllerParams, Buttons, has_tja_mads
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
+from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -264,7 +265,15 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
       # TODO: find a way to silence audible warnings so we can add more hud alerts
       steer_required = steer_required and CS.lkas_allowed_speed
-      can_sends.append(mazdacan.create_alert_command(self.packer, CS.cam_laneinfo, ldw, steer_required))
+      alert = mazdacan.create_alert_command(self.packer, CS.cam_laneinfo, ldw, steer_required)
+      white_hud = (
+        has_tja_mads(self.CP) and
+        bool(self.CP_SP.flags & MazdaFlagsSP.EXPERIMENTAL_MADS_WHITE_HUD) and
+        CC_SP.mads.active and
+        getattr(CS, "cam_laneinfo_live", False)
+      )
+      alert = (alert[0], mazdacan.apply_mads_white_hud(getattr(CS, "cam_laneinfo_raw", None), alert[1], white_hud), alert[2])
+      can_sends.append(alert)
 
     # send steering command
     can_sends.append(mazdacan.create_steering_control(self.packer, self.CP,

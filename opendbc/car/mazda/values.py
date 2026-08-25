@@ -42,6 +42,10 @@ class CarControllerParams:
   # check, float("nan") liveness leaves stale zeros looking healthy when 0x243 disappears.
   CAM_LKAS_TIMEOUT_T = 0.2
 
+  # CAM_LANEINFO is normally 2 Hz. The experimental white-icon gate requires a recent
+  # camera-bus source frame and stops modifying after three expected frames are missed.
+  CAM_LANEINFO_TIMEOUT_T = 1.5
+
   # A marginal vision lead flickers leadVisible faster than the camera can be shown a track
   # appearing and vanishing (route 6bb2dc61c4 t+400: 6 toggles in 1.4 s on a 120 m lead), so the
   # advertised lead only follows a state that has held steady, the way Hyundai debounces its
