@@ -332,6 +332,15 @@ def cc():
   return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
 
 
+@pytest.fixture
+def stock_cc():
+  CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], alpha_long=False,
+                               is_release=False, docs=False)
+  CP_SP = CarInterface.get_params_sp(CP, CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], False, False, False)
+  assert not CP.openpilotLongitudinalControl
+  return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
+
+
 def _long_frames(sends):
   """(ACCEL_CMD raw, CRZ_INFO.ACC_ACTIVE, CRZ_CTRL.CRZ_ACTIVE) from a bus 0 emission, or None."""
   info = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
@@ -552,36 +561,38 @@ class TestLongitudinalIntegration:
     assert all(d[:7] == empty[:7] for d in released), \
       f"fabricated lead survived the release: {released[0].hex()}"
 
-  def test_resume_asks_while_the_plan_wants_to_move_and_the_car_has_not(self, cc):
-    # the RES press has to outlast cruiseState.standstill, which drops for ~3 s after a press,
-    # so it is keyed on the car actually still being stopped
-    control, _, carstate = _mock_cc(standstill=True, accel=0.3)
-    assert cc.resume_requested(control, carstate)
+  def test_no_resume_button_while_openpilot_owns_longitudinal(self, cc):
+    # We are the ACC here, so the hold is released in-protocol. The car's own MRCC never presses
+    # RES either: 0 of 23 stock body-latched-hold releases put one on the bus. A press would also
+    # put a second writer on CRZ_BTNS, which ICBM owns.
+    for accel in (0.3, -1.024):
+      for standstill in (True, False):
+        control, _, _ = _mock_cc(standstill=standstill, accel=accel, resume=True)
+        assert not cc.resume_requested(control)
 
-    # plan still braking: no press, even though the car is sitting in a hold
-    control, _, carstate = _mock_cc(standstill=True, accel=-1.024)
-    assert not cc.resume_requested(control, carstate)
+  def test_resume_button_still_sent_with_stock_longitudinal(self, stock_cc):
+    # stock ACC owns the hold there, and the button is the only lever openpilot has on it
+    control, _, _ = _mock_cc(standstill=True, accel=0.3, resume=True)
+    assert stock_cc.resume_requested(control)
 
-    # car is rolling: the hold is gone, stop asking
-    control, _, carstate = _mock_cc(standstill=False, accel=0.3)
-    assert not cc.resume_requested(control, carstate)
+    control, _, _ = _mock_cc(standstill=True, accel=0.3, resume=False)
+    assert not stock_cc.resume_requested(control)
 
-    # not longitudinally active: never our press to send
-    control, _, carstate = _mock_cc(long_active=False, enabled=True, standstill=True, accel=0.3)
-    assert not cc.resume_requested(control, carstate)
-
-  def test_resume_matches_the_hold_release(self, cc):
-    # the press and the release run off the same condition, so the body is never asked to let
-    # go while we are still commanding the brake
+  def test_body_latched_hold_releases_in_protocol(self, cc):
+    # the release the button used to stand in for: stop bits already relaxed to the body, then
+    # the plan asks to move and RESUME_UNLATCHING pulses while the command ramps positive
     long = structs.CarControl.Actuators.LongControlState
     for _ in range(200):
-      _step(cc, long_state=long.stopping, accel=-1.024, standstill=True, cruise_engaged=True)
-    control, _, carstate = _mock_cc(standstill=True, accel=-1.024)
-    assert cc.stop_and_go.holding and not cc.resume_requested(control, carstate)
+      _step(cc, long_state=long.stopping, accel=-1.024, standstill=True,
+            cruise_engaged=True, brake_hold=True)
+    assert cc.stop_and_go.holding and cc.stop_and_go.car_has_hold
+    assert not cc.stop_and_go.stop_bits  # body owns the brakes, stock relaxes here
 
-    _step(cc, long_state=long.pid, accel=0.3, standstill=True, cruise_engaged=True)
-    control, _, carstate = _mock_cc(standstill=True, accel=0.3)
-    assert not cc.stop_and_go.holding and cc.resume_requested(control, carstate)
+    sends = _step(cc, long_state=long.pid, accel=0.3, standstill=True,
+                  cruise_engaged=True, brake_hold=True)
+    assert not cc.stop_and_go.holding
+    assert cc.stop_and_go.resume_unlatching
+    assert not any(a == 0x9d for a, _, _ in sends), "CRZ_BTNS written at the release"
 
   def test_gas_pedal_without_cruise_stays_disengaged(self, cc):
     # gas pressed while openpilot is not enabled must not advertise an engaged ACC
