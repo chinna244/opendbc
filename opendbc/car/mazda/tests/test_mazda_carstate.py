@@ -334,3 +334,35 @@ class TestPhysicalMrccBit1Source:
     tx_off = packer.make_can_msg("CRZ_BTNS", 0, {"BIT1": 0, "BIT1_INV": 1})
     CI.update([(int(2 * DT_CTRL * 1e9), [(tx_off[0], tx_off[1], 128)])])
     assert CI.CS.mrcc_button == 0
+
+
+class TestCruiseStandstill:
+  """PEDALS.STANDSTILL is the PCM's wheel-speed "stopped" bit, not a stock-ACC hold state.
+
+  LongControl's starting_condition is `not should_stop and not cruise_standstill and not
+  brake_pressed`, so reporting it under openpilot longitudinal deadlocks every stop: long
+  control holds LongCtrlState.stopping (and with it stopAccel) until the car moves, and the
+  car cannot move until long control leaves stopping. Both engaged stops on route
+  000000fa--6b21bd7e7e (2026-08-25) sat pinned at -1.03 m/s2 through a departing lead, with
+  the plan asking for +1.3, until the driver used the gas pedal. Nothing downstream ever ran:
+  no RESUME_UNLATCHING pulse and no RES press, since both key off actuators.accel > 0.
+  """
+
+  def _standstill(self, alpha_long):
+    from opendbc.can import CANPacker
+    packer = CANPacker("mazda_2017")
+    CI = _interface(alpha_long)
+    ret = None
+    for i in range(2):  # CANParser registers a message lazily, so the first frame only arms it
+      msg = packer.make_can_msg("PEDALS", 0, {"STANDSTILL": 1})
+      ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(msg[0], msg[1], msg[2])])])
+    return ret.cruiseState.standstill
+
+  def test_not_reported_under_openpilot_longitudinal(self):
+    # the stock MRCC is not in the loop at all here: its radar is silenced and we synthesize
+    # its frames, so there is no stock standstill state to report
+    assert not self._standstill(alpha_long=True)
+
+  def test_still_reported_with_stock_longitudinal(self):
+    # stock long still needs it: it is what drives CC.cruiseControl.resume in controlsd
+    assert self._standstill(alpha_long=False)

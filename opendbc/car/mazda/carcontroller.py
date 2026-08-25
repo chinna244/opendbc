@@ -85,7 +85,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.CANCEL, CS))
     else:
       self.brake_counter = 0
-      if self.resume_requested(CC, CS) and self.frame % 5 == 0:
+      if self.resume_requested(CC) and self.frame % 5 == 0:
         can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.RESUME, CS))
 
     # On the CX-5 2022, the physical TJA button also arms Mazda MRCC on bus 0.
@@ -294,18 +294,23 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.frame += 1
     return new_actuators, can_sends
 
-  def resume_requested(self, CC, CS) -> bool:
-    """Mazda stop-and-go needs a RES press (or gas) to leave a hold more than a few seconds old.
+  def resume_requested(self, CC) -> bool:
+    """The resume button is the stock ACC's only lever on a standstill hold, so it belongs to the
+    stock-longitudinal path alone.
 
-    Under openpilot longitudinal, ask for exactly as long as the plan is asking to move and the
-    car has not moved yet. CC.cruiseControl.resume is the wrong trigger for that: it keys on
-    cruiseState standstill, which drops for ~3 s after a press and so drops the request while
-    the car is still stopped (Toyota documents the same trap), and on the planner rather than on
-    the command, which puts the press out before we are commanding anything positive.
+    Under openpilot longitudinal we are the ACC, and the hold is released in-protocol: CRZ_INFO's
+    stop bits drop, RESUME_UNLATCHING pulses and the command ramps positive off the plan. That is
+    what the car's own MRCC does -- across 23 stock body-latched-hold releases with cruise
+    engaged, 0 put a RES press on the bus and all 23 pulsed RESUME_UNLATCHING
+    (tools/mazda_long/scan_stock_release.py). Toyota, Honda and Hyundai all gate their resume
+    button off openpilotLongitudinalControl the same way and release through their own ACC frame.
+
+    Pressing it here would also put a second writer on CRZ_BTNS at the release: ICBM owns that
+    address, and both of its interlocks (icbm_suppress above and the controller's own readiness
+    gate) key off CC.cruiseControl.resume, which carstate makes False under openpilot
+    longitudinal by construction.
     """
-    if not self.CP.openpilotLongitudinalControl:
-      return CC.cruiseControl.resume
-    return CC.longActive and CS.out.standstill and CC.actuators.accel > 0.
+    return not self.CP.openpilotLongitudinalControl and CC.cruiseControl.resume
 
   def update_longitudinal(self, CC, CC_SP, CS):
     can_sends = []

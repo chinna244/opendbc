@@ -198,7 +198,14 @@ class CarState(CarStateBase, CarStateExt):
       ret.cruiseState.available = cp.vl["CRZ_CTRL"]["CRZ_AVAILABLE"] == 1
       ret.cruiseState.enabled = cp.vl["CRZ_CTRL"]["CRZ_ACTIVE"] == 1
     self.brake_pressed_prev = ret.brakePressed
-    ret.cruiseState.standstill = cp.vl["PEDALS"]["STANDSTILL"] == 1
+    # PEDALS.STANDSTILL is the PCM's "wheels are stopped" bit, not a stock-ACC hold state, so it
+    # stays set for exactly as long as the car is not moving. LongControl gates its
+    # starting_condition on this, so reporting it under openpilot longitudinal deadlocks every
+    # stop: long control cannot leave stopping until the car moves, and the car cannot move until
+    # long control leaves stopping. The stock MRCC is not in the loop here anyway -- its radar is
+    # silenced and we synthesize its frames -- so there is no stock standstill to report. Hyundai
+    # and Tesla report False for the same reason.
+    ret.cruiseState.standstill = cp.vl["PEDALS"]["STANDSTILL"] == 1 and not self.CP.openpilotLongitudinalControl
     ret.cruiseState.speed = cp.vl["CRZ_EVENTS"]["CRZ_SPEED"] * CV.KPH_TO_MS
 
     # stock lkas should be on
