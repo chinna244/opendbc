@@ -25,9 +25,12 @@ def _interface(alpha_long=True):
 
 
 def _feed(CI, payload, seconds):
+  # the settle gate requires cp_cam.can_valid, so every registered camera message must stay
+  # alive, the way the real camera broadcasts all of them together
   frames = int(seconds / DT_CTRL)
   for i in range(frames):
-    CI.update([(int(i * DT_CTRL * 1e9), [(CAM_LANEINFO, payload, 2)])])
+    cam_frames = [(CAM_LANEINFO, payload, 2), (0x243, bytes(8), 2), (0x35f, bytes(8), 2)]
+    CI.update([(int(i * DT_CTRL * 1e9), cam_frames)])
   return CI.CS.fsc_settled
 
 
