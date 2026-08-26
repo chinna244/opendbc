@@ -34,7 +34,6 @@ class CarControllerParams:
   STOCK_RADAR_ALIVE_T = 0.05   # stock CRZ_INFO runs at 50 Hz; silent this long = torn down
   STOCK_RADAR_GUARD_T = 1.0    # two-master guard: block engagement until silent this long
   RADAR_SESSION_LIMIT_T = 10.0  # per-episode UDS budget: a silent radar gives up here
-  RADAR_NRC_FRESH_T = 1.0      # a negative UDS response counts as a live refusal this long
   CAM_LANEINFO_FRESH_T = 0.5   # camera counts as heard from if CAM_LANEINFO arrived this recently
 
   # RESUME_UNLATCHING pulse width at the release; stock latched releases pulse 0.22-0.38 s,

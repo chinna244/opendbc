@@ -1,5 +1,5 @@
 from opendbc.can import CANDefine, CANParser
-from opendbc.car import Bus, DT_CTRL, create_button_events, structs
+from opendbc.car import Bus, DT_CTRL, create_button_events, structs, uds
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.mazda.values import DBC, LKAS_LIMITS, CarControllerParams
@@ -12,7 +12,6 @@ STOCK_RADAR_ALIVE_FRAMES = int(CarControllerParams.STOCK_RADAR_ALIVE_T / DT_CTRL
 STOCK_RADAR_GUARD_FRAMES = int(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CTRL)
 CANCEL_CONTEXT_FRAMES = int(CarControllerParams.CANCEL_CONTEXT_T / DT_CTRL)
 CAM_LANEINFO_FRESH_FRAMES = int(CarControllerParams.CAM_LANEINFO_FRESH_T / DT_CTRL)
-RADAR_NRC_FRESH_FRAMES = int(CarControllerParams.RADAR_NRC_FRESH_T / DT_CTRL)
 
 
 class CarState(CarStateBase, CarStateExt):
@@ -43,7 +42,7 @@ class CarState(CarStateBase, CarStateExt):
     self.cam_laneinfo_seen = False
     self.cam_laneinfo_silent_frames = 0
     self.cam_empty_seen = False
-    self.radar_nrc_frames = RADAR_NRC_FRESH_FRAMES
+    self.radar_session_refused = False
     self.fsc_settled_frames = 0
     # the body ECU has taken the standstill hold over and is holding the brakes itself
     self.brake_hold = False
@@ -55,10 +54,6 @@ class CarState(CarStateBase, CarStateExt):
   @property
   def stock_radar_alive(self) -> bool:
     return self.stock_radar_silent_frames < STOCK_RADAR_ALIVE_FRAMES
-
-  @property
-  def radar_session_refused(self) -> bool:
-    return self.radar_nrc_frames < RADAR_NRC_FRESH_FRAMES
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
@@ -131,18 +126,16 @@ class CarState(CarStateBase, CarStateExt):
       self.cam_laneinfo_silent_frames += 1
     cam_laneinfo_fresh = self.cam_laneinfo_seen and self.cam_laneinfo_silent_frames < CAM_LANEINFO_FRESH_FRAMES
 
-    # Camera SCBS warning -> stockFcw, which upstream logs without mapping an alert. 0x21d
-    # leaves its idle 0x7f status only while actively showing the collision display (one
-    # observed episode: route 0000004d t+213, a disengaged creep to 4.5 m behind a lead;
-    # zero episodes in 50 h of stock cruising), so future SCBS reports are diagnosable from
-    # a qlog. The DBC-named warning bits ride along for coverage; they have never fired in
-    # 1.57M corpus frames. stockAeb is deliberately not mapped: every candidate signal has
-    # zero observed activations, and unknown 0x25d states provably excurse benignly (b4
-    # runs 3 for the camera's first ~5.8 s every boot) -- too weak a basis for a critical
-    # full-screen BRAKE alert.
-    self.cam_empty_seen |= len(cp_cam.vl_all["CAM_EMPTY"]["STATUS"]) > 0
+    # Camera SCBS display -> stockFcw (telemetry: upstream maps no alert to it). 0x21d leaves
+    # its idle 0x7f status only while actively showing the collision display (route 0000004d
+    # t+213; zero episodes in 50 h of stock cruising); the DBC-named warning bits ride along.
+    # A seen latch is guard enough here: unlike the laneinfo gate above, a stale value only
+    # strands a log flag. stockAeb stays unmapped: no candidate signal has ever activated.
+    if not self.cam_empty_seen:
+      self.cam_empty_seen = len(cp_cam.vl_all["CAM_EMPTY"]["STATUS"]) > 0
+    cam_empty = cp_cam.vl["CAM_EMPTY"]
     ped = cp_cam.vl["CAM_PEDESTRIAN"]
-    ret.stockFcw = (self.cam_empty_seen and cp_cam.vl["CAM_EMPTY"]["STATUS"] != 0x7F) or \
+    ret.stockFcw = (self.cam_empty_seen and cam_empty["STATUS"] != 0x7F) or \
                    ped["PED_WARNING"] == 1 or ped["BRAKE_WARNING"] == 1
 
     if self.CP.openpilotLongitudinalControl:
@@ -189,14 +182,13 @@ class CarState(CarStateBase, CarStateExt):
         self.stock_radar_silent_frames += 1
 
       # The radar answers every session request within ~10 ms (route 000000fe t+15.0: request
-      # 02 10 02, response 06 50 02 with P2* = 5.0 s, the S3 timeout). A negative response to
-      # the session request (7F 10 xx) is a definitive refusal, so the session manager can
-      # give up immediately instead of burning its silence budget -- the same response
-      # disable_ecu reads to declare success or failure.
-      refused = any(sid == 0x7F and sub == 0x10
-                    for sid, sub in zip(cp.vl_all["RADAR_UDS_RESPONSE"]["SID"],
-                                        cp.vl_all["RADAR_UDS_RESPONSE"]["SUB"], strict=True))
-      self.radar_nrc_frames = 0 if refused else min(self.radar_nrc_frames + 1, RADAR_NRC_FRESH_FRAMES)
+      # 02 10 02 -> 06 50 02 with P2* = 5.0 s, the S3 timeout), and the session manager
+      # consumes this on the same control frame, so no freshness window is needed. NRC 0x78
+      # (response pending) is the one negative response UDS clients wait through, not fail on.
+      resp = cp.vl_all["RADAR_UDS_RESPONSE"]
+      self.radar_session_refused = any(
+        sid == 0x7F and sub == uds.SERVICE_TYPE.DIAGNOSTIC_SESSION_CONTROL and nrc != 0x78
+        for sid, sub, nrc in zip(resp["SID"], resp["SUB"], resp["NRC"], strict=True))
       silenced = self.stock_radar_silent_frames >= STOCK_RADAR_GUARD_FRAMES
       ret.accFaulted = self.radar_was_silenced and not silenced
       self.radar_was_silenced |= silenced

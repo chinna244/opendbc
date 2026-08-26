@@ -912,27 +912,27 @@ class TestRadarSessionBounds:
   def test_silencing_gives_up_bounded(self):
     m = RadarSessionManager()
     for _ in range(RADAR_SESSION_LIMIT_FRAMES + 2):
-      state = m.update(True, True, False, standstill=True)
+      state = m.update(True, True, False, standstill=True, session_refused=False)
     assert state == RadarSessionState.STOCK and m.silencing_failed
     # and stays given up for the drive: stock keeps the bus
     for _ in range(10):
-      assert m.update(True, True, False, standstill=True) == RadarSessionState.STOCK
+      assert m.update(True, True, False, standstill=True, session_refused=False) == RadarSessionState.STOCK
 
   def test_negative_response_gives_up_immediately(self):
     # route 000000fe t+15.0 shows the radar answers a session request within 10 ms, so a
     # negative response is definitive: no reason to burn the silence budget
     m = RadarSessionManager()
-    m.update(True, True, False, standstill=True)
+    m.update(True, True, False, standstill=True, session_refused=False)
     assert m.state == RadarSessionState.SILENCING
     assert m.update(True, True, False, standstill=True, session_refused=True) == RadarSessionState.STOCK
     assert m.silencing_failed
 
   def test_handback_stops_waiting_for_a_dead_radar(self):
     m = RadarSessionManager()
-    m.update(True, False, False, standstill=True)
+    m.update(True, False, False, standstill=True, session_refused=False)
     assert m.state == RadarSessionState.SILENCED
     for _ in range(RADAR_SESSION_LIMIT_FRAMES + 2):
-      state = m.update(True, False, True, standstill=True)
+      state = m.update(True, False, True, standstill=True, session_refused=False)
     assert state == RadarSessionState.STOCK
 
   def test_silencing_waits_for_standstill_but_adoption_does_not(self):
@@ -940,10 +940,10 @@ class TestRadarSessionBounds:
     # adopting an already-quiet radar disables nothing and proceeds anywhere
     m = RadarSessionManager()
     for _ in range(10):
-      assert m.update(True, True, False, standstill=False) == RadarSessionState.STOCK
-    assert m.update(True, True, False, standstill=True) == RadarSessionState.SILENCING
+      assert m.update(True, True, False, standstill=False, session_refused=False) == RadarSessionState.STOCK
+    assert m.update(True, True, False, standstill=True, session_refused=False) == RadarSessionState.SILENCING
     m2 = RadarSessionManager()
-    assert m2.update(True, False, False, standstill=False) == RadarSessionState.SILENCED
+    assert m2.update(True, False, False, standstill=False, session_refused=False) == RadarSessionState.SILENCED
 
 
 def test_non_gen1_platform_refused_at_admission():

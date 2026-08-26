@@ -6,6 +6,9 @@ from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams
 
 CAM_LANEINFO = 0x440
+CAM_EMPTY = 0x21d
+CAM_PEDESTRIAN = 0x25d
+RADAR_UDS_RESP = 0x76c
 
 # Real CAM_LANEINFO prefixes, captured on two CX-5 2022s running the same FSC firmware
 # (GSH7-67XK2-U). Only byte 1 differs: bit 5 is BIT2, bit 6 is NO_ERR_BIT.
@@ -87,7 +90,7 @@ class TestStockFcw:
   ACTIVE = bytes.fromhex("52124b00000ad294")
 
   def _feed_21d(self, CI, payload, i=0):
-    ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(0x21d, payload, 2)])])
+    ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(CAM_EMPTY, payload, 2)])])
     return ret
 
   def test_display_active_sets_fcw(self):
@@ -106,28 +109,33 @@ class TestStockFcw:
     # never observed in 1.57M corpus frames, wired for coverage: PED_WARNING is bit 9
     CI = _interface()
     self._feed_21d(CI, self.IDLE)
-    ret, _ = CI.update([(int(1 * DT_CTRL * 1e9), [(0x25d, bytes.fromhex("07fa3c0000000000"), 2), (0x21d, self.IDLE, 2)])])
+    ret, _ = CI.update([(int(1 * DT_CTRL * 1e9), [(CAM_PEDESTRIAN, bytes.fromhex("07fa3c0000000000"), 2), (CAM_EMPTY, self.IDLE, 2)])])
     assert ret.stockFcw is True
 
 
 class TestRadarSessionResponse:
-  """The radar answers session requests within ~10 ms (route 000000fe t+15.0); a negative
-  response is a definitive refusal the session manager acts on immediately."""
+  """The radar answers session requests within ~10 ms (route 000000fe t+15.0), and the
+  session manager consumes the flag on the same control frame it is set."""
 
   def test_negative_response_sets_refused(self):
     CI = _interface()
     assert not CI.CS.radar_session_refused
     # 03 7F 10 22: conditionsNotCorrect to a session-control request
-    CI.update([(0, [(0x76c, bytes.fromhex("037f102200000000"), 0)])])
+    CI.update([(0, [(RADAR_UDS_RESP, bytes.fromhex("037f102200000000"), 0)])])
     assert CI.CS.radar_session_refused
-    for i in range(1, int(CarControllerParams.RADAR_NRC_FRESH_T / DT_CTRL) + 2):
-      CI.update([(int(i * DT_CTRL * 1e9), [])])
-    assert not CI.CS.radar_session_refused, "a refusal must expire"
+    CI.update([(int(DT_CTRL * 1e9), [])])
+    assert not CI.CS.radar_session_refused, "the flag is same-frame, not latched"
 
   def test_positive_response_is_not_a_refusal(self):
     CI = _interface()
     # the real capture: 06 50 02 with the session parameter record (P2*=5.0 s)
-    CI.update([(0, [(0x76c, bytes.fromhex("065002001901f400"), 0)])])
+    CI.update([(0, [(RADAR_UDS_RESP, bytes.fromhex("065002001901f400"), 0)])])
+    assert not CI.CS.radar_session_refused
+
+  def test_response_pending_is_not_a_refusal(self):
+    CI = _interface()
+    # 03 7F 10 78: requestCorrectlyReceived-ResponsePending; UDS clients wait through it
+    CI.update([(0, [(RADAR_UDS_RESP, bytes.fromhex("037f107800000000"), 0)])])
     assert not CI.CS.radar_session_refused
 
 

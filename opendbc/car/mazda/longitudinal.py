@@ -45,11 +45,11 @@ class RadarSessionManager:
   runs from the control loop and the restart is requested only once the stock
   radar is heard again (back to STOCK, nothing transmitted).
 
-  The session request is fire-and-forget, so a refusal (NRC) is indistinguishable
-  from a lost frame; both silencing and the hand-back are therefore bounded the
-  way disable_ecu bounds its retries. A silencing episode that never quiets the
-  radar gives up for the drive and stock keeps the bus; a hand-back the radar
-  never answers stops waiting so the process restart can proceed.
+  A negative session response fails the silencing episode immediately, and the
+  silence budget bounds a radar that answers nothing at all, the way disable_ecu
+  bounds its retries; either way the episode gives up for the drive and stock
+  keeps the bus. A hand-back the radar never answers stops waiting so the
+  process restart can proceed.
   """
 
   def __init__(self):
@@ -58,7 +58,7 @@ class RadarSessionManager:
     self.silencing_failed = False
 
   def update(self, gate_passed: bool, stock_radar_alive: bool, handback: bool,
-             standstill: bool, session_refused: bool = False) -> RadarSessionState:
+             standstill: bool, session_refused: bool) -> RadarSessionState:
     prev_state = self.state
     if handback:
       if self.state == RadarSessionState.SILENCING:
@@ -86,9 +86,6 @@ class RadarSessionManager:
         if not stock_radar_alive:
           self.state = RadarSessionState.SILENCED
         elif session_refused or self.state_frames >= RADAR_SESSION_LIMIT_FRAMES:
-          # a negative UDS response is a definitive refusal, the silence budget covers a
-          # radar that answers nothing at all; either way give up for the drive and stock
-          # keeps the bus (disable_ecu reads the same response to declare its outcome)
           carlog.error(f"radar silencing failed ({'refused' if session_refused else 'no response'}); staying stock")
           self.state = RadarSessionState.STOCK
           self.silencing_failed = True

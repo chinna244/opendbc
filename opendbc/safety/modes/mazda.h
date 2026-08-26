@@ -26,13 +26,13 @@
 
 #define MAZDA_PARAM_LONGITUDINAL 1U
 
-// CRZ_BTNS frames (10 Hz) since the driver last pressed an engage button (SET_P/SET_M/RES).
-// Every logged engagement shows the press 30-70 ms before PEDALS.ACC_ACTIVE rises
-// (104-engagement census, zero genuine button-less engagements), so 1 s is generous.
+// CRZ_BTNS frames (10 Hz) an engage press stays fresh. Every logged engagement shows the
+// press 30-70 ms before PEDALS.ACC_ACTIVE rises (104-engagement census, zero genuine
+// button-less engagements), so 1 s is generous.
 #define MAZDA_ENGAGE_BTN_WINDOW 10U
 
 static bool mazda_longitudinal = false;
-static uint32_t mazda_frames_since_engage_btn = 255U;
+static uint32_t mazda_engage_btn_frames = 0U;
 
 // With longitudinal control the stock radar is silenced and openpilot replays its frames,
 // so allowed tx patterns are pinned to byte-exact stock captures wherever possible.
@@ -122,13 +122,11 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
       if (cancel) {
         controls_allowed = false;
       }
-      // SET_P (bit 4), SET_M (bit 5) or RES (bit 2): the driver-intent half of the
-      // engagement qualifier below
-      bool engage_btn = (msg->data[0] & 0x34U) != 0U;
-      if (engage_btn) {
-        mazda_frames_since_engage_btn = 0U;
-      } else if (mazda_frames_since_engage_btn < 255U) {
-        mazda_frames_since_engage_btn += 1U;
+      // RES, SET_P or SET_M: the driver-intent half of the engagement qualifier below
+      if (GET_BIT(msg, 2U) || GET_BIT(msg, 4U) || GET_BIT(msg, 5U)) {
+        mazda_engage_btn_frames = MAZDA_ENGAGE_BTN_WINDOW;
+      } else if (mazda_engage_btn_frames > 0U) {
+        mazda_engage_btn_frames -= 1U;
       }
     }
 
@@ -148,14 +146,17 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
 
         if (acc_armed || cruise_engaged_prev || (!brake && !brake_pressed_prev)) {
           acc_main_on = acc_armed;
-          // Controls may only ARM within a short window of a SET/RES press heard from the
-          // wheel: ACC_ACTIVE alone is the body answering frames we fabricate, so on its own
-          // it is not evidence of driver intent (Hyundai and Honda Bosch long key off the
-          // buttons for the same reason). Once armed, controls latch until a genuine
-          // disengage so an expiring window cannot drop an active engagement.
-          bool engaged_qualified = cruise_engaged &&
-                                   (controls_allowed || (mazda_frames_since_engage_btn <= MAZDA_ENGAGE_BTN_WINDOW));
-          pcm_cruise_check(engaged_qualified);
+          // Arm only on an engaged rising edge backed by a recent SET/RES press, the
+          // hyundai_common form: ACC_ACTIVE alone is the body answering frames we fabricate.
+          // The tx hooks already drop engaged-claiming frames while controls are not
+          // allowed, so this is defense in depth, not the only gate.
+          if (cruise_engaged && !cruise_engaged_prev && (mazda_engage_btn_frames > 0U)) {
+            controls_allowed = true;
+          }
+          if (!cruise_engaged) {
+            controls_allowed = false;
+          }
+          cruise_engaged_prev = cruise_engaged;
         }
       }
       brake_pressed = brake;
@@ -268,7 +269,7 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
 }
 
 static safety_config mazda_init(uint16_t param) {
-  mazda_frames_since_engage_btn = 255U;
+  mazda_engage_btn_frames = 0U;
 
   static const CanMsg MAZDA_TX_MSGS[] = {
     {MAZDA_LKAS, 0, 8, .check_relay = true},

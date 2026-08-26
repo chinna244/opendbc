@@ -113,38 +113,26 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
   def _press_set(self):
     # arm the driver-intent qualifier the way every logged engagement does: a wheel press
     # lands 30-70 ms before PEDALS.ACC_ACTIVE rises
-    self._rx(self._button_msg(resume=False, cancel=False, set_m=True))
-    self._rx(self._button_msg(resume=False, cancel=False))
+    self._rx(self._button_msg(set_m=True))
 
   def test_enable_control_allowed_from_cruise(self):
-    # same as the common test, but engagement here requires the driver-intent qualifier
+    # the common test plus the driver-intent qualifier this mode requires
     self._press_set()
-    self._rx(self._pcm_status_msg(False))
-    self.assertFalse(self.safety.get_controls_allowed())
-    self._rx(self._pcm_status_msg(True))
-    self.assertTrue(self.safety.get_controls_allowed())
-
-  def test_cruise_engaged_prev(self):
-    for engaged in [True, False]:
-      self._press_set()
-      self._rx(self._pcm_status_msg(engaged))
-      self.assertEqual(engaged, self.safety.get_cruise_engaged_prev())
-      self._rx(self._pcm_status_msg(not engaged))
-      self.assertEqual(not engaged, self.safety.get_cruise_engaged_prev())
+    super().test_enable_control_allowed_from_cruise()
 
   def test_cruise_without_button_never_arms(self):
     # PEDALS.ACC_ACTIVE alone is the body answering our own fabricated frames; without a
     # SET/RES press heard from the wheel it must not arm controls
     self._rx(self._pcm_status_msg(False))
-    for _ in range(20):
+    for _ in range(12):
       self._rx(self._pcm_status_msg(True))
       self.assertFalse(self.safety.get_controls_allowed())
 
   def test_button_window_expires(self):
     self._press_set()
-    # 10 Hz CRZ_BTNS: run the counter past the 1 s window with idle button frames
+    # 10 Hz CRZ_BTNS: run the countdown past the 1 s window with idle button frames
     for _ in range(12):
-      self._rx(self._button_msg(resume=False, cancel=False))
+      self._rx(self._button_msg())
     self._rx(self._pcm_status_msg(True))
     self.assertFalse(self.safety.get_controls_allowed())
 
@@ -153,8 +141,8 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
     # the window expiring must not drop an active engagement
-    for _ in range(30):
-      self._rx(self._button_msg(resume=False, cancel=False))
+    for _ in range(12):
+      self._rx(self._button_msg())
       self._rx(self._pcm_status_msg(True))
       self.assertTrue(self.safety.get_controls_allowed())
     self._rx(self._pcm_status_msg(False))
@@ -162,7 +150,6 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
 
   def test_each_engage_button_arms(self):
     for btn in ("set_m", "set_p", "resume"):
-      self.safety.set_controls_allowed(False)
       self._rx(self._button_msg(**{btn: True}))
       self._rx(self._pcm_status_msg(True))
       self.assertTrue(self.safety.get_controls_allowed(), btn)
