@@ -216,7 +216,15 @@ class AdvertisedLead:
   with all six slots empty, and has_lead=0 always came with phase=0 -- so they are read off one
   piece of state here rather than computed separately and kept in step by hand.
 
-  Two things make that state more than a copy of leadVisible. A marginal vision lead flickers
+  The state is perception, not control: a stock radar reports its objects ignition to ignition,
+  and stock shows RADAR_HAS_LEAD=1 with cruise disengaged in 19.5% of all frames. Tying the
+  advertisement to engagement instead made a real car 4.5 m ahead vanish from the bus in one
+  frame when the driver braked out of a creep (route 0000004d t+212); the camera, still watching
+  the car close in its own vision, ran its SCBS display six seconds -- a pattern absent from
+  50 h of stock driving. So this updates every control frame, engaged or not, for as long as we
+  stand in for the radar.
+
+  Two things make the state more than a copy of leadVisible. A marginal vision lead flickers
   faster than any real radar ever would (route 6bb2dc61c4 t+400: 6 toggles in 1.4 s on a 120 m
   lead), so visibility is adopted only once it has held steady, the way Hyundai debounces its
   lead bit. And leadOne drops to zero the instant vision loses the lead, well before that
@@ -226,9 +234,6 @@ class AdvertisedLead:
   """
 
   def __init__(self):
-    self._reset()
-
-  def _reset(self):
     self.visible = False
     self.flip_frames = 0
     self.holding = False
@@ -236,12 +241,8 @@ class AdvertisedLead:
     self.real_lead = None
     self._measured = None
 
-  def update(self, long_engaged: bool, lead_visible: bool, d_rel: float, v_rel: float,
+  def update(self, lead_visible: bool, d_rel: float, v_rel: float,
              holding: bool, escort: tuple[float, float] | None = None) -> None:
-    if not long_engaged:
-      self._reset()
-      return
-
     if lead_visible != self.visible:
       self.flip_frames += 1
       if self.flip_frames >= LEAD_DEBOUNCE_FRAMES:

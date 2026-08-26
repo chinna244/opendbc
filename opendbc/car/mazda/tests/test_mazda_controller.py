@@ -384,7 +384,7 @@ class TestAdvertisedLead:
 
   @staticmethod
   def run(al, frames, **kwargs):
-    defaults = dict(long_engaged=True, lead_visible=True, d_rel=40.0, v_rel=0.0, holding=False)
+    defaults = dict(lead_visible=True, d_rel=40.0, v_rel=0.0, holding=False)
     defaults.update(kwargs)
     for _ in range(frames):
       al.update(**defaults)
@@ -423,13 +423,6 @@ class TestAdvertisedLead:
     assert al.ctrl_phase == 3
     self.run(al, 2 * LEAD_DEBOUNCE_FRAMES, lead_visible=False, d_rel=0., holding=True)
     assert not al.has_lead and al.ctrl_phase == 0
-
-  def test_disengage_resets_the_lead(self, al):
-    self.run(al, 2 * LEAD_DEBOUNCE_FRAMES)
-    assert al.has_lead
-    self.run(al, 1, long_engaged=False)
-    assert not al.has_lead and al.lead is None and al.ctrl_phase == 0
-
 
 def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas=False, override=False,
              resume=False, lead_visible=True, gap=2, available=True,
@@ -797,6 +790,25 @@ class TestLongitudinalIntegration:
         has_lead, phase = _crz_ctrl(ctl)
         assert bool(has_lead) == _track_occupied(trk), f"has_lead/track disagree for {kw}"
         assert (phase == 0) == (has_lead == 0), f"has_lead/phase disagree for {kw}"
+
+  def test_lead_survives_disengagement(self, cc):
+    # perception is engagement-independent: stock advertises RADAR_HAS_LEAD=1 with cruise off in
+    # 19.5% of all frames. Dropping the advertisement at disengage made a real car 4.5 m ahead
+    # vanish from the bus in one frame while the driver braked toward it, and the camera ran its
+    # SCBS display six seconds (route 0000004d t+212)
+    long = structs.CarControl.Actuators.LongControlState
+    for _ in range(120):
+      _step(cc, cruise_engaged=True, lead_d_rel=4.8, accel=-0.5)
+    for _ in range(60):
+      sends = _step(cc, long_active=False, enabled=False, long_state=long.off, accel=0.,
+                    lead_d_rel=4.8)
+      trk, ctl = _frame(sends, 0x364), _frame(sends, 0x21c)
+      if ctl is None:
+        continue
+      has_lead, phase = _crz_ctrl(ctl)
+      assert has_lead == 1 and phase != 0, "disengaging dropped a real lead off the bus"
+      if trk is not None:
+        assert _lead_track(trk)[0] == pytest.approx(4.8, abs=0.1)
 
   def test_no_resume_button_while_openpilot_owns_longitudinal(self, cc):
     # We are the ACC here, so the hold is released in-protocol. The car's own MRCC never presses

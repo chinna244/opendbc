@@ -156,8 +156,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     sm = self.stop_and_go
     sm.update(long_engaged, stopping, CS.out.standstill, CC.actuators.accel, CS.brake_hold,
               real_lead=self.lead_adv.real_lead)
-    # after the hold: the advertised phase is a stop phase only while we are actually holding
-    self.lead_adv.update(long_engaged, CC.hudControl.leadVisible, CC_SP.leadOne.dRel,
+    # perception, not control: the advertisement runs engaged or not, like the radar it
+    # stands in for; the phase is a stop phase only while we are actually holding
+    self.lead_adv.update(CC.hudControl.leadVisible, CC_SP.leadOne.dRel,
                          CC_SP.leadOne.vRel, sm.holding, escort=sm.escort.lead)
 
     accel = 0.
