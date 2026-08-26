@@ -170,10 +170,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     long_engaged = CC.enabled
     sm = self.stop_and_go
     sm.update(long_engaged, stopping, CS.out.standstill, CC.actuators.accel, CS.brake_hold,
-              gas_pressed=CS.out.gasPressed, real_lead=self.lead_adv.real_lead)
+              gas_pressed=CS.out.gasPressed)
     # runs engaged or not: the advertisement is perception (see AdvertisedLead)
     self.lead_adv.update(CC.hudControl.leadVisible, CC_SP.leadOne.dRel,
-                         CC_SP.leadOne.vRel, sm.holding, escort=sm.escort.lead)
+                         CC_SP.leadOne.vRel, sm.holding)
 
     accel = 0.
     if CC.longActive:
@@ -187,7 +187,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         accel = CarControllerParams.ACCEL_HOLD_LATCHED
       elif sm.holding:
         # while the plan is braking the hold command is the plan's own, but the moment it
-        # turns positive (release debounce, escort lead-in) the hold freezes where it is:
+        # turns positive (release debounce) the hold freezes where it is:
         # stock never lets ACCEL_CMD climb while STOPPING is asserted, and pre-ramping toward
         # the plan here put the release's zero-cross inside the unlatch pulse, which the
         # camera latched as an SCBS fault (route 00000100 t+353)
