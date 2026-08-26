@@ -147,25 +147,31 @@ def create_steering_control(packer, CP, frame, apply_torque, lkas):
 
   csum = csum % 256
 
-  values = {}
-  if CP.flags & MazdaFlags.GEN1:
-    values = {
-      "LKAS_REQUEST": apply_torque,
-      "CTR": ctr,
-      "ERR_BIT_1": er1,
-      "LINE_NOT_VISIBLE": lnv,
-      "LDW": ldw,
-      "BIT_1": b1,
-      "ERR_BIT_2": er2,
-      "STEERING_ANGLE": steering_angle,
-      "ANGLE_ENABLED": b2,
-      "CHKSUM": csum
-    }
+  if not CP.flags & MazdaFlags.GEN1:
+    # every shipping platform is GEN1; falling through here used to emit an all-zero
+    # CAM_LKAS with a zero checksum at 100 Hz
+    raise NotImplementedError(f"unsupported platform: {CP.carFingerprint}")
+
+  values = {
+    "LKAS_REQUEST": apply_torque,
+    "CTR": ctr,
+    "ERR_BIT_1": er1,
+    "LINE_NOT_VISIBLE": lnv,
+    "LDW": ldw,
+    "BIT_1": b1,
+    "ERR_BIT_2": er2,
+    "STEERING_ANGLE": steering_angle,
+    "ANGLE_ENABLED": b2,
+    "CHKSUM": csum
+  }
 
   return packer.make_can_msg("CAM_LKAS", 0, values)
 
 
 def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool):
+  # pass the camera's own state through untouched; letting the packer zero ERR_BIT and the
+  # TJA fields hid camera-asserted error and mode state from the car (Toyota's
+  # create_ui_command preserves every stock signal it does not own the same way)
   values = {s: cam_msg[s] for s in [
     "LINE_VISIBLE",
     "LINE_NOT_VISIBLE",
@@ -174,6 +180,9 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool)
     "BIT2",
     "BIT3",
     "NO_ERR_BIT",
+    "ERR_BIT",
+    "TJA",
+    "TJA_TRANSITION",
     "S1",
     "S1_HBEAM",
   ]}
@@ -192,42 +201,45 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool)
 
 
 def create_button_cmd(packer, CP, counter, button):
+  if not CP.flags & MazdaFlags.GEN1:
+    # every shipping platform is GEN1; falling through here used to return None, which the
+    # carcontroller would have appended straight into can_sends
+    raise NotImplementedError(f"unsupported platform: {CP.carFingerprint}")
 
   can = int(button == Buttons.CANCEL)
   res = int(button == Buttons.RESUME)
   inc = int(button == Buttons.SET_PLUS)
   dec = int(button == Buttons.SET_MINUS)
 
-  if CP.flags & MazdaFlags.GEN1:
-    values = {
-      "CAN_OFF": can,
-      "CAN_OFF_INV": (can + 1) % 2,
+  values = {
+    "CAN_OFF": can,
+    "CAN_OFF_INV": (can + 1) % 2,
 
-      "SET_P": inc,
-      "SET_P_INV": (inc + 1) % 2,
+    "SET_P": inc,
+    "SET_P_INV": (inc + 1) % 2,
 
-      "RES": res,
-      "RES_INV": (res + 1) % 2,
+    "RES": res,
+    "RES_INV": (res + 1) % 2,
 
-      "SET_M": dec,
-      "SET_M_INV": (dec + 1) % 2,
+    "SET_M": dec,
+    "SET_M_INV": (dec + 1) % 2,
 
-      "DISTANCE_LESS": 0,
-      "DISTANCE_LESS_INV": 1,
+    "DISTANCE_LESS": 0,
+    "DISTANCE_LESS_INV": 1,
 
-      "DISTANCE_MORE": 0,
-      "DISTANCE_MORE_INV": 1,
+    "DISTANCE_MORE": 0,
+    "DISTANCE_MORE_INV": 1,
 
-      "MODE_X": 0,
-      "MODE_X_INV": 1,
+    "MODE_X": 0,
+    "MODE_X_INV": 1,
 
-      "MODE_Y": 0,
-      "MODE_Y_INV": 1,
+    "MODE_Y": 0,
+    "MODE_Y_INV": 1,
 
-      "BIT1": 1,
-      "BIT2": 1,
-      "BIT3": 1,
-      "CTR": (counter + 1) % 16,
-    }
+    "BIT1": 1,
+    "BIT2": 1,
+    "BIT3": 1,
+    "CTR": (counter + 1) % 16,
+  }
 
-    return packer.make_can_msg("CRZ_BTNS", 0, values)
+  return packer.make_can_msg("CRZ_BTNS", 0, values)
