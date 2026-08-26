@@ -62,7 +62,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # driver's own stock MRCC (openpilot cannot engage there: availability is held low), and
     # the 10 Hz CANCEL would turn its main off within ~100 ms. Leave it alone; the teardown
     # gate already waits out a stock engagement. Once the radar has been silenced a stock
-    # engagement is impossible and cancel keeps handling state desync.
+    # engagement is impossible and cancel keeps handling state desync. (The deeper home is
+    # carstate not reporting a stock engagement as cruiseState.enabled under op-long at all;
+    # that needs an audit of every enabled consumer first, so the send is filtered here.)
     stock_mrcc_owns_cruise = self.CP.openpilotLongitudinalControl and not CS.radar_was_silenced
     if CC.cruiseControl.cancel and not stock_mrcc_owns_cruise:
       # If brake is pressed, let us wait >70ms before trying to disable crz to avoid
@@ -201,7 +203,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       acc_active_2 = sm.acc_active_2 if long_engaged else False
       for bus in LONG_BUSES:
         can_sends.append(mazdacan.create_acc_command(self.packer, bus, self.long_counter, accel,
-                                                     long_engaged, acc_available,
+                                                     long_active=long_engaged, acc_available=acc_available,
                                                      brake_pressed=CS.out.brakePressed,
                                                      stopping=sm.stop_bits, resume_unlatching=sm.resume_unlatching))
         can_sends.append(mazdacan.create_crz_ctrl(self.packer, bus, long_engaged, acc_available, gap,

@@ -212,7 +212,8 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
                          ((msg->data[4] & 0xfbU) == 0xc0U) &&
                          ((msg->data[5] & 0x7fU) == 0x00U) &&
                          ((msg->data[6] & 0xf0U) == 0x00U) &&
-                         (msg->data[7] == ((0xffU - ((0x01U + 0xffU + 0xe3U + 0xffU + msg->data[4] + msg->data[5] + msg->data[6]) & 0xffU)) & 0xffU));
+                         (msg->data[7] == ((0xffU - ((msg->data[0] + msg->data[1] + msg->data[2] + msg->data[3] +
+                                                     msg->data[4] + msg->data[5] + msg->data[6]) & 0xffU)) & 0xffU));
 
     // 13-bit ACCEL_CMD: data[2] low bits, data[3], data[4] high bits, offset 4096
     int desired_accel = ((((int)msg->data[2] & 0x3) << 11) | (((int)msg->data[3]) << 3) | (((int)msg->data[4]) >> 5)) - 4096;

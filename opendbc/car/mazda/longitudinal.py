@@ -71,9 +71,10 @@ class RadarSessionManager:
            (stock_radar_alive or self.state_frames >= RADAR_SESSION_LIMIT_FRAMES):
         # heard again, or never coming back: either way stop waiting so the restart proceeds.
         # This hand-back ran to completion, so the radar stays stock for the rest of the
-        # process: the assert dropping later (or the gate still passing at a parked toggle-off)
-        # must not re-silence the radar right before shutdown -- an unattended S3 recovery is
-        # the degraded state the whole hand-back exists to prevent
+        # process. The producer's contract is to hold the assert until the process exits; this
+        # latch is the backstop for a producer that does not (a dropped assert would otherwise
+        # read as a withdrawal and, parked with the gate still passed, re-silence the radar
+        # right before shutdown -- the unattended S3 recovery the hand-back exists to prevent)
         self.state = RadarSessionState.STOCK
         self.handback_completed = True
     else:

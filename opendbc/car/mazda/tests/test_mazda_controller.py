@@ -103,7 +103,7 @@ class TestMazdaLongitudinalMessages:
     for counter in range(16):
       checksum = (0x5d - counter) & 0xff
       expected = f"01ffe3ffc000{counter:02x}{checksum:02x}"
-      dat = mazdacan.create_acc_command(packer, 0, counter, 0.0, False, False, False, False, False)[1]
+      dat = mazdacan.create_acc_command(packer, 0, counter, 0.0, long_active=False, acc_available=False)[1]
       assert dat.hex() == expected
 
   def test_crz_info_armed_idle_matches_stock(self, packer):
@@ -114,7 +114,8 @@ class TestMazdaLongitudinalMessages:
       for counter in range(16):
         checksum = (base - counter) & 0xff
         expected = f"01ffe3ff{byte4:02x}80{counter:02x}{checksum:02x}"
-        dat = mazdacan.create_acc_command(packer, 0, counter, 0.0, False, True, brake_pressed, False, False)[1]
+        dat = mazdacan.create_acc_command(packer, 0, counter, 0.0, long_active=False, acc_available=True,
+                                          brake_pressed=brake_pressed)[1]
         assert dat.hex() == expected
 
   @pytest.mark.parametrize(("accel", "stopping", "unlatching", "counter", "expected"), [
@@ -126,7 +127,8 @@ class TestMazdaLongitudinalMessages:
     (0.0, False, True, 11, "01ffe20006804b4c"),     # resume unlatch pulse
   ])
   def test_crz_info_engaged_golden_bytes(self, packer, accel, stopping, unlatching, counter, expected):
-    dat = mazdacan.create_acc_command(packer, 0, counter, accel, True, False, False, stopping, unlatching)[1]
+    dat = mazdacan.create_acc_command(packer, 0, counter, accel, long_active=True, acc_available=False,
+                                      stopping=stopping, resume_unlatching=unlatching)[1]
     assert dat.hex() == expected
 
   def test_crz_info_accel_encoding_and_checksum(self, packer):
@@ -134,7 +136,8 @@ class TestMazdaLongitudinalMessages:
     # checksum over the whole command window, stop bits set or not
     for raw in range(-3500, 2001, 137):
       for stopping in (False, True):
-        dat = mazdacan.create_acc_command(packer, 0, raw % 16, raw / 1000.0, True, False, False, stopping, False)[1]
+        dat = mazdacan.create_acc_command(packer, 0, raw % 16, raw / 1000.0, long_active=True, acc_available=False,
+                                          stopping=stopping)[1]
         assert decode_accel_cmd_raw(dat) == raw
         assert dat[7] == crz_info_reference_checksum(dat)
         assert bool(dat[5] & 0x04) == stopping
@@ -517,24 +520,31 @@ class TestAdvertisedLead:
     assert not al.has_lead and al.ctrl_phase == 0
 
 def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas=False,
-             resume=False, lead_visible=True, gap=2, available=True,
+             resume=False, cancel=False, lead_visible=True, gap=2, available=True,
              stock_radar_alive=False, fsc_settled=True, handback=False, cruise_engaged=False,
-             enabled=None, lead_d_rel=12.0, lead_v_rel=0.0, brake_hold=False, brake_pressed=False):
+             enabled=None, lead_d_rel=12.0, lead_v_rel=0.0, brake_hold=False, brake_pressed=False,
+             radar_was_silenced=False):
   # openpilot is enabled whenever it is longitudinally active; a gas override is the case
-  # where it stays enabled with longActive low
+  # where it stays enabled with longActive low. The mock carries everything the full
+  # CarController.update() path reads, so tests can drive update() as well as
+  # update_longitudinal() from the one builder.
   enabled = long_active if enabled is None else enabled
   out = SimpleNamespace(standstill=standstill, gasPressed=gas, brakePressed=brake_pressed,
+                        vEgoRaw=0., steeringTorque=0.,
                         cruiseState=SimpleNamespace(available=available, enabled=cruise_engaged))
-  actuators = SimpleNamespace(accel=accel, longControlState=long_state)
-  cruise = SimpleNamespace(resume=resume, cancel=False)
-  hud = SimpleNamespace(leadVisible=lead_visible, leadDistanceBars=gap)
-  cc = SimpleNamespace(enabled=enabled, longActive=long_active, actuators=actuators,
-                       cruiseControl=cruise, hudControl=hud)
+  actuators = SimpleNamespace(accel=accel, longControlState=long_state, torque=0.,
+                              as_builder=lambda: SimpleNamespace(torque=0., torqueOutputCan=0, accel=0.))
+  cruise = SimpleNamespace(resume=resume, cancel=cancel)
+  hud = SimpleNamespace(leadVisible=lead_visible, leadDistanceBars=gap, visualAlert=None)
+  cc = SimpleNamespace(enabled=enabled, longActive=long_active, latActive=False,
+                       actuators=actuators, cruiseControl=cruise, hudControl=hud)
   cc_sp = SimpleNamespace(stockEcuHandBack=handback,
                           leadOne=SimpleNamespace(dRel=lead_d_rel, vRel=lead_v_rel))
   cs = SimpleNamespace(out=out, resume_button=0, brake_hold=brake_hold,
                        stock_radar_alive=stock_radar_alive, fsc_settled=fsc_settled,
-                       radar_session_refused=False)
+                       radar_session_refused=False, radar_was_silenced=radar_was_silenced,
+                       crz_btns_counter=0, cancel_button=0, lkas_allowed_speed=True,
+                       cam_lkas={"BIT_1": 0, "ERR_BIT_1": 0, "ERR_BIT_2": 0})
   return cc, cc_sp, cs
 
 
@@ -566,6 +576,8 @@ def _long_frames(sends):
   cp.update([(0, [(0x21b, info, 0), (0x21c, ctrl, 0)])])
   return decode_accel_cmd_raw(info), cp.vl["CRZ_INFO"]["ACC_ACTIVE"], cp.vl["CRZ_CTRL"]["CRZ_ACTIVE"]
 
+
+CRZ_BTNS = 0x9d
 
 # create_radar_frames stamps the counter into the last byte, so an empty slot is the first seven
 _EMPTY_TRACK = mazdacan.RADAR_TRACK_MSGS[0x364][:7]
@@ -935,7 +947,7 @@ class TestLongitudinalIntegration:
     for _ in range(RELEASE_DEBOUNCE_FRAMES):
       sends = _step(cc, long_state=long.pid, accel=0.3, standstill=True,
                     cruise_engaged=True, brake_hold=True)
-      assert not any(a == 0x9d for a, _, _ in sends), "CRZ_BTNS written at the release"
+      assert not any(a == CRZ_BTNS for a, _, _ in sends), "CRZ_BTNS written at the release"
     assert not cc.stop_and_go.holding
     assert cc.stop_and_go.resume_unlatching
 
@@ -973,26 +985,13 @@ class TestCancelCarveOut:
   so the documented stay-stock fallback used to leave the driver with no cruise at all. Once
   the radar has been silenced a stock engagement is impossible and cancel handles desync."""
 
-  CRZ_BTNS = 0x9d
-
-  def _full_update(self, cc, cancel, radar_was_silenced, stock_radar_alive, frame=10):
+  def _full_update(self, cc, cancel, radar_was_silenced, stock_radar_alive):
     control, control_sp, carstate = _mock_cc(long_active=False, enabled=False, accel=0.,
                                              long_state=structs.CarControl.Actuators.LongControlState.off,
-                                             available=False, cruise_engaged=True,
-                                             stock_radar_alive=stock_radar_alive, fsc_settled=False)
-    control.latActive = False
-    control.cruiseControl.cancel = cancel
-    control.hudControl.visualAlert = None
-    control.actuators.torque = 0.
-    control.actuators.as_builder = lambda: SimpleNamespace(torque=0., torqueOutputCan=0, accel=0.)
-    carstate.out.vEgoRaw = 8.0
-    carstate.out.steeringTorque = 0.
-    carstate.crz_btns_counter = 0
-    carstate.cancel_button = 0
-    carstate.lkas_allowed_speed = True
-    carstate.radar_was_silenced = radar_was_silenced
-    carstate.cam_lkas = {"BIT_1": 0, "ERR_BIT_1": 0, "ERR_BIT_2": 0}
-    cc.frame = frame  # off the 50-frame alert cadence, on the 10-frame cancel cadence
+                                             available=False, cruise_engaged=True, cancel=cancel,
+                                             stock_radar_alive=stock_radar_alive, fsc_settled=False,
+                                             radar_was_silenced=radar_was_silenced)
+    cc.frame = 10  # off the 50-frame alert cadence, on the 10-frame cancel cadence
     _, sends = cc.update(control, control_sp, carstate, 0)
     return [a for a, _, _ in sends]
 
@@ -1000,16 +999,16 @@ class TestCancelCarveOut:
     # pre-teardown settle window, and equally the silencing-failed drive: a driver SET is
     # their own stock MRCC and must be left alone
     addrs = self._full_update(cc, cancel=True, radar_was_silenced=False, stock_radar_alive=True)
-    assert self.CRZ_BTNS not in addrs, "CANCELed the driver's own stock MRCC"
+    assert CRZ_BTNS not in addrs, "CANCELed the driver's own stock MRCC"
 
   def test_cancel_still_sent_after_the_teardown(self, cc):
     # post-teardown a stock engagement is impossible: cancel keeps handling state desync
     addrs = self._full_update(cc, cancel=True, radar_was_silenced=True, stock_radar_alive=False)
-    assert self.CRZ_BTNS in addrs
+    assert CRZ_BTNS in addrs
 
   def test_stock_longitudinal_cancel_unaffected(self, stock_cc):
     addrs = self._full_update(stock_cc, cancel=True, radar_was_silenced=False, stock_radar_alive=True)
-    assert self.CRZ_BTNS in addrs
+    assert CRZ_BTNS in addrs
 
 
 SESSION_PROG_DAT = bytes([0x02, 0x10, 0x02, 0, 0, 0, 0, 0])

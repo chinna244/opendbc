@@ -27,16 +27,17 @@ def _interface(alpha_long=True):
   return CarInterface(CP, CP_SP)
 
 
-# CAM_LANEINFO's real cadence: a ~2 Hz message with measured periods of 540-563 ms. Tests
-# feed it at this rate, not per control frame: feeding it at 100 Hz masked a freshness window
-# shorter than the message period (the gate never settled on the car while every test passed).
-CAM_LANEINFO_PERIOD_FRAMES = int(0.55 / DT_CTRL)
+# CAM_LANEINFO's real cadence: tests feed it at the longest measured period (values.py), not
+# per control frame. Feeding it at 100 Hz masked a freshness window shorter than the message
+# period (the gate never settled on the car while every test passed).
+CAM_LANEINFO_PERIOD_FRAMES = int(CarControllerParams.CAM_LANEINFO_PERIOD_T / DT_CTRL)
 
 
 def _feed(CI, payload, seconds):
+  # payload None = a camera dropout, nothing on the bus at all
   frames = int(seconds / DT_CTRL)
   for i in range(frames):
-    msgs = [(CAM_LANEINFO, payload, 2)] if i % CAM_LANEINFO_PERIOD_FRAMES == 0 else []
+    msgs = [(CAM_LANEINFO, payload, 2)] if payload is not None and i % CAM_LANEINFO_PERIOD_FRAMES == 0 else []
     CI.update([(int(i * DT_CTRL * 1e9), msgs)])
   return CI.CS.fsc_settled
 
@@ -81,24 +82,17 @@ class TestFscSettleGate:
     assert _feed(_interface(), BIT2_LATCHED, CarControllerParams.FSC_SETTLE_T * 1.5)
 
   def test_settles_at_the_longest_observed_camera_period(self):
-    # the longest inter-frame gap in the corpus is 563 ms; the freshness window has to ride
-    # through every real gap or the settle counter zeroes each time and never reaches 10 s
-    # (the regression that shipped in baf0f383c3 with CAM_LANEINFO_FRESH_T = 0.5)
-    CI = _interface()
-    period = int(0.563 / DT_CTRL)
-    frames = int(CarControllerParams.FSC_SETTLE_T * 1.5 / DT_CTRL)
-    for i in range(frames):
-      msgs = [(CAM_LANEINFO, SETTLED, 2)] if i % period == 0 else []
-      CI.update([(int(i * DT_CTRL * 1e9), msgs)])
-    assert CI.CS.fsc_settled
+    # _feed runs at the longest measured period, the worst case the freshness window has to
+    # ride through: a shorter window zeroes the settle counter on every gap and the gate
+    # never opens (the regression that shipped in baf0f383c3 with CAM_LANEINFO_FRESH_T = 0.5)
+    assert _feed(_interface(), SETTLED, CarControllerParams.FSC_SETTLE_T * 1.5)
 
   def test_camera_dropout_resets_the_settle_timer(self):
     # the window is a freshness gate, not decoration: a genuine dropout, well past any real
     # inter-frame gap, must start the settle timer over
     CI = _interface()
     _feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T * 0.8)
-    for i in range(int((CarControllerParams.CAM_LANEINFO_FRESH_T + 0.5) / DT_CTRL)):
-      CI.update([(int(i * DT_CTRL * 1e9), [])])
+    _feed(CI, None, CarControllerParams.CAM_LANEINFO_FRESH_T + 0.5)
     assert not _feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T * 0.5)
     assert _feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T * 0.6)
 
@@ -205,8 +199,7 @@ class TestTwoMasterGuard:
     for i in range(start_frame, start_frame + frames):
       msgs = [packer.make_can_msg("PEDALS", 0, {"ACC_OFF": 1})]
       if radar_alive:
-        msgs.append(mazdacan.create_acc_command(packer, 0, i, 0., False, True, brake_pressed=False,
-                                                stopping=False, resume_unlatching=False))
+        msgs.append(mazdacan.create_acc_command(packer, 0, i, 0., long_active=False, acc_available=True))
       ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(m[0], m[1], m[2]) for m in msgs])])
     return ret, start_frame + frames
 
