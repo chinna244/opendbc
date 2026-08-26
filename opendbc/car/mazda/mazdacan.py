@@ -166,9 +166,12 @@ def create_steering_control(packer, CP, frame, apply_torque, lkas):
 
 
 def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool):
-  # pass the camera's own state through untouched; letting the packer zero ERR_BIT and the
-  # TJA fields hid camera-asserted error and mode state from the car (Toyota's
-  # create_ui_command preserves every stock signal it does not own the same way)
+  # pass the camera's own state through untouched; letting the packer zero ERR_BIT hid
+  # camera-asserted error state from the car (Toyota's create_ui_command preserves every
+  # stock signal it does not own the same way). The TJA mode fields are the exception: under
+  # openpilot the camera's own TJA/CTS state machine churns against steering it did not
+  # command (TJA_TRANSITION toggled 442 times in 22 min on route 0000010b) and relaying that
+  # flapped the dash lane indicators, so those two stay zeroed as they always were.
   values = {s: cam_msg[s] for s in [
     "LINE_VISIBLE",
     "LINE_NOT_VISIBLE",
@@ -178,8 +181,6 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool)
     "BIT3",
     "NO_ERR_BIT",
     "ERR_BIT",
-    "TJA",
-    "TJA_TRANSITION",
     "S1",
     "S1_HBEAM",
   ]}
