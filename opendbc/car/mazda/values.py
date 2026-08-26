@@ -38,9 +38,11 @@ class CarControllerParams:
   # two cars), so freshness has to be judged against that cadence: a window shorter than one
   # period reads every inter-frame gap as a dropout, zeroes the settle timer each time, and
   # the teardown gate never opens. The window keeps 2.7x margin over the longest observed
-  # period and still catches a genuine camera dropout.
+  # period and still catches a genuine camera dropout. Same window gates the experimental
+  # white-icon source frame.
   CAM_LANEINFO_PERIOD_T = 0.563
   CAM_LANEINFO_FRESH_T = 1.5
+  CAM_LANEINFO_TIMEOUT_T = 1.5
 
   # RESUME_UNLATCHING pulse width at the release; stock latched releases pulse 0.22-0.38 s,
   # this sits mid-distribution
@@ -51,13 +53,6 @@ class CarControllerParams:
   # FSC CAM_LKAS is expected every control cycle once the camera is up; without a measured-frequency
   # check, float("nan") liveness leaves stale zeros looking healthy when 0x243 disappears.
   CAM_LKAS_TIMEOUT_T = 0.2
-
-  # CAM_LANEINFO is a ~2 Hz message (longest period measured 0.563 s across 26+ segments on
-  # CX-5 2022). Freshness for FSC settle / invalidLkasSetting, and the experimental white-icon
-  # gate, both stop trusting a source after three expected frames are missed.
-  CAM_LANEINFO_PERIOD_T = 0.563
-  CAM_LANEINFO_FRESH_T = 1.5
-  CAM_LANEINFO_TIMEOUT_T = 1.5
 
   # The plan flapping across zero at a held standstill (a lead inches forward and stops) used
   # to fire a fresh RESUME_UNLATCHING pulse per flap and re-assert the stop bits mid-pulse, a
