@@ -61,12 +61,16 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     values = {"CRZ_ACTIVE": enable}
     return self.packer.make_can_msg_safety("CRZ_CTRL", 0, values)
 
-  def _button_msg(self, resume=False, cancel=False):
+  def _button_msg(self, resume=False, cancel=False, set_m=False, set_p=False):
     values = {
       "CAN_OFF": cancel,
       "CAN_OFF_INV": (cancel + 1) % 2,
       "RES": resume,
       "RES_INV": (resume + 1) % 2,
+      "SET_M": set_m,
+      "SET_M_INV": (set_m + 1) % 2,
+      "SET_P": set_p,
+      "SET_P_INV": (set_p + 1) % 2,
     }
     return self.packer.make_can_msg_safety("CRZ_BTNS", 0, values)
 
@@ -105,6 +109,64 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
   def _crz_ctrl_cmd_msg(self, active: bool, bus: int = 0):
     values = {"CRZ_ACTIVE": active}
     return self.packer.make_can_msg_safety("CRZ_CTRL", bus, values)
+
+  def _press_set(self):
+    # arm the driver-intent qualifier the way every logged engagement does: a wheel press
+    # lands 30-70 ms before PEDALS.ACC_ACTIVE rises
+    self._rx(self._button_msg(resume=False, cancel=False, set_m=True))
+    self._rx(self._button_msg(resume=False, cancel=False))
+
+  def test_enable_control_allowed_from_cruise(self):
+    # same as the common test, but engagement here requires the driver-intent qualifier
+    self._press_set()
+    self._rx(self._pcm_status_msg(False))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_cruise_engaged_prev(self):
+    for engaged in [True, False]:
+      self._press_set()
+      self._rx(self._pcm_status_msg(engaged))
+      self.assertEqual(engaged, self.safety.get_cruise_engaged_prev())
+      self._rx(self._pcm_status_msg(not engaged))
+      self.assertEqual(not engaged, self.safety.get_cruise_engaged_prev())
+
+  def test_cruise_without_button_never_arms(self):
+    # PEDALS.ACC_ACTIVE alone is the body answering our own fabricated frames; without a
+    # SET/RES press heard from the wheel it must not arm controls
+    self._rx(self._pcm_status_msg(False))
+    for _ in range(20):
+      self._rx(self._pcm_status_msg(True))
+      self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_button_window_expires(self):
+    self._press_set()
+    # 10 Hz CRZ_BTNS: run the counter past the 1 s window with idle button frames
+    for _ in range(12):
+      self._rx(self._button_msg(resume=False, cancel=False))
+    self._rx(self._pcm_status_msg(True))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_armed_controls_latch_past_the_window(self):
+    self._press_set()
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    # the window expiring must not drop an active engagement
+    for _ in range(30):
+      self._rx(self._button_msg(resume=False, cancel=False))
+      self._rx(self._pcm_status_msg(True))
+      self.assertTrue(self.safety.get_controls_allowed())
+    self._rx(self._pcm_status_msg(False))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_each_engage_button_arms(self):
+    for btn in ("set_m", "set_p", "resume"):
+      self.safety.set_controls_allowed(False)
+      self._rx(self._button_msg(**{btn: True}))
+      self._rx(self._pcm_status_msg(True))
+      self.assertTrue(self.safety.get_controls_allowed(), btn)
+      self._rx(self._pcm_status_msg(False))
 
   def test_camera_bus_accel_actuation_limits(self):
     # the synthetic radar frames are duplicated onto the camera bus; same limits apply there
