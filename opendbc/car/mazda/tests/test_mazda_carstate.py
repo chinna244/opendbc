@@ -78,6 +78,59 @@ class TestFscSettleGate:
     assert not CI.CS.fsc_settled
 
 
+class TestStockFcw:
+  """0x21d (CAM_EMPTY) idles at STATUS 0x7f and leaves it only while the camera actively
+  shows its SCBS collision display (route 0000004d t+213). The payloads are the captured
+  idle and active frames from that route."""
+
+  IDLE = bytes.fromhex("7f3fff00000affff")
+  ACTIVE = bytes.fromhex("52124b00000ad294")
+
+  def _feed_21d(self, CI, payload, i=0):
+    ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(0x21d, payload, 2)])])
+    return ret
+
+  def test_display_active_sets_fcw(self):
+    CI = _interface()
+    assert self._feed_21d(CI, self.IDLE).stockFcw is False
+    assert self._feed_21d(CI, self.ACTIVE, 1).stockFcw is True
+    assert self._feed_21d(CI, self.IDLE, 2).stockFcw is False
+
+  def test_no_fcw_before_first_camera_frame(self):
+    # the parser reads STATUS as 0 before the first frame, which is != 0x7f
+    CI = _interface()
+    ret, _ = CI.update([(0, [])])
+    assert ret.stockFcw is False
+
+  def test_ped_warning_bit_sets_fcw(self):
+    # never observed in 1.57M corpus frames, wired for coverage: PED_WARNING is bit 9
+    CI = _interface()
+    self._feed_21d(CI, self.IDLE)
+    ret, _ = CI.update([(int(1 * DT_CTRL * 1e9), [(0x25d, bytes.fromhex("07fa3c0000000000"), 2), (0x21d, self.IDLE, 2)])])
+    assert ret.stockFcw is True
+
+
+class TestRadarSessionResponse:
+  """The radar answers session requests within ~10 ms (route 000000fe t+15.0); a negative
+  response is a definitive refusal the session manager acts on immediately."""
+
+  def test_negative_response_sets_refused(self):
+    CI = _interface()
+    assert not CI.CS.radar_session_refused
+    # 03 7F 10 22: conditionsNotCorrect to a session-control request
+    CI.update([(0, [(0x76c, bytes.fromhex("037f102200000000"), 0)])])
+    assert CI.CS.radar_session_refused
+    for i in range(1, int(CarControllerParams.RADAR_NRC_FRESH_T / DT_CTRL) + 2):
+      CI.update([(int(i * DT_CTRL * 1e9), [])])
+    assert not CI.CS.radar_session_refused, "a refusal must expire"
+
+  def test_positive_response_is_not_a_refusal(self):
+    CI = _interface()
+    # the real capture: 06 50 02 with the session parameter record (P2*=5.0 s)
+    CI.update([(0, [(0x76c, bytes.fromhex("065002001901f400"), 0)])])
+    assert not CI.CS.radar_session_refused
+
+
 class TestBrakeHold:
   """GEAR.BRAKE_HOLD is the body ECU reporting that it owns the standstill hold. Stock relaxes
   its own command the instant this sets, so the payloads below come straight off the two logs

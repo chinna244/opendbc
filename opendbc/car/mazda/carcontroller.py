@@ -134,7 +134,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     stock_radar_alive = CS.stock_radar_alive
     setup_ok = CS.fsc_settled and not (stock_radar_alive and CS.out.cruiseState.enabled)
     session_state = self.radar_session.update(setup_ok, stock_radar_alive, CC_SP.stockEcuHandBack,
-                                              standstill=CS.out.standstill)
+                                              standstill=CS.out.standstill,
+                                              session_refused=CS.radar_session_refused)
     # synthetic radar frames flow while we own the bus, and keep flowing through the
     # hand-back so the camera never sees a radar gap
     radar_master = session_state in (RadarSessionState.SILENCED, RadarSessionState.HANDBACK)

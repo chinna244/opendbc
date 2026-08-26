@@ -57,7 +57,7 @@ class RadarSessionManager:
     self.silencing_failed = False
 
   def update(self, gate_passed: bool, stock_radar_alive: bool, handback: bool,
-             standstill: bool) -> RadarSessionState:
+             standstill: bool, session_refused: bool = False) -> RadarSessionState:
     prev_state = self.state
     if handback:
       if self.state == RadarSessionState.SILENCING:
@@ -84,8 +84,10 @@ class RadarSessionManager:
       elif self.state == RadarSessionState.SILENCING:
         if not stock_radar_alive:
           self.state = RadarSessionState.SILENCED
-        elif self.state_frames >= RADAR_SESSION_LIMIT_FRAMES:
-          # the radar is refusing the session; give up for the drive, stock keeps the bus
+        elif session_refused or self.state_frames >= RADAR_SESSION_LIMIT_FRAMES:
+          # a negative UDS response is a definitive refusal, the silence budget covers a
+          # radar that answers nothing at all; either way give up for the drive and stock
+          # keeps the bus (disable_ecu reads the same response to declare its outcome)
           self.state = RadarSessionState.STOCK
           self.silencing_failed = True
       elif self.state == RadarSessionState.SILENCED and stock_radar_alive:

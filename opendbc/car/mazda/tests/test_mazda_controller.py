@@ -474,7 +474,8 @@ def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas
   cc_sp = SimpleNamespace(stockEcuHandBack=handback,
                           leadOne=SimpleNamespace(dRel=lead_d_rel, vRel=lead_v_rel))
   cs = SimpleNamespace(out=out, resume_button=0, brake_hold=brake_hold,
-                       stock_radar_alive=stock_radar_alive, fsc_settled=fsc_settled)
+                       stock_radar_alive=stock_radar_alive, fsc_settled=fsc_settled,
+                       radar_session_refused=False)
   return cc, cc_sp, cs
 
 
@@ -916,6 +917,15 @@ class TestRadarSessionBounds:
     # and stays given up for the drive: stock keeps the bus
     for _ in range(10):
       assert m.update(True, True, False, standstill=True) == RadarSessionState.STOCK
+
+  def test_negative_response_gives_up_immediately(self):
+    # route 000000fe t+15.0 shows the radar answers a session request within 10 ms, so a
+    # negative response is definitive: no reason to burn the silence budget
+    m = RadarSessionManager()
+    m.update(True, True, False, standstill=True)
+    assert m.state == RadarSessionState.SILENCING
+    assert m.update(True, True, False, standstill=True, session_refused=True) == RadarSessionState.STOCK
+    assert m.silencing_failed
 
   def test_handback_stops_waiting_for_a_dead_radar(self):
     m = RadarSessionManager()
