@@ -93,7 +93,7 @@ class TestWhiteHudController:
       cam_lkas_live=True,
       cam_lkas={"ERR_BIT_1": 0, "ERR_BIT_2": 0, "LINE_NOT_VISIBLE": 0, "BIT_1": 1},
       cam_laneinfo={"LINE_VISIBLE": 0, "LINE_NOT_VISIBLE": 1, "LANE_LINES": 1,
-                    "BIT1": 1, "BIT2": 0, "BIT3": 1, "NO_ERR_BIT": 0, "S1": 1, "S1_HBEAM": 0},
+                    "BIT1": 1, "BIT2": 0, "BIT3": 1, "NO_ERR_BIT": 0, "ERR_BIT": 0, "TJA": 0, "TJA_TRANSITION": 0, "S1": 1, "S1_HBEAM": 0},
       cam_laneinfo_raw=raw,
       cam_laneinfo_live=live,
       crz_btns_counter=0,

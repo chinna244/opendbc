@@ -1,5 +1,5 @@
 from opendbc.car.can_definitions import CanData
-from opendbc.car.mazda.values import Buttons, MazdaFlags, has_tja_mads
+from opendbc.car.mazda.values import Buttons, has_tja_mads
 
 # Radar frames the body ECU expects to keep receiving for stop-and-go to work. Byte-exact
 # captures from a 0x764 radar with no objects in view; only the counter nibble in the last
@@ -18,8 +18,9 @@ LEAD_TRACK_ADDR = 0x364
 # create_lead_track only rewrites DIST_OBJ and RELV_OBJ; the rest is the radar's track-valid
 # pattern, which is not understood well enough to synthesize.
 LEAD_TRACK_TEMPLATE = bytes.fromhex("0a4000001dc00000")
-LEAD_TRACK_DIST = 10.25   # m, the template's own range
+LEAD_TRACK_DIST = 10.25   # m, the range LEAD_TRACK_TEMPLATE was captured at; not a control value
 DIST_OBJ_SCALE = 0.0625   # m per bit, DIST_OBJ and RELV_OBJ share it
+DIST_OBJ_MAX = 255.875    # m, the full-scale DIST_OBJ reading a track can carry
 
 
 def crz_info_checksum(dat: bytes) -> int:
@@ -28,28 +29,30 @@ def crz_info_checksum(dat: bytes) -> int:
   return (0xFF - ((sum(dat[:7]) - (dat[5] & 0x04)) & 0xFF)) & 0xFF
 
 
-def create_acc_command(packer, bus, counter, accel, long_active, acc_available, stopping, resume_unlatching):
-  # CRZ_INFO stands in for the disabled radar's accel command frame. While MRCC is armed
-  # but not engaged, stock advertises ACC_SET_ALLOWED with a zero command so the dash
-  # accepts SET; with the main switch off it broadcasts a static standby pattern with the
-  # command field pegged high.
+def create_acc_command(packer, bus, counter, accel, *, long_active, acc_available,
+                       brake_pressed=False, stopping=False, resume_unlatching=False):
+  # CRZ_INFO stands in for the disabled radar's accel command frame. Only an engaged frame
+  # carries a live command: armed-idle pegs the command field exactly like the main-off
+  # standby (47,752 of 47,752 stock armed-idle frames carry raw 8190), adds bit 47, and
+  # advertises ACC_SET_ALLOWED whenever the brake is up so the dash accepts SET -- the brake
+  # is stock's one observed gate on it (99.9% of armed-idle frames follow BRAKE_ON).
   values = {
     "STATUS": 1,
     "STATIC_1": 0x7ff,
     "CTR1": counter % 16,
+    "ACCEL_CMD": accel if long_active else 4.094,  # not controlling pegs raw 8190
+    "NEW_SIGNAL_7": int(long_active or acc_available),
   }
-  if long_active or acc_available:
+  if long_active:
     values.update({
-      "ACCEL_CMD": accel,
-      "ACC_ACTIVE": int(long_active),
+      "ACC_ACTIVE": 1,
       "ACC_SET_ALLOWED": 1,
-      "NEW_SIGNAL_7": 1,
       "STOPPING": int(stopping),
       "STOPPING_2": int(stopping),
       "RESUME_UNLATCHING": int(resume_unlatching),
     })
-  else:
-    values["ACCEL_CMD"] = 4.094  # standby pattern, raw 8190
+  elif acc_available:
+    values["ACC_SET_ALLOWED"] = int(not brake_pressed)
 
   dat = packer.make_can_msg("CRZ_INFO", bus, values)[1]
   values["CHKSUM"] = crz_info_checksum(dat)
@@ -83,7 +86,7 @@ def create_lead_track(d_rel: float, v_rel: float) -> bytes:
   with zero closing speed while the car is commanded to drive off, which its own view of the
   lead pulling away contradicts. RELV_OBJ carries the same sign as vRel, positive opening.
   """
-  dist = round(min(max(d_rel, 0.), 255.875) / DIST_OBJ_SCALE)
+  dist = round(min(max(d_rel, 0.), DIST_OBJ_MAX) / DIST_OBJ_SCALE)
   relv = round(min(max(v_rel, -64.), 63.9375) / DIST_OBJ_SCALE) & 0x7ff
   dat = bytearray(LEAD_TRACK_TEMPLATE)
   dat[0] = dist >> 4
@@ -155,26 +158,27 @@ def create_steering_control(packer, CP, frame, apply_torque, lkas):
 
   csum = csum % 256
 
-  values = {}
-  if CP.flags & MazdaFlags.GEN1:
-    values = {
-      "LKAS_REQUEST": apply_torque,
-      "CTR": ctr,
-      "ERR_BIT_1": er1,
-      "LINE_NOT_VISIBLE": lnv,
-      "LDW": ldw,
-      "BIT_1": b1,
-      "ERR_BIT_2": er2,
-      "STEERING_ANGLE": steering_angle,
-      "ANGLE_ENABLED": b2,
-      "CHKSUM": csum
-    }
+  values = {
+    "LKAS_REQUEST": apply_torque,
+    "CTR": ctr,
+    "ERR_BIT_1": er1,
+    "LINE_NOT_VISIBLE": lnv,
+    "LDW": ldw,
+    "BIT_1": b1,
+    "ERR_BIT_2": er2,
+    "STEERING_ANGLE": steering_angle,
+    "ANGLE_ENABLED": b2,
+    "CHKSUM": csum
+  }
 
   return packer.make_can_msg("CAM_LKAS", 0, values)
 
 
 def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool):
-  values = {s: cam_msg[s] for s in [
+  # pass the camera's own state through untouched; letting the packer zero ERR_BIT and the
+  # TJA fields hid camera-asserted error and mode state from the car (Toyota's
+  # create_ui_command preserves every stock signal it does not own the same way)
+  values = {s: cam_msg.get(s, 0) for s in [
     "LINE_VISIBLE",
     "LINE_NOT_VISIBLE",
     "LANE_LINES",
@@ -182,6 +186,9 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool)
     "BIT2",
     "BIT3",
     "NO_ERR_BIT",
+    "ERR_BIT",
+    "TJA",
+    "TJA_TRANSITION",
     "S1",
     "S1_HBEAM",
   ]}
@@ -211,7 +218,6 @@ def apply_mads_white_hud(fsc_dat: bytes | None, current_dat: bytes, enabled: boo
 
 
 def create_button_cmd(packer, CP, counter, button, CS=None):
-
   can = int(button == Buttons.CANCEL)
   res = int(button == Buttons.RESUME)
   inc = int(button == Buttons.SET_PLUS)
@@ -227,39 +233,38 @@ def create_button_cmd(packer, CP, counter, button, CS=None):
     mode_x = 0
     mode_y = 0
 
-  if CP.flags & MazdaFlags.GEN1:
-    values = {
-      "CAN_OFF": can,
-      "CAN_OFF_INV": (can + 1) % 2,
+  values = {
+    "CAN_OFF": can,
+    "CAN_OFF_INV": (can + 1) % 2,
 
-      "SET_P": inc,
-      "SET_P_INV": (inc + 1) % 2,
+    "SET_P": inc,
+    "SET_P_INV": (inc + 1) % 2,
 
-      "RES": res,
-      "RES_INV": (res + 1) % 2,
+    "RES": res,
+    "RES_INV": (res + 1) % 2,
 
-      "SET_M": dec,
-      "SET_M_INV": (dec + 1) % 2,
+    "SET_M": dec,
+    "SET_M_INV": (dec + 1) % 2,
 
-      "DISTANCE_LESS": 0,
-      "DISTANCE_LESS_INV": 1,
+    "DISTANCE_LESS": 0,
+    "DISTANCE_LESS_INV": 1,
 
-      "DISTANCE_MORE": 0,
-      "DISTANCE_MORE_INV": 1,
+    "DISTANCE_MORE": 0,
+    "DISTANCE_MORE_INV": 1,
 
-      # TJA_MADS: copy live wheel bits so OP CRZ_BTNS cannot fabricate a TJA 1→0→1
-      # edge or drop MODE_X/Y while cancel/resume/ICBM is on the bus.
-      "TJA_BUTTON": tja,
-      "MODE_X": mode_x,
-      "MODE_X_INV": (mode_x + 1) % 2,
-      "MODE_Y": mode_y,
-      "MODE_Y_INV": (mode_y + 1) % 2,
+    # TJA_MADS: copy live wheel bits so OP CRZ_BTNS cannot fabricate a TJA 1→0→1
+    # edge or drop MODE_X/Y while cancel/resume/ICBM is on the bus.
+    "TJA_BUTTON": tja,
+    "MODE_X": mode_x,
+    "MODE_X_INV": (mode_x + 1) % 2,
+    "MODE_Y": mode_y,
+    "MODE_Y_INV": (mode_y + 1) % 2,
 
-      "BIT1": 1 - mrcc_button,
-      "BIT1_INV": mrcc_button,
-      "BIT2": 1,
-      "BIT3": 1,
-      "CTR": (counter + 1) % 16,
-    }
+    "BIT1": 1 - mrcc_button,
+    "BIT1_INV": mrcc_button,
+    "BIT2": 1,
+    "BIT3": 1,
+    "CTR": (counter + 1) % 16,
+  }
 
-    return packer.make_can_msg("CRZ_BTNS", 0, values)
+  return packer.make_can_msg("CRZ_BTNS", 0, values)

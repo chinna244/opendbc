@@ -30,10 +30,16 @@
 #define MAZDA_PARAM_STEER_TO_ZERO 2U
 #define MAZDA_PARAM_TJA_MADS 4U
 
+// CRZ_BTNS frames (10 Hz) an engage press stays fresh. Every logged engagement shows the
+// press 30-70 ms before PEDALS.ACC_ACTIVE rises (104-engagement census, zero genuine
+// button-less engagements), so 1 s is generous.
+#define MAZDA_ENGAGE_BTN_WINDOW 10U
+
 static bool mazda_longitudinal = false;
 static bool mazda_steer_to_zero = false;
 static bool mazda_tja_mads = false;
 static bool mazda_acc_armed = false;
+static uint32_t mazda_engage_btn_frames = 0U;
 
 static bool mazda_mrcc_off_msg_valid(const CANPacket_t *msg) {
   // Exact active-low MRCC master tap captured on CX-5 2022. CTR occupies the
@@ -98,8 +104,11 @@ static bool mazda_synthetic_lead_radar_track_msg_valid(const CANPacket_t *msg) {
 }
 
 static bool mazda_radar_track_msg_valid(const CANPacket_t *msg) {
+  // ignition to ignition, engaged or not, and the controller mirrors that. Gating it on
+  // controls_allowed silently killed 0x364 at every disengagement while CRZ_CTRL still said
+  // has_lead=1, the exact track/ctrl disagreement the camera faults on.
   return mazda_empty_radar_track_msg_valid(msg) ||
-         (controls_allowed && mazda_synthetic_lead_radar_track_msg_valid(msg));
+         mazda_synthetic_lead_radar_track_msg_valid(msg);
 }
 
 // track msgs coming from OP so that we know what CAM msgs to drop and what to forward
@@ -141,6 +150,12 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
         if (cancel) {
           controls_allowed = false;
         }
+        // RES, SET_P or SET_M: the driver-intent half of the engagement qualifier below
+        if (GET_BIT(msg, 2U) || GET_BIT(msg, 4U) || GET_BIT(msg, 5U)) {
+          mazda_engage_btn_frames = MAZDA_ENGAGE_BTN_WINDOW;
+        } else if (mazda_engage_btn_frames > 0U) {
+          mazda_engage_btn_frames -= 1U;
+        }
       }
     }
 
@@ -163,7 +178,15 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
           if (!mazda_tja_mads) {
             acc_main_on = acc_armed;
           }
-          pcm_cruise_check(cruise_engaged);
+          // Arm only on an engaged rising edge backed by a recent SET/RES press, the
+          // hyundai_common form: ACC_ACTIVE alone is the body answering frames we fabricate.
+          if (cruise_engaged && !cruise_engaged_prev && (mazda_engage_btn_frames > 0U)) {
+            controls_allowed = true;
+          }
+          if (!cruise_engaged) {
+            controls_allowed = false;
+          }
+          cruise_engaged_prev = cruise_engaged;
         }
       }
       brake_pressed = brake;
@@ -231,6 +254,13 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
                                ((uint32_t)msg->data[4] >> 5);
     int desired_accel = (int)raw_accel - 4096;
     if (!stock_standby && longitudinal_accel_checks(desired_accel, MAZDA_LONG_LIMITS)) {
+      tx = false;
+    }
+
+    // ACC_ACTIVE (bit 33) mirrors CRZ_CTRL's CRZ_ACTIVE gate: an engaged-claiming accel
+    // frame must not flow while controls are not allowed.
+    bool acc_active = GET_BIT(msg, 33U);
+    if (!controls_allowed && acc_active) {
       tx = false;
     }
   }
@@ -343,6 +373,7 @@ static safety_config mazda_init(uint16_t param) {
   mazda_steer_to_zero = GET_FLAG(param, MAZDA_PARAM_STEER_TO_ZERO);
   mazda_tja_mads = GET_FLAG(param, MAZDA_PARAM_TJA_MADS);
   mazda_acc_armed = false;
+  mazda_engage_btn_frames = 0U;
   acc_main_on = false;
   // TJA is the only lateral authorization source; MRCC/pcm cruise must not grant it.
   mads_set_op_controls_allowed_requests_lateral(!mazda_tja_mads);

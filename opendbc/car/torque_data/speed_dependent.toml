@@ -27,12 +27,18 @@ friction_bp = [0.156, 0.142, 0.124, 0.153, 0.139, 0.122, 0.108]
 # Same steer-to-zero EPS family as the CX-5 2022 (KSD5 firmware is in
 # STEER_TO_ZERO_EPS_FW), so the same STEER_MAX schedule (1200 below the 14.2 m/s
 # cliff, 800 above) and the same cliff-aligned bin layout apply.
-# Seeded 2026-08-19: bins 9.5/12.0/16.4 measured on route 00000004--97e4328f4f
-# (offline per-bin SVD fits, torqued admission filters, current STEER_MAX
-# schedule; 790/1.3k/450 pts). The 6.5 fit was unstable (crawl-speed noise) and
-# the 21.0+ bins got no data, so those carry the CX-5 2022 seeds. Note the
-# measured 16.4 laf (1.5-1.77) sits well above the CX-5's 1.21 there, so expect
-# the transplanted highway bins to migrate once the learner sees highway data.
+# Refreshed 2026-08-25 from this car's own LiveTorqueParameters cache, read off
+# route 00000012--eba222b1f2 (2026-08-23). Bins 6.5-16.4 were learning live in
+# that drive; 21.0 and 28.0 came out of the cache from earlier drives on the
+# same car (that route saw nothing above 18.7 m/s) but are still this CX-9's
+# own measurements, replacing the CX-5 values they were seeded from. Every bin
+# lands well inside the sanity bounds of the seed it replaces - nothing was
+# clipped. 35.0 has still never gone valid on this car, so its laf is scaled up
+# from the CX-5's learned 1.76: the CX-9 runs 10-13% above the CX-5 in both
+# highway bins it has measured (21.0 x1.10, 28.0 x1.13), and applying the CX-5's
+# own 28->35 rise to the CX-9's 28.0 lands in the same place (1.96 vs 1.98).
+# Friction shows no such offset (x1.01 across those bins) and keeps the CX-5
+# value. Erring high on laf is the quiet direction - it asks for less torque.
 speed_bp    = [6.5, 9.5, 12.0, 16.4, 21.0, 28.0, 35.0]
-laf_bp      = [2.43, 2.37, 2.15, 1.60, 1.16, 1.53, 1.76]
-friction_bp = [0.156, 0.168, 0.135, 0.171, 0.139, 0.122, 0.108]
+laf_bp      = [2.67, 2.70, 2.56, 1.53, 1.28, 1.72, 1.97]
+friction_bp = [0.161, 0.154, 0.116, 0.163, 0.136, 0.128, 0.108]

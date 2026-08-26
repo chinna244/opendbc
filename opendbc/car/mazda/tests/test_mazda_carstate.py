@@ -7,6 +7,9 @@ from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams
 
 CAM_LANEINFO = 0x440
+CAM_EMPTY = 0x21d
+CAM_PEDESTRIAN = 0x25d
+RADAR_UDS_RESP = 0x76c
 
 # Real CAM_LANEINFO prefixes, captured on two CX-5 2022s running the same FSC firmware
 # (GSH7-67XK2-U). Only byte 1 differs: bit 5 is BIT2, bit 6 is NO_ERR_BIT.
@@ -25,10 +28,18 @@ def _interface(alpha_long=True):
   return CarInterface(CP, CP_SP)
 
 
+# CAM_LANEINFO's real cadence: tests feed it at the longest measured period (values.py), not
+# per control frame. Feeding it at 100 Hz masked a freshness window shorter than the message
+# period (the gate never settled on the car while every test passed).
+CAM_LANEINFO_PERIOD_FRAMES = int(CarControllerParams.CAM_LANEINFO_PERIOD_T / DT_CTRL)
+
+
 def _feed(CI, payload, seconds):
+  # payload None = a camera dropout, nothing on the bus at all
   frames = int(seconds / DT_CTRL)
   for i in range(frames):
-    CI.update([(int(i * DT_CTRL * 1e9), [(CAM_LANEINFO, payload, 2)])])
+    msgs = [(CAM_LANEINFO, payload, 2)] if payload is not None and i % CAM_LANEINFO_PERIOD_FRAMES == 0 else []
+    CI.update([(int(i * DT_CTRL * 1e9), msgs)])
   return CI.CS.fsc_settled
 
 
@@ -71,12 +82,85 @@ class TestFscSettleGate:
     # never silenced and the two-master guard held accFaulted for the whole drive.
     assert _feed(_interface(), BIT2_LATCHED, CarControllerParams.FSC_SETTLE_T * 1.5)
 
+  def test_settles_at_the_longest_observed_camera_period(self):
+    # _feed runs at the longest measured period, the worst case the freshness window has to
+    # ride through: a shorter window zeroes the settle counter on every gap and the gate
+    # never opens (the regression that shipped in baf0f383c3 with CAM_LANEINFO_FRESH_T = 0.5)
+    assert _feed(_interface(), SETTLED, CarControllerParams.FSC_SETTLE_T * 1.5)
+
+  def test_camera_dropout_resets_the_settle_timer(self):
+    # the window is a freshness gate, not decoration: a genuine dropout, well past any real
+    # inter-frame gap, must start the settle timer over
+    CI = _interface()
+    _feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T * 0.8)
+    _feed(CI, None, CarControllerParams.CAM_LANEINFO_FRESH_T + 0.5)
+    assert not _feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T * 0.5)
+    assert _feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T * 0.6)
+
   def test_gate_starts_closed_before_any_camera_frame(self):
     # the parser reads all-zero before the first frame, which would otherwise look settled
     CI = _interface()
     for i in range(int(CarControllerParams.FSC_SETTLE_T * 2 / DT_CTRL)):
       CI.update([(int(i * DT_CTRL * 1e9), [])])
     assert not CI.CS.fsc_settled
+
+
+class TestStockFcw:
+  """0x21d (CAM_EMPTY) idles at STATUS 0x7f and leaves it only while the camera actively
+  shows its SCBS collision display (route 0000004d t+213). The payloads are the captured
+  idle and active frames from that route."""
+
+  IDLE = bytes.fromhex("7f3fff00000affff")
+  ACTIVE = bytes.fromhex("52124b00000ad294")
+
+  def _feed_21d(self, CI, payload, i=0):
+    ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(CAM_EMPTY, payload, 2)])])
+    return ret
+
+  def test_display_active_sets_fcw(self):
+    CI = _interface()
+    assert self._feed_21d(CI, self.IDLE).stockFcw is False
+    assert self._feed_21d(CI, self.ACTIVE, 1).stockFcw is True
+    assert self._feed_21d(CI, self.IDLE, 2).stockFcw is False
+
+  def test_no_fcw_before_first_camera_frame(self):
+    # the parser reads STATUS as 0 before the first frame, which is != 0x7f
+    CI = _interface()
+    ret, _ = CI.update([(0, [])])
+    assert ret.stockFcw is False
+
+  def test_ped_warning_bit_sets_fcw(self):
+    # never observed in 1.57M corpus frames, wired for coverage: PED_WARNING is bit 9
+    CI = _interface()
+    self._feed_21d(CI, self.IDLE)
+    ret, _ = CI.update([(int(1 * DT_CTRL * 1e9), [(CAM_PEDESTRIAN, bytes.fromhex("07fa3c0000000000"), 2), (CAM_EMPTY, self.IDLE, 2)])])
+    assert ret.stockFcw is True
+
+
+class TestRadarSessionResponse:
+  """The radar answers session requests within ~10 ms (route 000000fe t+15.0), and the
+  session manager consumes the flag on the same control frame it is set."""
+
+  def test_negative_response_sets_refused(self):
+    CI = _interface()
+    assert not CI.CS.radar_session_refused
+    # 03 7F 10 22: conditionsNotCorrect to a session-control request
+    CI.update([(0, [(RADAR_UDS_RESP, bytes.fromhex("037f102200000000"), 0)])])
+    assert CI.CS.radar_session_refused
+    CI.update([(int(DT_CTRL * 1e9), [])])
+    assert not CI.CS.radar_session_refused, "the flag is same-frame, not latched"
+
+  def test_positive_response_is_not_a_refusal(self):
+    CI = _interface()
+    # the real capture: 06 50 02 with the session parameter record (P2*=5.0 s)
+    CI.update([(0, [(RADAR_UDS_RESP, bytes.fromhex("065002001901f400"), 0)])])
+    assert not CI.CS.radar_session_refused
+
+  def test_response_pending_is_not_a_refusal(self):
+    CI = _interface()
+    # 03 7F 10 78: requestCorrectlyReceived-ResponsePending; UDS clients wait through it
+    CI.update([(0, [(RADAR_UDS_RESP, bytes.fromhex("037f107800000000"), 0)])])
+    assert not CI.CS.radar_session_refused
 
 
 class TestBrakeHold:
@@ -116,8 +200,7 @@ class TestTwoMasterGuard:
     for i in range(start_frame, start_frame + frames):
       msgs = [packer.make_can_msg("PEDALS", 0, {"ACC_OFF": 1})]
       if radar_alive:
-        msgs.append(mazdacan.create_acc_command(packer, 0, i, 0., False, True,
-                                                stopping=False, resume_unlatching=False))
+        msgs.append(mazdacan.create_acc_command(packer, 0, i, 0., long_active=False, acc_available=True))
       ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(m[0], m[1], m[2]) for m in msgs])])
     return ret, start_frame + frames
 

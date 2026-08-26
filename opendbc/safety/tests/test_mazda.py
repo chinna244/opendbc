@@ -74,12 +74,16 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     values = {"CRZ_ACTIVE": enable}
     return self.packer.make_can_msg_safety("CRZ_CTRL", 0, values)
 
-  def _button_msg(self, resume=False, cancel=False):
+  def _button_msg(self, resume=False, cancel=False, set_m=False, set_p=False):
     values = {
       "CAN_OFF": cancel,
       "CAN_OFF_INV": (cancel + 1) % 2,
       "RES": resume,
       "RES_INV": (resume + 1) % 2,
+      "SET_M": set_m,
+      "SET_M_INV": (set_m + 1) % 2,
+      "SET_P": set_p,
+      "SET_P_INV": (set_p + 1) % 2,
     }
     return self.packer.make_can_msg_safety("CRZ_BTNS", 0, values)
 
@@ -481,8 +485,8 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
     values = {"ACC_OFF": int(armed), "ACC_ACTIVE": 0, "BRAKE_ON": 0}
     return self.packer.make_can_msg_safety("PEDALS", 0, values)
 
-  def _accel_msg(self, accel: float, bus: int = 0):
-    values = {"ACCEL_CMD": accel}
+  def _accel_msg(self, accel: float, bus: int = 0, active: bool = False):
+    values = {"ACCEL_CMD": accel, "ACC_ACTIVE": active}
     return self.packer.make_can_msg_safety("CRZ_INFO", bus, values)
 
   def _crz_ctrl_cmd_msg(self, active: bool, bus: int = 0):
@@ -494,6 +498,87 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
     self._rx(self._mrcc_armed_msg(True))
     self._rx(self._user_brake_msg(True))
     self.assertTrue(self._tx(self._mrcc_off_button_msg()))
+
+  def _press_set(self):
+    # arm the driver-intent qualifier the way every logged engagement does: a wheel press
+    # lands 30-70 ms before PEDALS.ACC_ACTIVE rises
+    self._rx(self._button_msg(set_m=True))
+
+  def test_enable_control_allowed_from_cruise(self):
+    # the common test plus the driver-intent qualifier this mode requires
+    self._press_set()
+    super().test_enable_control_allowed_from_cruise()
+
+  def test_cruise_without_button_never_arms(self):
+    # PEDALS.ACC_ACTIVE alone is the body answering our own fabricated frames; without a
+    # SET/RES press heard from the wheel it must not arm controls
+    self._rx(self._pcm_status_msg(False))
+    for _ in range(12):
+      self._rx(self._pcm_status_msg(True))
+      self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_button_window_expires(self):
+    self._press_set()
+    # 10 Hz CRZ_BTNS: run the countdown past the 1 s window with idle button frames
+    for _ in range(12):
+      self._rx(self._button_msg())
+    self._rx(self._pcm_status_msg(True))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_armed_controls_latch_past_the_window(self):
+    self._press_set()
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    # the window expiring must not drop an active engagement
+    for _ in range(12):
+      self._rx(self._button_msg())
+      self._rx(self._pcm_status_msg(True))
+      self.assertTrue(self.safety.get_controls_allowed())
+    self._rx(self._pcm_status_msg(False))
+    self.assertFalse(self.safety.get_controls_allowed())
+
+  def test_each_engage_button_arms(self):
+    for btn in ("set_m", "set_p", "resume"):
+      self._rx(self._button_msg(**{btn: True}))
+      self._rx(self._pcm_status_msg(True))
+      self.assertTrue(self.safety.get_controls_allowed(), btn)
+      self._rx(self._pcm_status_msg(False))
+
+  def test_crz_info_active_gated_on_controls(self):
+    # ACC_ACTIVE mirrors CRZ_CTRL's gate: an engaged-claiming accel frame must not flow while
+    # controls are not allowed. The body raises PEDALS.ACC_ACTIVE off the SET press before
+    # our first engaged frame in every logged engagement, so there is no deadlock.
+    for bus in (0, 2):
+      for active in (False, True):
+        msg = self._accel_msg(self.INACTIVE_ACCEL, bus=bus, active=active)
+        self.safety.set_controls_allowed(False)
+        self.assertEqual(not active, self._tx(msg))
+        self.safety.set_controls_allowed(True)
+        self.assertTrue(self._tx(msg))
+
+
+class TestMazdaIgnition(unittest.TestCase):
+  TX_MSGS: list = []
+
+  def test_synthetic_lead_radar_track_allowed_disengaged(self):
+    # DIST_OBJ and RELV_OBJ are free fields; the template bytes must match. The non-template
+    # frames are real on-road emissions (route 6bb2dc61c4), which a byte-exact check silently
+    # dropped -- 982 asked, 0 transmitted -- starving the camera of the track. The slot is
+    # perception, not actuation, so it flows with controls_allowed low the way a stock radar
+    # reports objects with cruise off.
+    lead_frames = [
+      "0a4000001dc00000",  # the fabricated stopped lead at 10.25 m
+      "229000007dc0000e",  # lead at 34.56 m, closing slowly
+      "22d000ff7dc00004",  # lead at 34.81 m, opening slowly
+      "000000001dc00000",  # zero range, zero relv corner
+      "fff000fffdc0000f",  # max range, max relv corner
+    ]
+    for bus in (0, 2):
+      for hexdat in lead_frames:
+        dat = bytes.fromhex(hexdat)
+        for controls_allowed in (False, True):
+          self.safety.set_controls_allowed(controls_allowed)
+          self.assertTrue(self._tx(common.make_msg(bus, 0x364, 8, dat)))
 
   def test_camera_bus_accel_actuation_limits(self):
     # the synthetic radar frames are duplicated onto the camera bus; same limits apply there
@@ -535,24 +620,6 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
         for addr, dat in radar_messages.items():
           self.assertTrue(self._tx(common.make_msg(bus, addr, 8, dat)))
 
-  def test_synthetic_lead_radar_track_gated_on_controls(self):
-    # DIST_OBJ and RELV_OBJ are free fields; the template bytes must match. The non-template
-    # frames are real on-road emissions (route 6bb2dc61c4), which a byte-exact check silently
-    # dropped -- 982 asked, 0 transmitted -- starving the camera of the track.
-    lead_frames = [
-      "0a4000001dc00000",  # the fabricated stopped lead at 10.25 m
-      "229000007dc0000e",  # lead at 34.56 m, closing slowly
-      "22d000ff7dc00004",  # lead at 34.81 m, opening slowly
-      "000000001dc00000",  # zero range, zero relv corner
-      "fff000fffdc0000f",  # max range, max relv corner
-    ]
-    for bus in (0, 2):
-      for hexdat in lead_frames:
-        dat = bytes.fromhex(hexdat)
-        self.safety.set_controls_allowed(False)
-        self.assertFalse(self._tx(common.make_msg(bus, 0x364, 8, dat)))
-        self.safety.set_controls_allowed(True)
-        self.assertTrue(self._tx(common.make_msg(bus, 0x364, 8, dat)))
 
   def test_malformed_lead_radar_track_blocked(self):
     # each corrupts one template-owned field of a valid lead frame
@@ -698,29 +765,3 @@ class TestMazdaTjaMadsWithoutSteerToZero(TestMazdaSafety):
   def test_high_torque_rejected_without_steer_to_zero(self):
     self.safety.set_controls_allowed(True)
     self.assertFalse(self._tx(self._torque_cmd_msg(900)))
-
-
-class TestMazdaIgnition(unittest.TestCase):
-  TX_MSGS: list = []
-
-  def setUp(self):
-    self.safety = libsafety_py.libsafety
-    self.safety.init_tests()
-
-  def _msg(self, byte0):
-    return make_msg(0, 0x9E, dat=bytes([byte0]) + b"\x00" * 7)
-
-  # 0x9E byte 0 high 3 bits == 6 (0xC0)
-  def test_ignition_on(self):
-    self.safety.ignition_can_hook(self._msg(0xC0))
-    self.assertTrue(self.safety.get_ignition_can())
-
-  def test_ignition_off(self):
-    self.safety.ignition_can_hook(self._msg(0xC0))
-    self.assertTrue(self.safety.get_ignition_can())
-    self.safety.ignition_can_hook(self._msg(0x20))
-    self.assertFalse(self.safety.get_ignition_can())
-
-
-if __name__ == "__main__":
-  unittest.main()

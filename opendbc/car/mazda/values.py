@@ -30,11 +30,21 @@ class CarControllerParams:
   # Radar session timing, seconds. The FSC's radar-presence check faulted when the radar
   # went quiet 1.9 s after the camera's boot settle and passed from 5.8 s
   # (docs/mazda-alpha-long-setup-teardown.md), hence the 10 s settle requirement.
-  FSC_SETTLE_T = 10.0         # observed-settled time before the teardown may start
-  STOCK_RADAR_ALIVE_T = 0.05  # stock CRZ_INFO runs at 50 Hz; silent this long = torn down
-  STOCK_RADAR_GUARD_T = 1.0   # two-master guard: block engagement until silent this long
+  FSC_SETTLE_T = 10.0          # observed-settled time before the teardown may start
+  STOCK_RADAR_ALIVE_T = 0.05   # stock CRZ_INFO runs at 50 Hz; silent this long = torn down
+  STOCK_RADAR_GUARD_T = 1.0    # two-master guard: block engagement until silent this long
+  RADAR_SESSION_LIMIT_T = 10.0  # per-episode UDS budget: a silent radar gives up here
+  # CAM_LANEINFO is a ~2 Hz message (longest period measured 0.563 s across 26+ segments on
+  # two cars), so freshness has to be judged against that cadence: a window shorter than one
+  # period reads every inter-frame gap as a dropout, zeroes the settle timer each time, and
+  # the teardown gate never opens. The window keeps 2.7x margin over the longest observed
+  # period and still catches a genuine camera dropout.
+  CAM_LANEINFO_PERIOD_T = 0.563
+  CAM_LANEINFO_FRESH_T = 1.5
 
-  RESUME_UNLATCH_T = 0.20      # RESUME_UNLATCHING pulse width at the release
+  # RESUME_UNLATCHING pulse width at the release; stock latched releases pulse 0.22-0.38 s,
+  # this sits mid-distribution
+  RESUME_UNLATCH_T = 0.26
 
   CANCEL_CONTEXT_T = 0.5       # a wheel CANCEL keeps availability drops landing this long after release
 
@@ -42,9 +52,20 @@ class CarControllerParams:
   # check, float("nan") liveness leaves stale zeros looking healthy when 0x243 disappears.
   CAM_LKAS_TIMEOUT_T = 0.2
 
-  # CAM_LANEINFO is normally 2 Hz. The experimental white-icon gate requires a recent
-  # camera-bus source frame and stops modifying after three expected frames are missed.
+  # CAM_LANEINFO is a ~2 Hz message (longest period measured 0.563 s across 26+ segments on
+  # CX-5 2022). Freshness for FSC settle / invalidLkasSetting, and the experimental white-icon
+  # gate, both stop trusting a source after three expected frames are missed.
+  CAM_LANEINFO_PERIOD_T = 0.563
+  CAM_LANEINFO_FRESH_T = 1.5
   CAM_LANEINFO_TIMEOUT_T = 1.5
+
+  # The plan flapping across zero at a held standstill (a lead inches forward and stops) used
+  # to fire a fresh RESUME_UNLATCHING pulse per flap and re-assert the stop bits mid-pulse, a
+  # combination stock never emits (stock pulses exactly once per release, stop bits already
+  # dropped). The plan must ask to move this long before the hold releases; stock's releases
+  # lag the lead's departure by at least this much (all 23 latched releases show the lead
+  # already opening at >= +0.31 m/s at the pulse, ~0.2 s into a typical drive-off).
+  RELEASE_DEBOUNCE_T = 0.2
 
   # A marginal vision lead flickers leadVisible faster than the camera can be shown a track
   # appearing and vanishing (route 6bb2dc61c4 t+400: 6 toggles in 1.4 s on a 120 m lead), so the
