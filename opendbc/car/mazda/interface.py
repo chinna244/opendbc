@@ -11,11 +11,18 @@ CAM_LANEINFO_ADDR = 0x440
 CAM_LANEINFO_RX_BUS = 2
 
 
+def normalize_can_packets(can_packets):
+  """card passes a list of (t, frames) batches; test_models passes one batch tuple."""
+  if isinstance(can_packets, tuple) and len(can_packets) == 2 and isinstance(can_packets[0], int):
+    return [can_packets]
+  return list(can_packets)
+
+
 def latch_cam_laneinfo_raw(can_packets, prev: bytes | None) -> tuple[bytes | None, bool]:
   """Return the last valid FSC CAM_LANEINFO payload and whether one arrived this cycle."""
   raw = prev
   received = False
-  for _t, frames in can_packets:
+  for _t, frames in normalize_can_packets(can_packets):
     for msg in frames:
       addr, dat, src = (msg.address, msg.dat, msg.src) if hasattr(msg, "address") else msg
       if addr == CAM_LANEINFO_ADDR and src == CAM_LANEINFO_RX_BUS and len(dat) == 8:
@@ -30,7 +37,7 @@ class CarInterface(CarInterfaceBase):
   RadarInterface = RadarInterface
 
   def update(self, can_packets):
-    can_packets = list(can_packets)
+    can_packets = normalize_can_packets(can_packets)
     raw, received = latch_cam_laneinfo_raw(can_packets, self.CS.cam_laneinfo_raw)
     self.CS.cam_laneinfo_raw = raw
     self.CS.cam_laneinfo_stale_frames = 0 if received else self.CS.cam_laneinfo_stale_frames + 1
