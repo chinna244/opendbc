@@ -199,6 +199,17 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool)
   return packer.make_can_msg("CAM_LANEINFO", 0, values)
 
 
+MADS_HUD_OFF = bytes.fromhex("4201000000001040")
+MADS_HUD_WHITE = bytes.fromhex("4201000020001040")
+
+
+def apply_mads_white_hud(fsc_dat: bytes | None, current_dat: bytes, enabled: bool) -> bytes:
+  """Change only the captured settled OFF display frame; preserve every other HUD state."""
+  if enabled and fsc_dat == MADS_HUD_OFF and current_dat == MADS_HUD_OFF:
+    return MADS_HUD_WHITE
+  return current_dat
+
+
 def create_button_cmd(packer, CP, counter, button, CS=None):
 
   can = int(button == Buttons.CANCEL)

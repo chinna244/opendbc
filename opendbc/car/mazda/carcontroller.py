@@ -1,7 +1,7 @@
 import numpy as np
 
 from opendbc.can import CANPacker
-from opendbc.car import Bus, make_tester_present_msg, rate_limit, structs, uds
+from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, rate_limit, structs, uds
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.mazda import mazdacan
@@ -10,6 +10,7 @@ from opendbc.car.mazda.longitudinal import (RADAR_ADDR, RadarSessionManager, Rad
 from opendbc.car.mazda.values import CarControllerParams, Buttons, has_tja_mads
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
+from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -25,6 +26,10 @@ TJA_MRCC_MAX_TX_FRAMES = 3
 # state. Route 56's real TJA cleanup stayed raw-off for seconds, so this remains well
 # inside the interval before another deliberate button press.
 TJA_MRCC_RAW_OFF_CONFIRM_FRAMES = 5
+# WHITE uses CAM_LANEINFO.TJA=2, which the Mazda body/MRCC also consumes as
+# functional TJA state. Only expose it after cruise has been completely off and
+# quiet for 0.5 s; any interaction withdraws it immediately.
+MADS_WHITE_HUD_OFF_CONFIRM_FRAMES = int(0.5 / DT_CTRL)
 
 
 class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterface):
@@ -51,6 +56,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.tja_mrcc_tx_frames = 0
     self.tja_mrcc_armed_prev: bool | None = None
     self.tja_mrcc_raw_off_frames = 0
+    self.mads_white_hud_off_frames = 0
+    self.mads_white_hud_on_bus = False
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -258,13 +265,70 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     if self.CP.openpilotLongitudinalControl:
       can_sends.extend(self.update_longitudinal(CC, CC_SP, CS))
 
-    # send HUD alerts
-    if self.frame % 50 == 0:
+    # CAM_LANEINFO.TJA=2 draws the WHITE wheel, but it is not display-only: the
+    # Mazda body/MRCC consumes it too. Fail closed around every cruise/TJA
+    # interaction, require raw and filtered MRCC to remain off, and wait for the
+    # existing cleanup transaction to finish before advertising WHITE.
+    cruise_state = getattr(CS.out, "cruiseState", None)
+    mrcc_off = (
+      not bool(getattr(CS, "mrcc_armed_raw", True)) and
+      not bool(getattr(CS, "cruise_available", True)) and
+      not bool(getattr(CS, "cruise_enabled", False)) and
+      cruise_state is not None and
+      not bool(getattr(cruise_state, "available", True)) and
+      not bool(getattr(cruise_state, "enabled", True))
+    )
+    hud_button_activity = (
+      bool(getattr(CS, "tja_button", 0)) or
+      bool(getattr(CS, "mrcc_button", 0)) or
+      bool(getattr(CS, "main_button", 0)) or
+      bool(getattr(CS, "mode_x", 0)) or
+      bool(getattr(CS, "mode_y", 0)) or
+      bool(getattr(CS, "cancel_button", 0)) or
+      bool(getattr(CS, "resume_button", 0)) or
+      bool(getattr(CS, "accel_button", 0)) or
+      bool(getattr(CS, "decel_button", 0)) or
+      bool(getattr(CS, "distance_button", 0)) or
+      CC.cruiseControl.cancel or CC.cruiseControl.resume
+    )
+    white_hud_base_allowed = (
+      has_tja_mads(self.CP) and
+      bool(self.CP_SP.flags & MazdaFlagsSP.EXPERIMENTAL_MADS_WHITE_HUD) and
+      CC_SP.mads.active and
+      getattr(CS, "cam_laneinfo_live", False) and
+      getattr(CS, "cam_laneinfo_raw", None) == mazdacan.MADS_HUD_OFF and
+      CC.hudControl.visualAlert == VisualAlert.none and
+      mrcc_off and
+      not self.tja_mrcc_unarm_pending and
+      not tja_mrcc_cleanup_tx and
+      not hud_button_activity
+    )
+    if white_hud_base_allowed:
+      self.mads_white_hud_off_frames = min(
+        self.mads_white_hud_off_frames + 1,
+        MADS_WHITE_HUD_OFF_CONFIRM_FRAMES,
+      )
+    else:
+      self.mads_white_hud_off_frames = 0
+
+    white_hud = (
+      white_hud_base_allowed and
+      self.mads_white_hud_off_frames >= MADS_WHITE_HUD_OFF_CONFIRM_FRAMES
+    )
+    withdraw_white_now = self.mads_white_hud_on_bus and not white_hud
+
+    # Preserve the normal 2 Hz cadence. The sole exception is an immediate OEM
+    # frame when WHITE becomes unsafe, so the next repeated physical button frame
+    # is not evaluated against a retained TJA=2 state.
+    if self.frame % 50 == 0 or withdraw_white_now:
       ldw = CC.hudControl.visualAlert == VisualAlert.ldw
       steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
       # TODO: find a way to silence audible warnings so we can add more hud alerts
       steer_required = steer_required and CS.lkas_allowed_speed
-      can_sends.append(mazdacan.create_alert_command(self.packer, CS.cam_laneinfo, ldw, steer_required))
+      alert = mazdacan.create_alert_command(self.packer, CS.cam_laneinfo, ldw, steer_required)
+      alert = (alert[0], mazdacan.apply_mads_white_hud(getattr(CS, "cam_laneinfo_raw", None), alert[1], white_hud), alert[2])
+      can_sends.append(alert)
+      self.mads_white_hud_on_bus = alert[1] == mazdacan.MADS_HUD_WHITE
 
     # send steering command
     can_sends.append(mazdacan.create_steering_control(self.packer, self.CP,

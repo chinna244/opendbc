@@ -12,6 +12,7 @@ STOCK_RADAR_ALIVE_FRAMES = int(CarControllerParams.STOCK_RADAR_ALIVE_T / DT_CTRL
 STOCK_RADAR_GUARD_FRAMES = int(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CTRL)
 CANCEL_CONTEXT_FRAMES = int(CarControllerParams.CANCEL_CONTEXT_T / DT_CTRL)
 CAM_LKAS_STALE_FRAMES = int(CarControllerParams.CAM_LKAS_TIMEOUT_T / DT_CTRL)
+CAM_LANEINFO_STALE_FRAMES = int(CarControllerParams.CAM_LANEINFO_TIMEOUT_T / DT_CTRL)
 
 
 class CarState(CarStateBase, CarStateExt):
@@ -49,6 +50,8 @@ class CarState(CarStateBase, CarStateExt):
     self.radar_was_silenced = False
     self.cancel_context_frames = 0
     self.cam_laneinfo_seen = False
+    self.cam_laneinfo_raw: bytes | None = None
+    self.cam_laneinfo_stale_frames = CAM_LANEINFO_STALE_FRAMES + 1
     self.fsc_settled_frames = 0
     self.cam_lkas_seen = False
     self.cam_lkas_stale_frames = CAM_LKAS_STALE_FRAMES + 1
@@ -58,6 +61,10 @@ class CarState(CarStateBase, CarStateExt):
   @property
   def cam_lkas_live(self) -> bool:
     return self.cam_lkas_seen and self.cam_lkas_stale_frames <= CAM_LKAS_STALE_FRAMES
+
+  @property
+  def cam_laneinfo_live(self) -> bool:
+    return self.cam_laneinfo_raw is not None and self.cam_laneinfo_stale_frames <= CAM_LANEINFO_STALE_FRAMES
 
   @property
   def fsc_settled(self) -> bool:
