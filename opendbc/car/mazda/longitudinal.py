@@ -1,6 +1,7 @@
 from enum import StrEnum
 
 from opendbc.car import DT_CTRL, uds
+from opendbc.car.carlog import carlog
 from opendbc.car.can_definitions import CanData
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.values import CarControllerParams
@@ -88,6 +89,7 @@ class RadarSessionManager:
           # a negative UDS response is a definitive refusal, the silence budget covers a
           # radar that answers nothing at all; either way give up for the drive and stock
           # keeps the bus (disable_ecu reads the same response to declare its outcome)
+          carlog.error(f"radar silencing failed ({'refused' if session_refused else 'no response'}); staying stock")
           self.state = RadarSessionState.STOCK
           self.silencing_failed = True
       elif self.state == RadarSessionState.SILENCED and stock_radar_alive:
