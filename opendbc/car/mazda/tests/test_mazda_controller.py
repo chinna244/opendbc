@@ -102,15 +102,19 @@ class TestMazdaLongitudinalMessages:
     for counter in range(16):
       checksum = (0x5d - counter) & 0xff
       expected = f"01ffe3ffc000{counter:02x}{checksum:02x}"
-      dat = mazdacan.create_acc_command(packer, 0, counter, 0.0, False, False, False, False)[1]
+      dat = mazdacan.create_acc_command(packer, 0, counter, 0.0, False, False, False, False, False)[1]
       assert dat.hex() == expected
 
-  def test_crz_info_available_matches_stock(self, packer):
-    for counter in range(16):
-      checksum = (0x99 - counter) & 0xff
-      expected = f"01ffe2000480{counter:02x}{checksum:02x}"
-      dat = mazdacan.create_acc_command(packer, 0, counter, 0.0, False, True, False, False)[1]
-      assert dat.hex() == expected
+  def test_crz_info_armed_idle_matches_stock(self, packer):
+    # armed-idle pegs the command like standby (47,752/47,752 stock armed-idle frames carry
+    # raw 8190) and follows the brake on ACC_SET_ALLOWED; the zero-command armed-idle this
+    # used to emit exists nowhere in the stock corpus
+    for brake_pressed, byte4, base in ((False, 0xc4, 0xd9), (True, 0xc0, 0xdd)):
+      for counter in range(16):
+        checksum = (base - counter) & 0xff
+        expected = f"01ffe3ff{byte4:02x}80{counter:02x}{checksum:02x}"
+        dat = mazdacan.create_acc_command(packer, 0, counter, 0.0, False, True, brake_pressed, False, False)[1]
+        assert dat.hex() == expected
 
   @pytest.mark.parametrize(("accel", "stopping", "unlatching", "counter", "expected"), [
     (0.0, False, False, 0, "01ffe20006800097"),     # engaged, zero command
@@ -121,7 +125,7 @@ class TestMazdaLongitudinalMessages:
     (0.0, False, True, 11, "01ffe20006804b4c"),     # resume unlatch pulse
   ])
   def test_crz_info_engaged_golden_bytes(self, packer, accel, stopping, unlatching, counter, expected):
-    dat = mazdacan.create_acc_command(packer, 0, counter, accel, True, False, stopping, unlatching)[1]
+    dat = mazdacan.create_acc_command(packer, 0, counter, accel, True, False, False, stopping, unlatching)[1]
     assert dat.hex() == expected
 
   def test_crz_info_accel_encoding_and_checksum(self, packer):
@@ -129,7 +133,7 @@ class TestMazdaLongitudinalMessages:
     # checksum over the whole command window, stop bits set or not
     for raw in range(-3500, 2001, 137):
       for stopping in (False, True):
-        dat = mazdacan.create_acc_command(packer, 0, raw % 16, raw / 1000.0, True, False, stopping, False)[1]
+        dat = mazdacan.create_acc_command(packer, 0, raw % 16, raw / 1000.0, True, False, False, stopping, False)[1]
         assert decode_accel_cmd_raw(dat) == raw
         assert dat[7] == crz_info_reference_checksum(dat)
         assert bool(dat[5] & 0x04) == stopping
@@ -460,11 +464,11 @@ class TestAdvertisedLead:
 def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas=False,
              resume=False, lead_visible=True, gap=2, available=True,
              stock_radar_alive=False, fsc_settled=True, handback=False, cruise_engaged=False,
-             enabled=None, lead_d_rel=12.0, lead_v_rel=0.0, brake_hold=False):
+             enabled=None, lead_d_rel=12.0, lead_v_rel=0.0, brake_hold=False, brake_pressed=False):
   # openpilot is enabled whenever it is longitudinally active; a gas override is the case
   # where it stays enabled with longActive low
   enabled = long_active if enabled is None else enabled
-  out = SimpleNamespace(standstill=standstill, gasPressed=gas,
+  out = SimpleNamespace(standstill=standstill, gasPressed=gas, brakePressed=brake_pressed,
                         cruiseState=SimpleNamespace(available=available, enabled=cruise_engaged))
   actuators = SimpleNamespace(accel=accel, longControlState=long_state)
   cruise = SimpleNamespace(resume=resume, cancel=False)
@@ -884,7 +888,7 @@ class TestLongitudinalIntegration:
     cc.frame = 0
     sends = _step(cc, long_active=False, enabled=False, long_state=off, gas=True, available=True)
     info = next(dat for a, dat, b in sends if a == 0x21b and b == 0)
-    assert info.hex().startswith("01ffe2000480")  # armed-but-idle pattern, zero command
+    assert info.hex().startswith("01ffe3ffc480")  # armed-but-idle pattern, command pegged
 
   def test_disengaged_emits_stock_patterns(self, cc):
     off = structs.CarControl.Actuators.LongControlState.off
@@ -893,11 +897,16 @@ class TestLongitudinalIntegration:
     sends = _step(cc, long_active=False, long_state=off, available=False)
     info = next(dat for a, dat, b in sends if a == 0x21b and b == 0)
     assert info.hex().startswith("01ffe3ffc000")
-    # MRCC armed but not engaged: stock advertises ACC_SET_ALLOWED with a zero command
+    # MRCC armed but not engaged: the command stays pegged and ACC_SET_ALLOWED follows the
+    # brake, exactly the two patterns stock alternates between at an armed idle
     cc.frame = 0
     sends = _step(cc, long_active=False, long_state=off, available=True)
     info = next(dat for a, dat, b in sends if a == 0x21b and b == 0)
-    assert info.hex().startswith("01ffe2000480")
+    assert info.hex().startswith("01ffe3ffc480")
+    cc.frame = 0
+    sends = _step(cc, long_active=False, long_state=off, available=True, brake_pressed=True)
+    info = next(dat for a, dat, b in sends if a == 0x21b and b == 0)
+    assert info.hex().startswith("01ffe3ffc080")
 
 
 SESSION_PROG_DAT = bytes([0x02, 0x10, 0x02, 0, 0, 0, 0, 0])

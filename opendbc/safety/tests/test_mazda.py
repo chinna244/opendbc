@@ -165,18 +165,28 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
         self.assertEqual(should_tx, self._tx(self._accel_msg(accel, bus=2)))
 
   def test_stock_crz_info_standby_allowed(self):
-    # stock standby pegs the command field high; it must pass byte-exactly, checksum included,
-    # instead of being decoded as a huge accel command
+    # every not-controlling stock pattern pegs the command field high: main-off standby and
+    # both armed-idle variants (ACC_SET_ALLOWED follows the brake). All must pass byte-exactly,
+    # checksum included, instead of being decoded as a huge accel command.
+    def chk(d4, d5, counter):
+      return (0xff - ((0x01 + 0xff + 0xe3 + 0xff + d4 + d5 + counter) & 0xff)) & 0xff
+
     for controls_allowed in (False, True):
       self.safety.set_controls_allowed(controls_allowed)
       for bus in (0, 2):
-        for counter in range(16):
-          checksum = (0x5d - counter) & 0xff
-          dat = bytes.fromhex(f"01ffe3ffc000{counter:02x}{checksum:02x}")
-          self.assertTrue(self._tx(common.make_msg(bus, 0x21b, 8, dat)))
+        for d4, d5 in ((0xc0, 0x00), (0xc0, 0x80), (0xc4, 0x80)):
+          for counter in range(16):
+            dat = bytes([0x01, 0xff, 0xe3, 0xff, d4, d5, counter, chk(d4, d5, counter)])
+            self.assertTrue(self._tx(common.make_msg(bus, 0x21b, 8, dat)))
 
         bad_checksum = bytes.fromhex("01ffe3ffc0000000")
         self.assertFalse(self._tx(common.make_msg(bus, 0x21b, 8, bad_checksum)))
+        # a pegged frame claiming ACC_ACTIVE must never ride the standby allowance
+        engaged_pegged = bytes([0x01, 0xff, 0xe3, 0xff, 0xc6, 0x80, 0x00, chk(0xc6, 0x80, 0x00)])
+        self.assertFalse(self._tx(common.make_msg(bus, 0x21b, 8, engaged_pegged)))
+        # and pegged with stop bits set is not a stock pattern either
+        stop_pegged = bytes([0x01, 0xff, 0xe3, 0xff, 0xc0, 0x84, 0x00, chk(0xc0, 0x84, 0x00)])
+        self.assertFalse(self._tx(common.make_msg(bus, 0x21b, 8, stop_pegged)))
 
   def test_empty_radar_tracks_allowed(self):
     radar_messages = {

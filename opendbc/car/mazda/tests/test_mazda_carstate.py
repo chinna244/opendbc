@@ -205,7 +205,7 @@ class TestTwoMasterGuard:
     for i in range(start_frame, start_frame + frames):
       msgs = [packer.make_can_msg("PEDALS", 0, {"ACC_OFF": 1})]
       if radar_alive:
-        msgs.append(mazdacan.create_acc_command(packer, 0, i, 0., False, True,
+        msgs.append(mazdacan.create_acc_command(packer, 0, i, 0., False, True, brake_pressed=False,
                                                 stopping=False, resume_unlatching=False))
       ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(m[0], m[1], m[2]) for m in msgs])])
     return ret, start_frame + frames

@@ -29,28 +29,33 @@ def crz_info_checksum(dat: bytes) -> int:
   return (0xFF - ((sum(dat[:7]) - (dat[5] & 0x04)) & 0xFF)) & 0xFF
 
 
-def create_acc_command(packer, bus, counter, accel, long_active, acc_available, stopping, resume_unlatching):
-  # CRZ_INFO stands in for the disabled radar's accel command frame. While MRCC is armed
-  # but not engaged, stock advertises ACC_SET_ALLOWED with a zero command so the dash
-  # accepts SET; with the main switch off it broadcasts a static standby pattern with the
-  # command field pegged high.
+def create_acc_command(packer, bus, counter, accel, long_active, acc_available, brake_pressed, stopping, resume_unlatching):
+  # CRZ_INFO stands in for the disabled radar's accel command frame. Only an engaged frame
+  # carries a live command: armed-idle pegs the command field exactly like the main-off
+  # standby (47,752 of 47,752 stock armed-idle frames carry raw 8190), adds bit 47, and
+  # advertises ACC_SET_ALLOWED whenever the brake is up so the dash accepts SET -- the brake
+  # is stock's one observed gate on it (99.9% of armed-idle frames follow BRAKE_ON).
   values = {
     "STATUS": 1,
     "STATIC_1": 0x7ff,
     "CTR1": counter % 16,
+    "ACCEL_CMD": 4.094,  # the pegged not-controlling pattern, raw 8190
   }
-  if long_active or acc_available:
+  if long_active:
     values.update({
       "ACCEL_CMD": accel,
-      "ACC_ACTIVE": int(long_active),
+      "ACC_ACTIVE": 1,
       "ACC_SET_ALLOWED": 1,
       "NEW_SIGNAL_7": 1,
       "STOPPING": int(stopping),
       "STOPPING_2": int(stopping),
       "RESUME_UNLATCHING": int(resume_unlatching),
     })
-  else:
-    values["ACCEL_CMD"] = 4.094  # standby pattern, raw 8190
+  elif acc_available:
+    values.update({
+      "ACC_SET_ALLOWED": int(not brake_pressed),
+      "NEW_SIGNAL_7": 1,
+    })
 
   dat = packer.make_can_msg("CRZ_INFO", bus, values)[1]
   values["CHKSUM"] = crz_info_checksum(dat)

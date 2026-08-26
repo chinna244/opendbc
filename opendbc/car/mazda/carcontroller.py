@@ -194,6 +194,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       for bus in LONG_BUSES:
         can_sends.append(mazdacan.create_acc_command(self.packer, bus, self.long_counter, accel,
                                                      long_engaged, acc_available,
+                                                     brake_pressed=CS.out.brakePressed,
                                                      stopping=sm.stop_bits, resume_unlatching=sm.resume_unlatching))
         can_sends.append(mazdacan.create_crz_ctrl(self.packer, bus, long_engaged, acc_available, gap,
                                                   self.lead_adv.has_lead, self.lead_adv.ctrl_phase,
