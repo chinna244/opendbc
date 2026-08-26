@@ -75,6 +75,13 @@ class CarControllerParams:
   # CP.stopAccel; this is only the relaxed value we send once the car has the brakes.
   ACCEL_HOLD_LATCHED = -0.001  # m/s2
 
+  # ACCEL_CMD ceiling while a body-latched release's RESUME_UNLATCHING pulse plays: stock's
+  # latched releases peak at +0.24-0.25 m/s2 (raw +182/+195) in the pulse tail. Non-latched
+  # pulses are capped at zero instead -- stock's are still <= -0.27 m/s2 when the pulse ends,
+  # and both observed SCBS latches (routes 000000fe, 00000100) fired at a zero-cross inside a
+  # non-latched pulse.
+  ACCEL_RESUME_PULSE_MAX = 0.25  # m/s2, latched releases only
+
   # Command slew limits, m/s3, on the plan-following command only. Asymmetric on purpose: the
   # windup limit is what keeps the command from dumping the brake in one frame (the driver-felt
   # problem), while a tight winddown limit would delay real braking for no measured benefit.

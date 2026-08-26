@@ -2,7 +2,6 @@
 """Tests for the Mazda CX-5 2022+ EPS steering parameters (gated on the EPS, not the model)
 and the longitudinal message builders and standstill hold."""
 
-from collections import namedtuple
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,15 +9,13 @@ import pytest
 
 from opendbc.can import CANPacker, CANParser
 from opendbc.car import Bus, DT_CTRL, structs
-from opendbc.car.mazda import longitudinal, mazdacan
+from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.carcontroller import (CarController, TJA_MRCC_FIRST_TX_DELAY_NANOS,
                                              TJA_MRCC_RAW_OFF_CONFIRM_FRAMES, TJA_MRCC_MAX_TX_FRAMES,
                                              TJA_MRCC_RELEASE_WAIT_FRAMES)
-from opendbc.car.mazda.longitudinal import (ESCORT_DROP_DIST, ESCORT_LEAD_IN_FRAMES, ESCORT_RELV_MAX,
-                                            LEAD_DEBOUNCE_FRAMES, RADAR_SESSION_LIMIT_FRAMES, RELEASE_DEBOUNCE_FRAMES,
+from opendbc.car.mazda.longitudinal import (LEAD_DEBOUNCE_FRAMES, RADAR_SESSION_LIMIT_FRAMES, RELEASE_DEBOUNCE_FRAMES,
                                             RESUME_UNLATCH_FRAMES,
-                                            AdvertisedLead, RadarSessionManager, RadarSessionState, ResumeEscort,
-                                            StandstillHold)
+                                            AdvertisedLead, RadarSessionManager, RadarSessionState, StandstillHold)
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams, MazdaSafetyFlags
 
@@ -208,10 +205,8 @@ class TestStandstillHold:
 
   @staticmethod
   def run(sm, frames, **kwargs):
-    # a lead is present by default so releases are not escort-deferred; the no-lead release
-    # path has its own tests
     defaults = dict(long_engaged=True, stopping=False, standstill=False, plan_accel=-1.024,
-                    brake_hold=False, gas_pressed=False, real_lead=(5.0, 0.))
+                    brake_hold=False, gas_pressed=False)
     defaults.update(kwargs)
     for _ in range(frames):
       sm.update(**defaults)
@@ -308,16 +303,6 @@ class TestStandstillHold:
     self.run(sm, 1, stopping=False, plan_accel=0.3)
     assert not sm.holding
 
-  def test_no_lead_release_waits_out_the_escort_lead_in(self, sm, monkeypatch):
-    monkeypatch.setattr(longitudinal, "ESCORT_ENABLED", True)
-    self.run(sm, 1, stopping=True, real_lead=None)
-    self.run(sm, 100, stopping=True, standstill=True, real_lead=None)
-    # the plan asks to move but the ghost has not visibly pulled away yet: no release, no pulse
-    self.run(sm, RELEASE_DEBOUNCE_FRAMES + ESCORT_LEAD_IN_FRAMES - 1, standstill=True, plan_accel=0.3, real_lead=None)
-    assert sm.holding and not sm.resume_unlatching and sm.escort.lead is not None
-    self.run(sm, 1, standstill=True, plan_accel=0.3, real_lead=None)
-    assert not sm.holding and sm.resume_unlatching
-
   def test_driver_gas_releases_the_hold_in_protocol(self, sm):
     # the driver's pedal outranks the hold, the way Toyota's PCM lets the pedal outrank its
     # standstill request. Holding the stop bits against the throttle until the car moved put
@@ -334,20 +319,6 @@ class TestStandstillHold:
     self.run(sm, 1, stopping=True, standstill=True)
     assert sm.holding
 
-  def test_escort_off_releases_a_no_lead_hold_undeferred(self, sm):
-    # the attribution trial: with the escort off, a no-lead release fires immediately and
-    # pulses with nothing advertised, the exact release route 000000fe faulted on
-    self.run(sm, 1, stopping=True, real_lead=None)
-    self.run(sm, 100, stopping=True, standstill=True, real_lead=None)
-    self.run(sm, RELEASE_DEBOUNCE_FRAMES, standstill=True, plan_accel=0.3, real_lead=None)
-    assert not sm.holding and sm.resume_unlatching and sm.escort.lead is None
-
-  def test_with_lead_release_is_not_deferred(self, sm):
-    self.run(sm, 1, stopping=True)
-    self.run(sm, 100, stopping=True, standstill=True)
-    self.run(sm, RELEASE_DEBOUNCE_FRAMES, standstill=True, plan_accel=0.3)
-    assert not sm.holding and sm.resume_unlatching and sm.escort.lead is None
-
   def test_plan_flap_below_the_debounce_never_releases(self, sm):
     # the SCBS-axis contamination shape: at a held standstill the lead inches forward and
     # stops, the plan flapping across zero. Sub-debounce flaps must not release at all, and
@@ -357,7 +328,7 @@ class TestStandstillHold:
     for i in range(600):
       accel = 0.3 if (i // 10) % 2 == 0 else -1.0  # 0.1 s swings, below the 0.2 s debounce
       sm.update(long_engaged=True, stopping=accel < 0, standstill=True, plan_accel=accel,
-                brake_hold=False, gas_pressed=False, real_lead=(5.0, 0.))
+                brake_hold=False, gas_pressed=False)
       assert not (sm.stop_bits and sm.resume_unlatching), "stop bits and pulse on one frame"
       assert not sm.resume_unlatching, "a sub-debounce flap fired a release pulse"
     assert sm.holding
@@ -372,7 +343,7 @@ class TestStandstillHold:
     for i in range(1200):
       accel = 0.3 if (i // 30) % 2 == 0 else -1.0  # 0.3 s swings, above the debounce
       sm.update(long_engaged=True, stopping=accel < 0, standstill=True, plan_accel=accel,
-                brake_hold=False, gas_pressed=False, real_lead=(5.0, 0.))
+                brake_hold=False, gas_pressed=False)
       assert not (sm.stop_bits and sm.resume_unlatching), "stop bits and pulse on one frame"
       pulses += int(sm.resume_unlatching and not prev_unlatch)
       prev_unlatch = sm.resume_unlatching
@@ -392,78 +363,6 @@ class TestStandstillHold:
     remaining = sm.unlatch_frames
     self.run(sm, 1, stopping=True, standstill=True, gas_pressed=True)  # release again mid-pulse
     assert sm.unlatch_frames == remaining - 1, "pulse restarted mid-pulse"
-
-
-class TestResumeEscort:
-  """The departing ghost that a no-lead hold release is advertised through."""
-
-  @pytest.fixture
-  def esc(self):
-    return ResumeEscort()
-
-  @staticmethod
-  def run(esc, frames, **kwargs):
-    defaults = dict(release_wanted=False, standstill=True, real_lead=None)
-    defaults.update(kwargs)
-    for _ in range(frames):
-      esc.update(**defaults)
-    return esc
-
-  def test_a_quiet_hold_is_not_escorted(self, esc):
-    # the hold itself needs no fabrication: route 000000fe latched and held 6 s at
-    # has_lead=0/phase=0 without complaint
-    self.run(esc, 500)
-    assert esc.lead is None and not esc.deferring
-
-  def test_starts_only_on_a_release_request_at_standstill(self, esc):
-    # a stop abort at speed releases with nothing advertised, as before
-    self.run(esc, 1, release_wanted=True, standstill=False)
-    assert esc.lead is None
-    self.run(esc, 1, release_wanted=True)
-    assert esc.lead == (mazdacan.LEAD_TRACK_DIST, 0.) and esc.deferring
-
-  def test_lead_in_defers_the_release_then_lets_go(self, esc):
-    self.run(esc, 1, release_wanted=True)
-    self.run(esc, ESCORT_LEAD_IN_FRAMES - 1, release_wanted=True)
-    assert esc.deferring, "lead-in ended early"
-    self.run(esc, 1, release_wanted=True)
-    assert not esc.deferring and esc.lead is not None
-    # by the time the release may fire the ghost is already visibly pulling away, the state
-    # every stock release shows at its RESUME_UNLATCHING pulse
-    d, v = esc.lead
-    assert d > mazdacan.LEAD_TRACK_DIST and v > 0.
-
-  def test_ghost_recedes_and_drops_once_rolling(self, esc):
-    self.run(esc, 1, release_wanted=True)
-    self.run(esc, int(2.5 / DT_CTRL))
-    d, v = esc.lead
-    assert v == pytest.approx(ESCORT_RELV_MAX)
-    assert mazdacan.LEAD_TRACK_DIST < d < ESCORT_DROP_DIST
-    # once the car is moving the exit completes and the escort ends
-    self.run(esc, int(3.0 / DT_CTRL), standstill=False)
-    assert esc.lead is None
-
-  def test_aborted_resume_ghost_leaves_on_its_own(self, esc):
-    # the resume is abandoned and the car never moves: the ghost keeps driving away and drops
-    # out at far range instead of vanishing 12 m dead ahead of a stationary camera
-    self.run(esc, 1, release_wanted=True)
-    self.run(esc, int(15.0 / DT_CTRL))
-    assert esc.lead is None
-
-  def test_a_real_lead_takes_the_slot_over(self, esc):
-    self.run(esc, 1, release_wanted=True)
-    self.run(esc, 1, real_lead=(42.0, 1.0))
-    assert esc.lead is None and not esc.deferring
-
-  def test_hold_disengage_resets_it(self, monkeypatch):
-    monkeypatch.setattr(longitudinal, "ESCORT_ENABLED", True)
-    sm = StandstillHold()
-    sm.update(True, True, True, -1.024, False, False, real_lead=None)
-    for _ in range(RELEASE_DEBOUNCE_FRAMES):
-      sm.update(True, False, True, 0.3, False, False, real_lead=None)
-    assert sm.escort.lead is not None
-    sm.update(False, False, True, 0.3, False, False, real_lead=None)
-    assert sm.escort.lead is None and not sm.escort.deferring
 
 
 class TestAdvertisedLead:
@@ -775,6 +674,82 @@ class TestLongitudinalIntegration:
             standstill=True, cruise_engaged=True)
     assert cc.accel_last == 0., f"hold not released for the driver's gas: {cc.accel_last}"
 
+  def test_release_command_ramps_from_the_hold_value(self, cc):
+    """Stock never lets ACCEL_CMD climb while STOPPING is asserted: through the release
+    debounce the command stays at the hold value, and the ramp starts only once the stop
+    bits drop, so the zero-cross lands after the pulse like every captured stock release.
+    Pre-ramping toward the plan during the debounce put the zero-cross inside the pulse,
+    which the camera latched as an SCBS fault (route 00000100 t+353)."""
+    long = structs.CarControl.Actuators.LongControlState
+    lead = dict(lead_visible=True, lead_d_rel=4.0, lead_v_rel=0.0)
+    for _ in range(int(0.5 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.5, standstill=False, **lead)
+    for _ in range(int(3.0 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.3, standstill=True, **lead)
+    assert cc.accel_last == pytest.approx(-1.3)
+
+    rows = []
+    for _ in range(int(1.5 / 0.01)):
+      sends = _step(cc, long_state=long.pid, accel=1.0, standstill=True, **lead)
+      dat = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
+      if dat is not None:
+        rows.append((decode_accel_cmd_raw(dat), (dat[5] >> 2) & 1, (dat[6] >> 6) & 1))
+
+    debounce = [r for r in rows if r[1]]
+    assert debounce, "no stop-bit frames through the release debounce"
+    assert all(cmd == -1300 for cmd, _, _ in debounce), \
+      f"command moved off the hold while STOPPING was asserted: {sorted({c for c, _, _ in debounce})}"
+
+    pulse = [cmd for cmd, _, unl in rows if unl]
+    assert pulse, "release never pulsed"
+    assert max(pulse) < 0, f"command crossed zero inside the pulse: {max(pulse)}"
+    assert max(cmd for cmd, _, _ in rows) > 500, "command never ramped up after the release"
+
+  def test_near_zero_hold_release_never_goes_positive_in_the_pulse(self, cc):
+    # a no-lead hold relaxes the plan to ~0, so the release ramp would cross zero in the
+    # first pulse frame; both observed SCBS latches fired at exactly that zero-cross inside
+    # a non-latched pulse (routes 000000fe t+44.54, 00000100 t+353.18)
+    long = structs.CarControl.Actuators.LongControlState
+    for _ in range(int(0.5 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-0.5, standstill=False)
+    for _ in range(int(2.0 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-0.02, standstill=True)
+    assert cc.accel_last == pytest.approx(-0.02)
+
+    rows = []
+    for _ in range(int(1.5 / 0.01)):
+      sends = _step(cc, long_state=long.pid, accel=1.0, standstill=True)
+      dat = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
+      if dat is not None:
+        rows.append((decode_accel_cmd_raw(dat), (dat[6] >> 6) & 1))
+
+    pulse = [cmd for cmd, unl in rows if unl]
+    assert pulse and max(pulse) <= 0, f"non-latched pulse went positive: {max(pulse, default=None)}"
+    assert max(cmd for cmd, _ in rows) > 500, "command never ramped up after the pulse"
+
+  def test_latched_release_command_is_capped_through_the_pulse(self, cc):
+    # a body-latched hold releases from ACCEL_HOLD_LATCHED, so the ramp would cross zero
+    # almost immediately; stock peaks at +0.25 m/s2 inside these pulses and so must we
+    long = structs.CarControl.Actuators.LongControlState
+    lead = dict(lead_visible=True, lead_d_rel=4.0, lead_v_rel=0.0)
+    for _ in range(int(0.5 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.5, standstill=False, **lead)
+    for _ in range(int(2.0 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.3, standstill=True, brake_hold=True, **lead)
+    assert cc.accel_last == pytest.approx(CarControllerParams.ACCEL_HOLD_LATCHED)
+
+    rows = []
+    for _ in range(int(1.5 / 0.01)):
+      sends = _step(cc, long_state=long.pid, accel=1.0, standstill=True, brake_hold=True, **lead)
+      dat = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
+      if dat is not None:
+        rows.append((decode_accel_cmd_raw(dat), (dat[6] >> 6) & 1))
+
+    pulse = [cmd for cmd, unl in rows if unl]
+    cap = round(CarControllerParams.ACCEL_RESUME_PULSE_MAX * 1000)
+    assert pulse and max(pulse) == cap, f"in-pulse command off the stock ceiling: {max(pulse, default=None)}"
+    assert max(cmd for cmd, _ in rows) > cap, "command never ramped past the cap after the pulse"
+
   def test_lead_track_follows_the_measured_lead(self, cc):
     # a frozen track is what latches the camera's SCBS fault, so the range we advertise has to
     # move with the lead we are actually following
@@ -811,54 +786,6 @@ class TestLongitudinalIntegration:
     assert all(_crz_ctrl(d) == (0, 0) for d in ctrls), "advertised a lead with nothing in view"
     # and the hold itself is untouched: the plan's brake and the stop bits still go out
     assert cc.stop_and_go.holding and cc.stop_and_go.stop_bits
-
-  def test_no_lead_release_is_escorted_by_a_departing_lead(self, cc, monkeypatch):
-    # Route 000000fe t+401.5: the camera accepted a 6 s no-lead hold (body latched, HOLD on the
-    # dash) then latched an SCBS fault 90 ms into the release, the only observable that differed
-    # from all 23 stock latched releases being has_lead=0/phase=0/empty tracks. Stock's releases
-    # carry a lead already pulling away when RESUME_UNLATCHING fires, so ours do too.
-    monkeypatch.setattr(longitudinal, "ESCORT_ENABLED", True)
-    long = structs.CarControl.Actuators.LongControlState
-    hold_kw = dict(long_state=long.stopping, accel=-1.024, standstill=True,
-                   lead_visible=False, lead_d_rel=0.0, cruise_engaged=True, brake_hold=True)
-    for _ in range(400):
-      _step(cc, **hold_kw)
-    assert cc.stop_and_go.car_has_hold
-
-    go_kw = dict(long_state=long.pid, accel=0.5, lead_visible=False, lead_d_rel=0.0,
-                 cruise_engaged=True)
-    Row = namedtuple("Row", ["frame", "unlatch", "has_lead", "phase", "dist", "relv"])
-    rows = []
-    for i in range(600):
-      standstill = i < 100  # the car breaks away about a second after the release
-      sends = _step(cc, standstill=standstill, brake_hold=standstill, **go_kw)
-      info, ctl, trk = _frame(sends, 0x21b), _frame(sends, 0x21c), _frame(sends, 0x364)
-      if info is None:
-        continue
-      unlatch = int(_decode("CRZ_INFO", 0x21b, info)["RESUME_UNLATCHING"])
-      has_lead, phase = _crz_ctrl(ctl)
-      d, v = (_lead_track(trk) if trk is not None and _track_occupied(trk) else (None, None))
-      rows.append(Row(i, unlatch, has_lead, phase, d, v))
-
-    # the release waits out the debounce and the lead-in: no pulse before, a pulse right after
-    assert not any(r.unlatch for r in rows if r.frame <= RELEASE_DEBOUNCE_FRAMES + ESCORT_LEAD_IN_FRAMES - 2), \
-      "released before the escort pulled away"
-    pulse_start = next(r.frame for r in rows if r.unlatch)
-    assert pulse_start <= RELEASE_DEBOUNCE_FRAMES + ESCORT_LEAD_IN_FRAMES + 4
-    # from the first advertisement through the pulse the ghost is present, consistent and receding
-    escorted = [r for r in rows if r.has_lead == 1]
-    assert escorted and escorted[0].frame <= RELEASE_DEBOUNCE_FRAMES + 2, "the escort was not advertised from the release request"
-    at_pulse = next(r for r in rows if r.unlatch)
-    assert at_pulse.has_lead == 1 and at_pulse.dist is not None, "pulsed the release with nothing advertised"
-    assert at_pulse.relv > 0., "the ghost was not pulling away at the pulse"
-    dists = [r.dist for r in escorted if r.dist is not None]
-    assert all(a <= b for a, b in zip(dists, dists[1:], strict=False)), "the escort came closer"
-    # the exit completes once rolling: everything drops together and stays down
-    dropped = [r for r in rows if r.frame > pulse_start and r.has_lead == 0]
-    assert dropped, "the escort never ended"
-    drop = dropped[0].frame
-    assert all(r.has_lead == 0 and r.phase == 0 and r.dist is None for r in rows if r.frame >= drop)
-    assert dists[-1] >= ESCORT_DROP_DIST - 1.0
 
   def test_vision_lead_dropout_does_not_fabricate_a_lead_at_speed(self, cc):
     # leadOne goes to zero the instant the vision lead drops while sm.lead_visible is still

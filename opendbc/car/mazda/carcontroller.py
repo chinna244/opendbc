@@ -427,10 +427,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     long_engaged = CC.enabled
     sm = self.stop_and_go
     sm.update(long_engaged, stopping, CS.out.standstill, CC.actuators.accel, CS.brake_hold,
-              gas_pressed=CS.out.gasPressed, real_lead=self.lead_adv.real_lead)
+              gas_pressed=CS.out.gasPressed)
     # runs engaged or not: the advertisement is perception (see AdvertisedLead)
     self.lead_adv.update(CC.hudControl.leadVisible, CC_SP.leadOne.dRel,
-                         CC_SP.leadOne.vRel, sm.holding, escort=sm.escort.lead)
+                         CC_SP.leadOne.vRel, sm.holding)
 
     accel = 0.
     if CC.longActive:
@@ -443,9 +443,19 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         # the body ECU is holding the brakes itself, so stop asking for them like stock does
         accel = CarControllerParams.ACCEL_HOLD_LATCHED
       elif sm.holding:
-        # the plan can turn positive while the release is deferred for the escort's lead-in;
-        # never ask the car to move while the stop bits still assert a hold
-        accel = min(accel, 0.)
+        # while the plan is braking the hold command is the plan's own, but the moment it
+        # turns positive (release debounce) the hold freezes where it is:
+        # stock never lets ACCEL_CMD climb while STOPPING is asserted, and pre-ramping toward
+        # the plan here put the release's zero-cross inside the unlatch pulse, which the
+        # camera latched as an SCBS fault (route 00000100 t+353)
+        accel = min(accel, 0.) if CC.actuators.accel <= 0. else min(self.accel_last, 0.)
+      if sm.resume_unlatching:
+        # cap the launch while the release pulse plays, by the release's own kind: stock's
+        # command is still negative at the end of every non-latched pulse but peaks at +0.25
+        # m/s2 inside latched ones. Both observed SCBS latches (routes 000000fe and 00000100)
+        # fired at a zero-cross inside a non-latched pulse, so those never go positive; a
+        # no-lead hold relaxes the plan to ~0 and would otherwise cross in the first frame.
+        accel = min(accel, CarControllerParams.ACCEL_RESUME_PULSE_MAX if sm.latched_release else 0.)
     self.accel_last = accel
 
     if radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:
