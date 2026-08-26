@@ -163,8 +163,13 @@ class StandstillHold:
 
     if self.unlatch_frames > 0:
       self.unlatch_frames -= 1
-    # one pulse per release, exactly as stock: never restarted while one is still playing
-    if was_holding and not self.holding and standstill and self.unlatch_frames == 0:
+    # one pulse per release, exactly as stock: never restarted while one is still playing.
+    # The pulse is the ACC's resume protocol, not the driver's: stock's captured gas-ended
+    # hold drops the stop bits with no pulse at all (the pedal is the resume authority), and
+    # pulsing there with the override's zeroed command latched an SCBS fault (route 00000103
+    # t+163.8; if that fault ever recurs on a gas release, the command side is the next
+    # candidate -- stock's steps positive off the pedal where ours holds the override zero)
+    if was_holding and not self.holding and standstill and not gas_pressed and self.unlatch_frames == 0:
       self.unlatch_frames = RESUME_UNLATCH_FRAMES
       # car_has_hold still carries last frame's value here: whether the body owned the brakes
       # going into this release decides the command ceiling through the pulse
