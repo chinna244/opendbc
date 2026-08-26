@@ -174,11 +174,16 @@ class StandstillHold:
 
     was_holding = self.holding
     self.escort.update(self.holding and plan_accel > 0., standstill, real_lead)
-    # the plan asking for acceleration is the only thing that releases the hold
+    # the plan asking for acceleration releases the hold; so does the car simply moving with
+    # the plan no longer stopping (a driver-gas drive-off under an override, where the plan's
+    # command is zeroed and would otherwise never ask). Stock keeps STOPPING strictly to the
+    # final creep: 2,078 rolling STOPPING frames in the corpus, all below 0.55 m/s.
     if plan_accel > 0. and not self.escort.deferring:
       self.holding = False
     elif stopping or standstill:
       self.holding = True
+    else:
+      self.holding = False
 
     if self.unlatch_frames > 0:
       self.unlatch_frames -= 1

@@ -272,6 +272,16 @@ class TestStandstillHold:
     self.run(sm, 1, long_active=False)
     assert not sm.holding and not sm.car_has_hold and not sm.stop_bits
 
+  def test_gas_override_drive_off_releases_the_hold(self, sm):
+    # a driver-gas drive-off under an override zeroes the plan's command, so the plan never
+    # asks to move but the car does; the stop bits must not follow it up to speed. Stock keeps
+    # STOPPING strictly to the final creep, below 0.55 m/s across all rolling frames.
+    self.run(sm, 1, stopping=True)
+    self.run(sm, 100, stopping=True, standstill=True)
+    assert sm.holding
+    self.run(sm, 1, plan_accel=0.0)
+    assert not sm.holding and not sm.stop_bits and not sm.resume_unlatching
+
   def test_stop_abort_releases(self, sm):
     self.run(sm, 1, stopping=True)
     assert sm.holding
