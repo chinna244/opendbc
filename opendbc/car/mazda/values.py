@@ -34,7 +34,9 @@ class CarControllerParams:
   STOCK_RADAR_ALIVE_T = 0.05  # stock CRZ_INFO runs at 50 Hz; silent this long = torn down
   STOCK_RADAR_GUARD_T = 1.0   # two-master guard: block engagement until silent this long
 
-  RESUME_UNLATCH_T = 0.20      # RESUME_UNLATCHING pulse width at the release
+  # RESUME_UNLATCHING pulse width at the release; stock latched releases pulse 0.22-0.38 s,
+  # this sits mid-distribution
+  RESUME_UNLATCH_T = 0.26
 
   CANCEL_CONTEXT_T = 0.5       # a wheel CANCEL keeps availability drops landing this long after release
 
