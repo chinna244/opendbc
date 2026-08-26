@@ -80,8 +80,12 @@ static bool mazda_synthetic_lead_radar_track_msg_valid(const CANPacket_t *msg) {
 }
 
 static bool mazda_radar_track_msg_valid(const CANPacket_t *msg) {
+  // The occupied slot is perception data, not actuation: a stock radar reports its objects
+  // ignition to ignition, engaged or not, and the controller mirrors that. Gating it on
+  // controls_allowed silently killed 0x364 at every disengagement while CRZ_CTRL still said
+  // has_lead=1, the exact track/ctrl disagreement the camera faults on.
   return mazda_empty_radar_track_msg_valid(msg) ||
-         (controls_allowed && mazda_synthetic_lead_radar_track_msg_valid(msg));
+         mazda_synthetic_lead_radar_track_msg_valid(msg);
 }
 
 // track msgs coming from OP so that we know what CAM msgs to drop and what to forward

@@ -146,10 +146,12 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
         for addr, dat in radar_messages.items():
           self.assertTrue(self._tx(common.make_msg(bus, addr, 8, dat)))
 
-  def test_synthetic_lead_radar_track_gated_on_controls(self):
+  def test_synthetic_lead_radar_track_allowed_disengaged(self):
     # DIST_OBJ and RELV_OBJ are free fields; the template bytes must match. The non-template
     # frames are real on-road emissions (route 6bb2dc61c4), which a byte-exact check silently
-    # dropped -- 982 asked, 0 transmitted -- starving the camera of the track.
+    # dropped -- 982 asked, 0 transmitted -- starving the camera of the track. The slot is
+    # perception, not actuation, so it flows with controls_allowed low the way a stock radar
+    # reports objects with cruise off.
     lead_frames = [
       "0a4000001dc00000",  # the fabricated stopped lead at 10.25 m
       "229000007dc0000e",  # lead at 34.56 m, closing slowly
@@ -160,10 +162,9 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
     for bus in (0, 2):
       for hexdat in lead_frames:
         dat = bytes.fromhex(hexdat)
-        self.safety.set_controls_allowed(False)
-        self.assertFalse(self._tx(common.make_msg(bus, 0x364, 8, dat)))
-        self.safety.set_controls_allowed(True)
-        self.assertTrue(self._tx(common.make_msg(bus, 0x364, 8, dat)))
+        for controls_allowed in (False, True):
+          self.safety.set_controls_allowed(controls_allowed)
+          self.assertTrue(self._tx(common.make_msg(bus, 0x364, 8, dat)))
 
   def test_malformed_lead_radar_track_blocked(self):
     # each corrupts one template-owned field of a valid lead frame
