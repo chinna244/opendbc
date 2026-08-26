@@ -56,7 +56,15 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
                                                       CS.out.steeringTorque, self.params, steer_max)
 
-    if CC.cruiseControl.cancel:
+    # Under op-long, controlsd raises cancel whenever cruiseState.enabled has no matching
+    # CC.enabled (pcmCruise). While the stock radar still owns the bus -- the pre-teardown
+    # settle window and the silencing-failed stay-stock fallback -- that engagement is the
+    # driver's own stock MRCC (openpilot cannot engage there: availability is held low), and
+    # the 10 Hz CANCEL would turn its main off within ~100 ms. Leave it alone; the teardown
+    # gate already waits out a stock engagement. Once the radar has been silenced a stock
+    # engagement is impossible and cancel keeps handling state desync.
+    stock_mrcc_owns_cruise = self.CP.openpilotLongitudinalControl and not CS.radar_was_silenced
+    if CC.cruiseControl.cancel and not stock_mrcc_owns_cruise:
       # If brake is pressed, let us wait >70ms before trying to disable crz to avoid
       # a race condition with the stock system, where the second cancel from openpilot
       # will disable the crz 'main on'. crz ctrl msg runs at 50hz. 70ms allows us to

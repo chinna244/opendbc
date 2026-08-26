@@ -909,6 +909,52 @@ class TestLongitudinalIntegration:
     assert info.hex().startswith("01ffe3ffc080")
 
 
+class TestCancelCarveOut:
+  """controlsd raises cruiseControl.cancel whenever cruiseState.enabled has no matching
+  CC.enabled (mazda reports pcmCruise). While the stock radar still owns the bus that
+  engagement is the driver's own stock MRCC and a CANCEL turns its main off within ~100 ms,
+  so the documented stay-stock fallback used to leave the driver with no cruise at all. Once
+  the radar has been silenced a stock engagement is impossible and cancel handles desync."""
+
+  CRZ_BTNS = 0x9d
+
+  def _full_update(self, cc, cancel, radar_was_silenced, stock_radar_alive, frame=10):
+    control, control_sp, carstate = _mock_cc(long_active=False, enabled=False, accel=0.,
+                                             long_state=structs.CarControl.Actuators.LongControlState.off,
+                                             available=False, cruise_engaged=True,
+                                             stock_radar_alive=stock_radar_alive, fsc_settled=False)
+    control.latActive = False
+    control.cruiseControl.cancel = cancel
+    control.hudControl.visualAlert = None
+    control.actuators.torque = 0.
+    control.actuators.as_builder = lambda: SimpleNamespace(torque=0., torqueOutputCan=0, accel=0.)
+    carstate.out.vEgoRaw = 8.0
+    carstate.out.steeringTorque = 0.
+    carstate.crz_btns_counter = 0
+    carstate.cancel_button = 0
+    carstate.lkas_allowed_speed = True
+    carstate.radar_was_silenced = radar_was_silenced
+    carstate.cam_lkas = {"BIT_1": 0, "ERR_BIT_1": 0, "ERR_BIT_2": 0}
+    cc.frame = frame  # off the 50-frame alert cadence, on the 10-frame cancel cadence
+    _, sends = cc.update(control, control_sp, carstate, 0)
+    return [a for a, _, _ in sends]
+
+  def test_no_cancel_while_the_radar_is_stock(self, cc):
+    # pre-teardown settle window, and equally the silencing-failed drive: a driver SET is
+    # their own stock MRCC and must be left alone
+    addrs = self._full_update(cc, cancel=True, radar_was_silenced=False, stock_radar_alive=True)
+    assert self.CRZ_BTNS not in addrs, "CANCELed the driver's own stock MRCC"
+
+  def test_cancel_still_sent_after_the_teardown(self, cc):
+    # post-teardown a stock engagement is impossible: cancel keeps handling state desync
+    addrs = self._full_update(cc, cancel=True, radar_was_silenced=True, stock_radar_alive=False)
+    assert self.CRZ_BTNS in addrs
+
+  def test_stock_longitudinal_cancel_unaffected(self, stock_cc):
+    addrs = self._full_update(stock_cc, cancel=True, radar_was_silenced=False, stock_radar_alive=True)
+    assert self.CRZ_BTNS in addrs
+
+
 SESSION_PROG_DAT = bytes([0x02, 0x10, 0x02, 0, 0, 0, 0, 0])
 SESSION_DFLT_DAT = bytes([0x02, 0x10, 0x01, 0, 0, 0, 0, 0])
 TESTER_PRESENT_DAT = bytes([0x02, 0x3e, 0x80, 0, 0, 0, 0, 0])
