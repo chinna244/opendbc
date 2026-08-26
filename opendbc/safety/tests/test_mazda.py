@@ -214,6 +214,19 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
       self.safety.set_controls_allowed(True)
       self.assertTrue(self._tx(self._crz_ctrl_cmd_msg(True, bus)))
 
+  def test_crz_info_active_gated_on_controls(self):
+    # ACC_ACTIVE mirrors CRZ_CTRL's gate: an engaged-claiming accel frame must not flow while
+    # controls are not allowed. The body raises PEDALS.ACC_ACTIVE off the SET press before
+    # our first engaged frame in every logged engagement, so there is no deadlock.
+    for bus in (0, 2):
+      for active in (False, True):
+        values = {"ACCEL_CMD": self.INACTIVE_ACCEL, "ACC_ACTIVE": active}
+        msg = self.packer.make_can_msg_safety("CRZ_INFO", bus, values)
+        self.safety.set_controls_allowed(False)
+        self.assertEqual(not active, self._tx(msg))
+        self.safety.set_controls_allowed(True)
+        self.assertTrue(self._tx(msg))
+
 
 class TestMazdaIgnition(unittest.TestCase):
   TX_MSGS: list = []

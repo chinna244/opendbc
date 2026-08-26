@@ -193,6 +193,15 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     if (!stock_standby && longitudinal_accel_checks(desired_accel, MAZDA_LONG_LIMITS)) {
       tx = false;
     }
+
+    // ACC_ACTIVE (bit 33) mirrors CRZ_CTRL's CRZ_ACTIVE gate: an engaged-claiming accel
+    // frame must not flow while controls are not allowed. No deadlock: the body raises
+    // PEDALS.ACC_ACTIVE off the SET press 10-20 ms before the first ACC_ACTIVE=1 frame
+    // in every logged engagement, so controls_allowed leads this bit, not the reverse.
+    bool acc_active = GET_BIT(msg, 33U);
+    if (!controls_allowed && acc_active) {
+      tx = false;
+    }
   }
 
   if (mazda_longitudinal && long_replacement_bus && (msg->addr == MAZDA_CRZ_CTRL)) {
@@ -244,6 +253,12 @@ static safety_config mazda_init(uint16_t param) {
     {MAZDA_LKAS_HUD, 0, 8, .check_relay = true},
   };
 
+  // The replaced-radar addresses stay check_relay = false on purpose: that mechanism is for
+  // harness-blocked ECUs that are silent from ignition on, and any RX after 1 s latches a
+  // permanent relay_malfunction. This radar is software-silenced mid-session -- alive for the
+  // first ~10 s by design, and deliberately overlapped during the ordered hand-back -- so the
+  // relay check would fault every boot. The two-master guard lives in carstate instead
+  // (accFaulted on radar-came-back) plus the session manager's bounded re-silence.
   static const CanMsg MAZDA_LONG_TX_MSGS[] = {
     {MAZDA_LKAS, 0, 8, .check_relay = true},
     {MAZDA_CRZ_BTNS, 0, 8, .check_relay = false},
