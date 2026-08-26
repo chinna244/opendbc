@@ -36,6 +36,11 @@ def test_raw_latch_accepts_only_camera_bus_eight_byte_frames():
   assert latch_cam_laneinfo_raw([(0, [(0x440, UNKNOWN, 0)])], WHITE) == (WHITE, False)
 
 
+def test_raw_latch_accepts_single_batch_tuple_like_test_models():
+  # test_models calls CI.update((t, frames)), not [(t, frames)]
+  assert latch_cam_laneinfo_raw((0, [(0x440, WHITE, 2)]), None) == (WHITE, True)
+
+
 def test_raw_liveness_expires_and_recovers_on_the_receiving_frame():
   fingerprint = gen_empty_fingerprint()
   CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, fingerprint, [], alpha_long=False, is_release=False, docs=False)
@@ -45,10 +50,13 @@ def test_raw_liveness_expires_and_recovers_on_the_receiving_frame():
   assert not CI.CS.cam_laneinfo_live
   CI.update([(0, [(0x440, OFF, 2)])])
   assert CI.CS.cam_laneinfo_live
+  # single-batch tuple shape used by opendbc car/tests/test_models.py
+  CI.update((round(DT_CTRL * 1e9), [(0x440, OFF, 2)]))
+  assert CI.CS.cam_laneinfo_live
   for frame in range(CAM_LANEINFO_STALE_FRAMES + 1):
-    CI.update([(round((frame + 1) * DT_CTRL * 1e9), [])])
+    CI.update([(round((frame + 2) * DT_CTRL * 1e9), [])])
   assert not CI.CS.cam_laneinfo_live
-  CI.update([(round((CAM_LANEINFO_STALE_FRAMES + 2) * DT_CTRL * 1e9), [(0x440, OFF, 2)])])
+  CI.update([(round((CAM_LANEINFO_STALE_FRAMES + 3) * DT_CTRL * 1e9), [(0x440, OFF, 2)])])
   assert CI.CS.cam_laneinfo_live
 
 
