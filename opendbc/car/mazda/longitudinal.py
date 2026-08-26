@@ -56,6 +56,7 @@ class RadarSessionManager:
     self.state = RadarSessionState.STOCK
     self.state_frames = 0
     self.silencing_failed = False
+    self.handback_completed = False
 
   def update(self, gate_passed: bool, stock_radar_alive: bool, handback: bool,
              standstill: bool, session_refused: bool) -> RadarSessionState:
@@ -68,14 +69,19 @@ class RadarSessionManager:
         self.state = RadarSessionState.HANDBACK
       elif self.state == RadarSessionState.HANDBACK and \
            (stock_radar_alive or self.state_frames >= RADAR_SESSION_LIMIT_FRAMES):
-        # heard again, or never coming back: either way stop waiting so the restart proceeds
+        # heard again, or never coming back: either way stop waiting so the restart proceeds.
+        # This hand-back ran to completion, so the radar stays stock for the rest of the
+        # process: the assert dropping later (or the gate still passing at a parked toggle-off)
+        # must not re-silence the radar right before shutdown -- an unattended S3 recovery is
+        # the degraded state the whole hand-back exists to prevent
         self.state = RadarSessionState.STOCK
+        self.handback_completed = True
     else:
       if self.state == RadarSessionState.HANDBACK:
         # hand-back withdrawn (toggle flipped back before the restart): the radar is
         # stock again, so re-run the normal takeover
         self.state = RadarSessionState.STOCK
-      if self.state == RadarSessionState.STOCK and gate_passed:
+      if self.state == RadarSessionState.STOCK and gate_passed and not self.handback_completed:
         # actively silencing disables AEB, so like every disable_ecu caller it only starts
         # pre-motion; adopting an already-quiet radar disables nothing and proceeds anywhere
         if not stock_radar_alive:

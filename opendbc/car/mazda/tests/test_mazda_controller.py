@@ -935,6 +935,32 @@ class TestRadarSessionBounds:
       state = m.update(True, False, True, standstill=True, session_refused=False)
     assert state == RadarSessionState.STOCK
 
+  def test_completed_handback_never_resilences(self):
+    # the parked toggle-off regression: the monitor's CC_SP assert used to drop after its done
+    # latch, the manager read that as a withdrawal, fell to STOCK, and re-entered SILENCING on
+    # the same call (parked, gate still passed) -- re-silencing the radar it had just handed
+    # back, right before shutdown, leaving it to a degraded unattended S3 recovery
+    m = RadarSessionManager()
+    m.update(True, False, False, standstill=True, session_refused=False)
+    assert m.state == RadarSessionState.SILENCED
+    m.update(True, False, True, standstill=True, session_refused=False)
+    assert m.state == RadarSessionState.HANDBACK
+    assert m.update(True, True, True, standstill=True, session_refused=False) == RadarSessionState.STOCK
+    for handback in (True, False):
+      for alive in (True, False):
+        for _ in range(5):
+          assert m.update(True, alive, handback, standstill=True, session_refused=False) == RadarSessionState.STOCK
+
+  def test_withdrawn_handback_allows_retakeover(self):
+    # only a hand-back that ran to completion latches: a genuine toggle-flip-back
+    # mid-hand-back gets the normal takeover again
+    m = RadarSessionManager()
+    m.update(True, False, False, standstill=True, session_refused=False)
+    m.update(True, False, True, standstill=True, session_refused=False)
+    assert m.state == RadarSessionState.HANDBACK
+    state = m.update(True, False, False, standstill=True, session_refused=False)
+    assert state == RadarSessionState.SILENCED and not m.handback_completed
+
   def test_silencing_waits_for_standstill_but_adoption_does_not(self):
     # actively silencing disables AEB, so it only starts pre-motion like disable_ecu;
     # adopting an already-quiet radar disables nothing and proceeds anywhere
@@ -1040,6 +1066,17 @@ class TestRadarSessionSequencing:
     cc.frame = 0
     sends = self._step(cc, stock_radar_alive=True, fsc_settled=True, cruise_engaged=False)
     assert SESSION_PROG_DAT in self._uds(sends)
+
+  def test_completed_handback_stays_stock_after_the_assert_drops(self, cc):
+    # CC_SP is rebuilt every frame, so once the toggle monitor's done latch stops asserting
+    # the hand-back the manager sees handback=False; a completed hand-back must not turn
+    # into a fresh takeover on the very next frame (parked => standstill, gate still passed)
+    self._step(cc, stock_radar_alive=False, fsc_settled=True)
+    self._step(cc, stock_radar_alive=False, fsc_settled=True, handback=True)
+    self._step(cc, stock_radar_alive=True, fsc_settled=True, handback=True)
+    for _ in range(200):
+      sends = self._step(cc, stock_radar_alive=True, fsc_settled=True, handback=False)
+      assert sends == []
 
   def test_s3_recovery_resilences(self, cc):
     # radar reappears mid-drive (dropped tester present, S3 timeout): re-request the session
