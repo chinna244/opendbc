@@ -73,6 +73,67 @@ class RadarSessionManager:
 RESUME_UNLATCH_FRAMES = int(CarControllerParams.RESUME_UNLATCH_T / DT_CTRL)
 LEAD_DEBOUNCE_FRAMES = int(CarControllerParams.LEAD_DEBOUNCE_T / DT_CTRL)
 
+# The escort ghost's kinematics; single consumer, so they live with it
+ESCORT_LEAD_IN_FRAMES = int(0.3 / DT_CTRL)  # the ghost pulls away this long before the release fires
+ESCORT_RELV_STEP = 1.25 * DT_CTRL           # m/s per frame, opening-rate ramp
+ESCORT_RELV_MAX = 2.5                       # m/s, opening-rate cap
+ESCORT_DROP_DIST = 18.0                     # m, escort ends here once the car is moving
+ESCORT_FAR_DROP_DIST = 36.0                 # m, and here even stopped: an aborted resume's ghost drives away
+
+
+class ResumeEscort:
+  """A departing ghost lead that escorts a no-lead standstill hold release.
+
+  The camera accepts a hold with nothing advertised -- route 000000fe held 6 s at
+  has_lead=0/phase=0 with the body latched and HOLD on the dash -- but latched an SCBS fault
+  90 ms into the release. Every other observable in that release matched the 23 stock latched
+  releases exactly (stop bits, command relax, ACC_ACTIVE_2, pulse width, no RES press); the
+  one deviation was resuming with no object, a state stock cannot produce because its ACC
+  never stops without a lead. Stock's releases also show the cause before the effect: the lead
+  is already pulling away when RESUME_UNLATCHING fires (relv +0.31..+4.75 at the pulse).
+
+  So the fabrication is confined to the one moment the camera demands it. The ghost appears at
+  the track template's captured range when the plan first asks to move, recedes through a short
+  lead-in before the release is allowed to fire, keeps opening through the drive-off, and drops
+  once the car is rolling -- the regime where the camera provably tolerated 20 one-frame track
+  discontinuities at up to 22 m/s. A real measurement always takes the slot over.
+  """
+
+  def __init__(self):
+    self.reset()
+
+  def reset(self):
+    self.lead: tuple[float, float] | None = None
+    self.lead_in = 0
+
+  def update(self, release_wanted: bool, standstill: bool,
+             real_lead: tuple[float, float] | None) -> None:
+    if real_lead is not None:
+      self.reset()
+      return
+
+    if self.lead is None:
+      if release_wanted and standstill:
+        self.lead = (mazdacan.LEAD_TRACK_DIST, 0.)
+        self.lead_in = ESCORT_LEAD_IN_FRAMES
+      return
+
+    if self.lead_in > 0:
+      self.lead_in -= 1
+    d, v = self.lead
+    v = min(v + ESCORT_RELV_STEP, ESCORT_RELV_MAX)
+    d += v * DT_CTRL
+    drop_dist = ESCORT_FAR_DROP_DIST if standstill else ESCORT_DROP_DIST
+    if d >= drop_dist:
+      self.reset()
+    else:
+      self.lead = (d, v)
+
+  @property
+  def deferring(self) -> bool:
+    # the release waits until the ghost has visibly pulled away
+    return self.lead_in > 0
+
 
 class StandstillHold:
   """Holds the car stopped until the plan asks to move, the way Toyota and Honda do it.
@@ -89,26 +150,32 @@ class StandstillHold:
   from nothing to several seconds. If the latch never comes we simply keep braking.
 
   Nothing here latches: `holding` is recomputed every frame, so a plan that changes its mind
-  gets the hold straight back.
+  gets the hold straight back. A release with no real lead to advertise is the one the plan
+  does not fully own: it waits out the escort's lead-in so the camera sees a lead pull away
+  before RESUME_UNLATCHING fires, the order every stock release shows it.
   """
 
   def __init__(self):
+    self.escort = ResumeEscort()
     self._reset()
 
   def _reset(self):
     self.holding = False
     self.car_has_hold = False
     self.unlatch_frames = 0
+    self.escort.reset()
 
   def update(self, long_active: bool, stopping: bool, standstill: bool,
-             plan_accel: float, brake_hold: bool) -> None:
+             plan_accel: float, brake_hold: bool,
+             real_lead: tuple[float, float] | None = None) -> None:
     if not long_active:
       self._reset()
       return
 
     was_holding = self.holding
+    self.escort.update(self.holding and plan_accel > 0., standstill, real_lead)
     # the plan asking for acceleration is the only thing that releases the hold
-    if plan_accel > 0.:
+    if plan_accel > 0. and not self.escort.deferring:
       self.holding = False
     elif stopping or standstill:
       self.holding = True
@@ -161,10 +228,11 @@ class AdvertisedLead:
     self.flip_frames = 0
     self.holding = False
     self.lead = None
+    self.real_lead = None
     self._measured = None
 
   def update(self, long_engaged: bool, lead_visible: bool, d_rel: float, v_rel: float,
-             holding: bool) -> None:
+             holding: bool, escort: tuple[float, float] | None = None) -> None:
     if not long_engaged:
       self._reset()
       return
@@ -179,7 +247,10 @@ class AdvertisedLead:
 
     if 0. < d_rel <= mazdacan.DIST_OBJ_MAX:
       self._measured = (d_rel, v_rel)
-    self.lead = self._measured if self.visible else None
+    # the escort stands in only when there is nothing real to advertise, so has_lead, the
+    # phase and the track still come off this one decision
+    self.real_lead = self._measured if self.visible else None
+    self.lead = self.real_lead if self.real_lead is not None else escort
     self.holding = holding
 
   @property

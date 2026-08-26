@@ -154,10 +154,11 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     gas_override = CC.enabled and (CC.cruiseControl.override or CS.out.gasPressed)
     long_engaged = CC.longActive or gas_override
     sm = self.stop_and_go
-    sm.update(long_engaged, stopping, CS.out.standstill, CC.actuators.accel, CS.brake_hold)
+    sm.update(long_engaged, stopping, CS.out.standstill, CC.actuators.accel, CS.brake_hold,
+              real_lead=self.lead_adv.real_lead)
     # after the hold: the advertised phase is a stop phase only while we are actually holding
     self.lead_adv.update(long_engaged, CC.hudControl.leadVisible, CC_SP.leadOne.dRel,
-                         CC_SP.leadOne.vRel, sm.holding)
+                         CC_SP.leadOne.vRel, sm.holding, escort=sm.escort.lead)
 
     accel = 0.
     if CC.longActive:
@@ -169,6 +170,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       if sm.car_has_hold:
         # the body ECU is holding the brakes itself, so stop asking for them like stock does
         accel = CarControllerParams.ACCEL_HOLD_LATCHED
+      elif sm.holding:
+        # the plan can turn positive while the release is deferred for the escort's lead-in;
+        # never ask the car to move while the stop bits still assert a hold
+        accel = min(accel, 0.)
     self.accel_last = accel
 
     if radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:
