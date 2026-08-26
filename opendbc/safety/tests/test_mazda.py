@@ -98,8 +98,8 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
     values = {"ACC_ACTIVE": enable, "BRAKE_ON": 0}
     return self.packer.make_can_msg_safety("PEDALS", 0, values)
 
-  def _accel_msg(self, accel: float, bus: int = 0):
-    values = {"ACCEL_CMD": accel}
+  def _accel_msg(self, accel: float, bus: int = 0, active: bool = False):
+    values = {"ACCEL_CMD": accel, "ACC_ACTIVE": active}
     return self.packer.make_can_msg_safety("CRZ_INFO", bus, values)
 
   def _crz_ctrl_cmd_msg(self, active: bool, bus: int = 0):
@@ -220,8 +220,7 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
     # our first engaged frame in every logged engagement, so there is no deadlock.
     for bus in (0, 2):
       for active in (False, True):
-        values = {"ACCEL_CMD": self.INACTIVE_ACCEL, "ACC_ACTIVE": active}
-        msg = self.packer.make_can_msg_safety("CRZ_INFO", bus, values)
+        msg = self._accel_msg(self.INACTIVE_ACCEL, bus=bus, active=active)
         self.safety.set_controls_allowed(False)
         self.assertEqual(not active, self._tx(msg))
         self.safety.set_controls_allowed(True)

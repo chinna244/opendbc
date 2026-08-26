@@ -17,7 +17,7 @@ from opendbc.car.mazda.longitudinal import (ESCORT_DROP_DIST, ESCORT_LEAD_IN_FRA
                                             AdvertisedLead, RadarSessionManager, RadarSessionState, ResumeEscort,
                                             StandstillHold)
 from opendbc.car.mazda.interface import CarInterface
-from opendbc.car.mazda.values import CAR, Buttons, CarControllerParams
+from opendbc.car.mazda.values import CAR, CarControllerParams
 
 
 class TestCarControllerParams:
@@ -200,8 +200,8 @@ class TestStandstillHold:
   def run(sm, frames, **kwargs):
     # a lead is present by default so releases are not escort-deferred; the no-lead release
     # path has its own tests
-    defaults = dict(long_active=True, stopping=False, standstill=False, plan_accel=-1.024,
-                    brake_hold=False, real_lead=(5.0, 0.))
+    defaults = dict(long_engaged=True, stopping=False, standstill=False, plan_accel=-1.024,
+                    brake_hold=False, gas_pressed=False, real_lead=(5.0, 0.))
     defaults.update(kwargs)
     for _ in range(frames):
       sm.update(**defaults)
@@ -270,7 +270,7 @@ class TestStandstillHold:
   def test_long_disengage_resets(self, sm):
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True, brake_hold=True)
-    self.run(sm, 1, long_active=False)
+    self.run(sm, 1, long_engaged=False)
     assert not sm.holding and not sm.car_has_hold and not sm.stop_bits
 
   def test_gas_override_drive_off_releases_the_hold(self, sm):
@@ -395,10 +395,10 @@ class TestResumeEscort:
   def test_hold_disengage_resets_it(self, monkeypatch):
     monkeypatch.setattr(longitudinal, "ESCORT_ENABLED", True)
     sm = StandstillHold()
-    sm.update(True, True, True, -1.024, False, real_lead=None)
-    sm.update(True, False, True, 0.3, False, real_lead=None)
+    sm.update(True, True, True, -1.024, False, False, real_lead=None)
+    sm.update(True, False, True, 0.3, False, False, real_lead=None)
     assert sm.escort.lead is not None
-    sm.update(False, False, True, 0.3, False, real_lead=None)
+    sm.update(False, False, True, 0.3, False, False, real_lead=None)
     assert sm.escort.lead is None and not sm.escort.deferring
 
 
@@ -457,7 +457,7 @@ class TestAdvertisedLead:
     self.run(al, 2 * LEAD_DEBOUNCE_FRAMES, lead_visible=False, d_rel=0., holding=True)
     assert not al.has_lead and al.ctrl_phase == 0
 
-def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas=False, override=False,
+def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas=False,
              resume=False, lead_visible=True, gap=2, available=True,
              stock_radar_alive=False, fsc_settled=True, handback=False, cruise_engaged=False,
              enabled=None, lead_d_rel=12.0, lead_v_rel=0.0, brake_hold=False):
@@ -467,7 +467,7 @@ def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas
   out = SimpleNamespace(standstill=standstill, gasPressed=gas,
                         cruiseState=SimpleNamespace(available=available, enabled=cruise_engaged))
   actuators = SimpleNamespace(accel=accel, longControlState=long_state)
-  cruise = SimpleNamespace(resume=resume, override=override, cancel=False)
+  cruise = SimpleNamespace(resume=resume, cancel=False)
   hud = SimpleNamespace(leadVisible=lead_visible, leadDistanceBars=gap)
   cc = SimpleNamespace(enabled=enabled, longActive=long_active, actuators=actuators,
                        cruiseControl=cruise, hudControl=hud)
@@ -630,7 +630,7 @@ class TestLongitudinalIntegration:
     cmds = []
     for _ in range(100):  # 1 s of override
       sends = _step(cc, long_active=False, enabled=True, long_state=long.off, accel=0.,
-                    gas=True, override=True, cruise_engaged=True)
+                    gas=True, cruise_engaged=True)
       frame = _long_frames(sends)
       if frame is not None:
         cmds.append(frame)
@@ -685,7 +685,7 @@ class TestLongitudinalIntegration:
     # through a gas override we report the zero we actually send
     for _ in range(10):
       _step(cc, long_active=False, enabled=True, long_state=long.off, accel=0., gas=True,
-            override=True, cruise_engaged=True)
+            cruise_engaged=True)
     assert cc.accel_last == 0.
 
   def test_gas_from_standstill_hold_releases_the_brake(self, cc):
@@ -698,7 +698,7 @@ class TestLongitudinalIntegration:
 
     for _ in range(20):
       _step(cc, long_active=False, enabled=True, long_state=long.off, accel=0., gas=True,
-            override=True, standstill=True, cruise_engaged=True)
+            standstill=True, cruise_engaged=True)
     assert cc.accel_last == 0., f"hold not released for the driver's gas: {cc.accel_last}"
 
   def test_lead_track_follows_the_measured_lead(self, cc):
@@ -911,18 +911,18 @@ class TestRadarSessionBounds:
   def test_silencing_gives_up_bounded(self):
     m = RadarSessionManager()
     for _ in range(RADAR_SESSION_LIMIT_FRAMES + 2):
-      state = m.update(True, True, False)
+      state = m.update(True, True, False, standstill=True)
     assert state == RadarSessionState.STOCK and m.silencing_failed
     # and stays given up for the drive: stock keeps the bus
     for _ in range(10):
-      assert m.update(True, True, False) == RadarSessionState.STOCK
+      assert m.update(True, True, False, standstill=True) == RadarSessionState.STOCK
 
   def test_handback_stops_waiting_for_a_dead_radar(self):
     m = RadarSessionManager()
-    m.update(True, False, False)
+    m.update(True, False, False, standstill=True)
     assert m.state == RadarSessionState.SILENCED
     for _ in range(RADAR_SESSION_LIMIT_FRAMES + 2):
-      state = m.update(True, False, True)
+      state = m.update(True, False, True, standstill=True)
     assert state == RadarSessionState.STOCK
 
   def test_silencing_waits_for_standstill_but_adoption_does_not(self):
@@ -936,17 +936,16 @@ class TestRadarSessionBounds:
     assert m2.update(True, False, False, standstill=False) == RadarSessionState.SILENCED
 
 
-class TestNonGen1Platforms:
-
-  def test_message_builders_refuse_unknown_platforms(self):
-    # the fall-through used to emit an all-zero CAM_LKAS and return None from the button
-    # builder, straight into can_sends
-    packer = CANPacker("mazda_2017")
-    fake_cp = SimpleNamespace(flags=0, carFingerprint="MAZDA_FUTURE")
-    with pytest.raises(NotImplementedError):
-      mazdacan.create_steering_control(packer, fake_cp, 0, 0, {"BIT_1": 0, "ERR_BIT_1": 0, "ERR_BIT_2": 0})
-    with pytest.raises(NotImplementedError):
-      mazdacan.create_button_cmd(packer, fake_cp, 0, Buttons.CANCEL)
+def test_non_gen1_platform_refused_at_admission():
+  # one init-time check instead of per-frame guards in the message builders, which every
+  # frame layout in mazdacan assumes; the fall-throughs used to emit an all-zero CAM_LKAS
+  # and return None from the button builder, straight into can_sends
+  CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], alpha_long=False,
+                               is_release=False, docs=False)
+  CP_SP = CarInterface.get_params_sp(CP, CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], False, False, False)
+  CP.flags = 0
+  with pytest.raises(NotImplementedError):
+    CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
 
 
 class TestRadarSessionSequencing:

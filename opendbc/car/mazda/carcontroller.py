@@ -7,7 +7,7 @@ from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.longitudinal import (RADAR_ADDR, AdvertisedLead, RadarSessionManager, RadarSessionState,
                                             StandstillHold, create_radar_session_msg)
-from opendbc.car.mazda.values import CarControllerParams, Buttons
+from opendbc.car.mazda.values import CarControllerParams, Buttons, MazdaFlags
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
 
@@ -23,6 +23,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
   def __init__(self, dbc_names, CP, CP_SP):
     CarControllerBase.__init__(self, dbc_names, CP, CP_SP)
     IntelligentCruiseButtonManagementInterface.__init__(self, CP, CP_SP)
+    if not CP.flags & MazdaFlags.GEN1:
+      # every message builder in mazdacan assumes the GEN1 frame layouts; a new platform
+      # needs its own before it can be admitted
+      raise NotImplementedError(f"unsupported platform: {CP.carFingerprint}")
     self.params = CarControllerParams(CP)
     self.apply_torque_last = 0
     self.packer = CANPacker(dbc_names[Bus.pt])
@@ -123,15 +127,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
   def update_longitudinal(self, CC, CC_SP, CS):
     can_sends = []
 
-    # Radar session sequencing: hold off the teardown until the FSC's cold-boot
-    # radar-presence check has cleared (carstate's settle timer). Actively silencing a live
-    # radar disables AEB, so like every disable_ecu caller it only starts at standstill (a
-    # warm process restart while moving waits for the next stop); adopting an already-quiet
-    # radar disables nothing and proceeds anywhere. Keep the radar in its programming
-    # session while we own the bus, and on an onroad toggle-off return it to the default
-    # session before card requests the process restart. Never yank the radar out from under
-    # an active stock MRCC engagement (driver SET before the gate passed on a warm boot):
-    # wait for the driver to disengage first.
+    # Radar session sequencing (the why lives on RadarSessionManager): hold off the takeover
+    # until the FSC's cold-boot radar-presence check has cleared, and never yank the radar
+    # out from under an active stock MRCC engagement (driver SET before the gate passed on a
+    # warm boot) -- wait for the driver to disengage first.
     stock_radar_alive = CS.stock_radar_alive
     setup_ok = CS.fsc_settled and not (stock_radar_alive and CS.out.cruiseState.enabled)
     session_state = self.radar_session.update(setup_ok, stock_radar_alive, CC_SP.stockEcuHandBack,
@@ -161,8 +160,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     sm = self.stop_and_go
     sm.update(long_engaged, stopping, CS.out.standstill, CC.actuators.accel, CS.brake_hold,
               gas_pressed=CS.out.gasPressed, real_lead=self.lead_adv.real_lead)
-    # perception, not control: the advertisement runs engaged or not, like the radar it
-    # stands in for; the phase is a stop phase only while we are actually holding
+    # runs engaged or not: the advertisement is perception (see AdvertisedLead)
     self.lead_adv.update(CC.hudControl.leadVisible, CC_SP.leadOne.dRel,
                          CC_SP.leadOne.vRel, sm.holding, escort=sm.escort.lead)
 

@@ -1,5 +1,5 @@
 from opendbc.car.can_definitions import CanData
-from opendbc.car.mazda.values import Buttons, MazdaFlags
+from opendbc.car.mazda.values import Buttons
 
 # Radar frames the body ECU expects to keep receiving for stop-and-go to work. Byte-exact
 # captures from a 0x764 radar with no objects in view; only the counter nibble in the last
@@ -147,11 +147,6 @@ def create_steering_control(packer, CP, frame, apply_torque, lkas):
 
   csum = csum % 256
 
-  if not CP.flags & MazdaFlags.GEN1:
-    # every shipping platform is GEN1; falling through here used to emit an all-zero
-    # CAM_LKAS with a zero checksum at 100 Hz
-    raise NotImplementedError(f"unsupported platform: {CP.carFingerprint}")
-
   values = {
     "LKAS_REQUEST": apply_torque,
     "CTR": ctr,
@@ -201,11 +196,6 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool)
 
 
 def create_button_cmd(packer, CP, counter, button):
-  if not CP.flags & MazdaFlags.GEN1:
-    # every shipping platform is GEN1; falling through here used to return None, which the
-    # carcontroller would have appended straight into can_sends
-    raise NotImplementedError(f"unsupported platform: {CP.carFingerprint}")
-
   can = int(button == Buttons.CANCEL)
   res = int(button == Buttons.RESUME)
   inc = int(button == Buttons.SET_PLUS)

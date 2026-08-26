@@ -11,6 +11,7 @@ FSC_SETTLE_FRAMES = int(CarControllerParams.FSC_SETTLE_T / DT_CTRL)
 STOCK_RADAR_ALIVE_FRAMES = int(CarControllerParams.STOCK_RADAR_ALIVE_T / DT_CTRL)
 STOCK_RADAR_GUARD_FRAMES = int(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CTRL)
 CANCEL_CONTEXT_FRAMES = int(CarControllerParams.CANCEL_CONTEXT_T / DT_CTRL)
+CAM_LANEINFO_FRESH_FRAMES = int(CarControllerParams.CAM_LANEINFO_FRESH_T / DT_CTRL)
 
 
 class CarState(CarStateBase, CarStateExt):
@@ -39,6 +40,7 @@ class CarState(CarStateBase, CarStateExt):
     self.radar_was_silenced = False
     self.cancel_context_frames = 0
     self.cam_laneinfo_seen = False
+    self.cam_laneinfo_silent_frames = 0
     self.fsc_settled_frames = 0
     # the body ECU has taken the standstill hold over and is holding the brakes itself
     self.brake_hold = False
@@ -112,9 +114,15 @@ class CarState(CarStateBase, CarStateExt):
     else:
       self.lkas_allowed_speed = True
 
-    # before the first CAM_LANEINFO frame the parser reads all-zero; both the FSC settle
-    # gate and invalidLkasSetting below must not act on that
-    self.cam_laneinfo_seen |= len(cp_cam.vl_all["CAM_LANEINFO"]["LANE_LINES"]) > 0
+    # CAM_LANEINFO freshness, same shape as stock_radar_silent_frames below: before the
+    # first frame the parser reads all-zero, and through a camera dropout it repeats stale
+    # values; neither may drive the FSC settle gate or invalidLkasSetting
+    if len(cp_cam.vl_all["CAM_LANEINFO"]["LANE_LINES"]) > 0:
+      self.cam_laneinfo_seen = True
+      self.cam_laneinfo_silent_frames = 0
+    else:
+      self.cam_laneinfo_silent_frames += 1
+    cam_laneinfo_fresh = self.cam_laneinfo_seen and self.cam_laneinfo_silent_frames < CAM_LANEINFO_FRESH_FRAMES
 
     if self.CP.openpilotLongitudinalControl:
       # The radar teardown silences the radar-owned CRZ_CTRL frame, so cruise state comes
@@ -179,10 +187,7 @@ class CarState(CarStateBase, CarStateExt):
       # timer at zero, so the radar was never silenced and the two-master guard held
       # accFaulted for the entire drive with nothing to tell the driver why.
       laneinfo = cp_cam.vl["CAM_LANEINFO"]
-      # can_valid guards a camera dropout: the parser repeats its last values, which would
-      # keep the timer running toward a teardown authorized by a camera nobody has heard from
-      settled = self.cam_laneinfo_seen and cp_cam.can_valid and \
-                not any(laneinfo[s] for s in ("NO_ERR_BIT", "ERR_BIT"))
+      settled = cam_laneinfo_fresh and not (laneinfo["NO_ERR_BIT"] or laneinfo["ERR_BIT"])
       self.fsc_settled_frames = self.fsc_settled_frames + 1 if settled else 0
     else:
       # TODO: the signal used for available seems to be the adaptive cruise signal, instead of the main on
@@ -202,9 +207,7 @@ class CarState(CarStateBase, CarStateExt):
 
     # stock lkas should be on
     # TODO: is this needed?
-    # the seen latch keeps the parser's pre-first-frame all-zero read from flashing the
-    # alert at boot, same hazard the settle gate above guards
-    ret.invalidLkasSetting = self.cam_laneinfo_seen and cp_cam.vl["CAM_LANEINFO"]["LANE_LINES"] == 0
+    ret.invalidLkasSetting = cam_laneinfo_fresh and cp_cam.vl["CAM_LANEINFO"]["LANE_LINES"] == 0
 
     if ret.cruiseState.enabled:
       if not self.lkas_allowed_speed and self.acc_active_last:
@@ -221,20 +224,16 @@ class CarState(CarStateBase, CarStateExt):
     else:
       # CX-5 2022: EPS accepts steering at all speeds regardless of LKAS_BLOCK.
       # Verified across 5.5M frames: LKAS_BLOCK never indicates a real steering failure.
-      # minSteerSpeed == 0 doubles as the "2022+ EPS present" marker here and in
-      # CarControllerParams; if that tuning coupling ever breaks, give the EPS its own
-      # MazdaFlags bit instead
+      # (minSteerSpeed == 0 is the "2022+ EPS present" marker, here and in CarControllerParams)
       ret.steerFaultTemporary = False
 
     self.acc_active_last = ret.cruiseState.enabled
 
     self.crz_btns_counter = cp.vl["CRZ_BTNS"]["CTR"]
 
-    # camera signals; copied because the parser mutates these dicts in place on the next
-    # update, and the carcontroller reads them a frame later (Toyota and Hyundai copy their
-    # HUD dicts for the same reason)
-    self.cam_lkas = dict(cp_cam.vl["CAM_LKAS"])
-    self.cam_laneinfo = dict(cp_cam.vl["CAM_LANEINFO"])
+    # camera signals
+    self.cam_lkas = cp_cam.vl["CAM_LKAS"]
+    self.cam_laneinfo = cp_cam.vl["CAM_LANEINFO"]
     ret.steerFaultPermanent = cp_cam.vl["CAM_LKAS"]["ERR_BIT_1"] == 1
 
     # cruise control button events: distance, inc, dec, resume, cancel, and main

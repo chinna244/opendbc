@@ -30,9 +30,11 @@ class CarControllerParams:
   # Radar session timing, seconds. The FSC's radar-presence check faulted when the radar
   # went quiet 1.9 s after the camera's boot settle and passed from 5.8 s
   # (docs/mazda-alpha-long-setup-teardown.md), hence the 10 s settle requirement.
-  FSC_SETTLE_T = 10.0         # observed-settled time before the teardown may start
-  STOCK_RADAR_ALIVE_T = 0.05  # stock CRZ_INFO runs at 50 Hz; silent this long = torn down
-  STOCK_RADAR_GUARD_T = 1.0   # two-master guard: block engagement until silent this long
+  FSC_SETTLE_T = 10.0          # observed-settled time before the teardown may start
+  STOCK_RADAR_ALIVE_T = 0.05   # stock CRZ_INFO runs at 50 Hz; silent this long = torn down
+  STOCK_RADAR_GUARD_T = 1.0    # two-master guard: block engagement until silent this long
+  RADAR_SESSION_LIMIT_T = 10.0  # per-episode UDS budget: a refusing radar gives up here
+  CAM_LANEINFO_FRESH_T = 0.5   # camera counts as heard from if CAM_LANEINFO arrived this recently
 
   # RESUME_UNLATCHING pulse width at the release; stock latched releases pulse 0.22-0.38 s,
   # this sits mid-distribution
