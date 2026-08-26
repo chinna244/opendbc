@@ -8,5 +8,7 @@ from enum import IntFlag
 
 
 class MazdaFlagsSP(IntFlag):
-  # Default-off trial: show Mazda's captured white steering icon while MADS is active.
+  # Default-on trial: show Mazda's captured white steering icon while MADS is active and MRCC is off.
   EXPERIMENTAL_MADS_WHITE_HUD = 1
+  # Default-off road probe: emit one WHITE frame after MRCC has been stably ACTIVE.
+  EXPERIMENTAL_MADS_WHITE_HUD_ACTIVE_PROBE = 2

@@ -62,12 +62,14 @@ def test_raw_liveness_expires_and_recovers_on_the_receiving_frame():
 
 class TestWhiteHudController:
   @staticmethod
-  def _controller(candidate=CAR.MAZDA_CX5_2022, flag=True):
+  def _controller(candidate=CAR.MAZDA_CX5_2022, off_flag=True, active_probe_flag=False):
     fingerprint = {0: {}, 1: {}, 2: {}}
     CP = CarInterface.get_params(candidate, fingerprint, [], alpha_long=False, is_release=False, docs=False)
     CP_SP = CarInterface.get_params_sp(CP, candidate, fingerprint, [], False, False, False)
-    if flag:
+    if off_flag:
       CP_SP.flags |= MazdaFlagsSP.EXPERIMENTAL_MADS_WHITE_HUD.value
+    if active_probe_flag:
+      CP_SP.flags |= MazdaFlagsSP.EXPERIMENTAL_MADS_WHITE_HUD_ACTIVE_PROBE.value
     return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
 
   @staticmethod
@@ -83,13 +85,15 @@ class TestWhiteHudController:
     return CC, CC_SP
 
   @staticmethod
-  def _carstate(raw=OFF, live=True, raw_armed=False, filtered_available=False,
+  def _carstate(raw=OFF, live=True, raw_armed=False, raw_active=False, filtered_available=False,
                 filtered_enabled=False, **overrides):
     cs = SimpleNamespace(
       out=SimpleNamespace(vEgoRaw=12.0, steeringTorque=0, brakePressed=False,
                           cruiseState=SimpleNamespace(available=filtered_available, enabled=filtered_enabled)),
       cruise_available=filtered_available,
-      mrcc_armed_raw=raw_armed,
+      cruise_enabled=filtered_enabled,
+      mrcc_armed_raw=raw_armed or raw_active,
+      mrcc_active_raw=raw_active,
       cam_lkas_live=True,
       cam_lkas={"ERR_BIT_1": 0, "ERR_BIT_2": 0, "LINE_NOT_VISIBLE": 0, "BIT_1": 1},
       cam_laneinfo={"LINE_VISIBLE": 0, "LINE_NOT_VISIBLE": 1, "LANE_LINES": 1,
@@ -128,15 +132,15 @@ class TestWhiteHudController:
       _, sends = controller.update(CC, CC_SP, self._carstate(), round(frame * DT_CTRL * 1e9))
     assert self._hud(sends) == WHITE
 
-  @pytest.mark.parametrize(("flag", "active", "raw", "live"), [
+  @pytest.mark.parametrize(("off_flag", "active", "raw", "live"), [
     (False, True, OFF, True),
     (True, False, OFF, True),
     (True, True, UNKNOWN, True),
     (True, True, OFF, False),
   ])
-  def test_all_disabled_or_untrusted_cases_keep_current_off(self, flag, active, raw, live):
+  def test_all_disabled_or_untrusted_cases_keep_current_off(self, off_flag, active, raw, live):
     CC, CC_SP = self._controls(active=active)
-    _, sends = self._controller(flag=flag).update(CC, CC_SP, self._carstate(raw=raw, live=live), 0)
+    _, sends = self._controller(off_flag=off_flag).update(CC, CC_SP, self._carstate(raw=raw, live=live), 0)
     assert self._hud(sends) == OFF
 
   def test_existing_steer_required_warning_is_unchanged(self):
@@ -264,3 +268,93 @@ class TestWhiteHudController:
 
     assert controller.mads_white_hud_off_frames == 1
     assert not controller.mads_white_hud_on_bus
+
+
+class TestWhiteHudActiveProbe:
+  @staticmethod
+  def _active_carstate(**overrides):
+    state = dict(
+      raw_active=True,
+      raw_armed=True,
+      filtered_available=True,
+      filtered_enabled=True,
+    )
+    state.update(overrides)
+    return TestWhiteHudController._carstate(**state)
+
+  def test_active_probe_sends_one_white_after_stable_active(self):
+    controller = TestWhiteHudController._controller(off_flag=False, active_probe_flag=True)
+    CC, CC_SP = TestWhiteHudController._controls(active=True)
+    white_frames = []
+    for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 5):
+      _, sends = controller.update(CC, CC_SP, self._active_carstate(), round(frame * DT_CTRL * 1e9))
+      if any(addr == 0x440 for addr, _dat, _bus in sends):
+        hud = TestWhiteHudController._hud(sends)
+        if hud == WHITE:
+          white_frames.append(frame)
+
+    assert len(white_frames) == 1
+    assert white_frames[0] == MADS_WHITE_HUD_OFF_CONFIRM_FRAMES - 1
+    assert controller.mads_white_hud_active_probe_sent
+
+    for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 5, 200):
+      _, sends = controller.update(CC, CC_SP, self._active_carstate(), round(frame * DT_CTRL * 1e9))
+      if any(addr == 0x440 for addr, _dat, _bus in sends):
+        assert TestWhiteHudController._hud(sends) != WHITE
+
+  def test_active_probe_does_not_run_without_flag(self):
+    controller = TestWhiteHudController._controller(off_flag=False, active_probe_flag=False)
+    CC, CC_SP = TestWhiteHudController._controls(active=True)
+    for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 5):
+      _, sends = controller.update(CC, CC_SP, self._active_carstate(), round(frame * DT_CTRL * 1e9))
+      if any(addr == 0x440 for addr, _dat, _bus in sends):
+        assert TestWhiteHudController._hud(sends) != WHITE
+
+  @pytest.mark.parametrize("state", [
+    {"raw_active": False, "raw_armed": True, "filtered_available": True, "filtered_enabled": False},
+    {"raw_active": True, "filtered_enabled": False, "filtered_available": True},
+    {"raw_active": False, "raw_armed": False, "filtered_enabled": True, "filtered_available": True},
+    {"cancel_button": 1},
+    {"tja_button": 1},
+  ])
+  def test_armed_or_transition_never_emits_active_probe_white(self, state):
+    controller = TestWhiteHudController._controller(off_flag=False, active_probe_flag=True)
+    CC, CC_SP = TestWhiteHudController._controls(active=True)
+    for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 10):
+      _, sends = controller.update(CC, CC_SP, self._active_carstate(**state), round(frame * DT_CTRL * 1e9))
+      if any(addr == 0x440 for addr, _dat, _bus in sends):
+        assert TestWhiteHudController._hud(sends) != WHITE
+
+  def test_icbm_set_activity_blocks_active_probe(self):
+    controller = TestWhiteHudController._controller(off_flag=False, active_probe_flag=True)
+    CC, CC_SP = TestWhiteHudController._controls(active=True)
+    CC_SP.intelligentCruiseButtonManagement.sendButton = (
+      structs.IntelligentCruiseButtonManagement.SendButtonState.increase
+    )
+    for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 10):
+      _, sends = controller.update(CC, CC_SP, self._active_carstate(), round(frame * DT_CTRL * 1e9))
+      if any(addr == 0x440 for addr, _dat, _bus in sends):
+        assert TestWhiteHudController._hud(sends) != WHITE
+
+  def test_leaving_active_resets_probe_for_next_episode(self):
+    controller = TestWhiteHudController._controller(off_flag=False, active_probe_flag=True)
+    CC, CC_SP = TestWhiteHudController._controls(active=True)
+    for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 1):
+      controller.update(CC, CC_SP, self._active_carstate(), round(frame * DT_CTRL * 1e9))
+    assert controller.mads_white_hud_active_probe_sent
+
+    for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 2, MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 20):
+      controller.update(
+        CC, CC_SP,
+        TestWhiteHudController._carstate(filtered_available=True, filtered_enabled=False, raw_armed=True),
+        round(frame * DT_CTRL * 1e9),
+      )
+    assert not controller.mads_white_hud_active_probe_sent
+
+    white_count = 0
+    start = MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 20
+    for frame in range(start, start + MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 5):
+      _, sends = controller.update(CC, CC_SP, self._active_carstate(), round(frame * DT_CTRL * 1e9))
+      if any(addr == 0x440 for addr, _dat, _bus in sends) and TestWhiteHudController._hud(sends) == WHITE:
+        white_count += 1
+    assert white_count == 1

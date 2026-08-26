@@ -14,6 +14,13 @@ from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
+SendButtonState = structs.IntelligentCruiseButtonManagement.SendButtonState
+ICBM_SET_BUTTONS = (
+  SendButtonState.increase,
+  SendButtonState.decrease,
+  SendButtonState.increaseHold,
+  SendButtonState.decreaseHold,
+)
 
 # Synthetic radar frames go to the car and to the camera; the panda only forwards
 # received frames between those buses, not our own transmissions.
@@ -62,6 +69,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.tja_mrcc_armed_prev: bool | None = None
     self.tja_mrcc_raw_off_frames = 0
     self.mads_white_hud_off_frames = 0
+    self.mads_white_hud_active_frames = 0
+    self.mads_white_hud_active_probe_sent = False
     self.mads_white_hud_on_bus = False
 
   def update(self, CC, CC_SP, CS, now_nanos):
@@ -282,16 +291,37 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     # CAM_LANEINFO.TJA=2 draws the WHITE wheel, but it is not display-only: the
     # Mazda body/MRCC consumes it too. Fail closed around every cruise/TJA
-    # interaction, require raw and filtered MRCC to remain off, and wait for the
-    # existing cleanup transaction to finish before advertising WHITE.
+    # interaction. OFF uses continuous 2 Hz WHITE after stable MRCC-off; the
+    # separate ACTIVE probe emits one WHITE frame after stable MRCC-active.
     cruise_state = getattr(CS.out, "cruiseState", None)
+    if self.CP.openpilotLongitudinalControl:
+      filtered_mrcc_available = bool(getattr(CS, "cruise_available", False))
+      filtered_mrcc_enabled = bool(getattr(CS, "cruise_enabled", False))
+    else:
+      filtered_mrcc_available = (
+        cruise_state is not None and bool(getattr(cruise_state, "available", False))
+      )
+      filtered_mrcc_enabled = (
+        cruise_state is not None and bool(getattr(cruise_state, "enabled", False))
+      )
+
+    mrcc_active_raw = bool(getattr(CS, "mrcc_active_raw", False))
+    mrcc_armed_idle_raw = bool(getattr(CS, "mrcc_armed_raw", False)) and not mrcc_active_raw
+    mrcc_armed_idle = mrcc_armed_idle_raw or (filtered_mrcc_available and not filtered_mrcc_enabled)
+    mrcc_active_agreed = mrcc_active_raw and filtered_mrcc_enabled and not mrcc_armed_idle
+
     mrcc_off = (
       not bool(getattr(CS, "mrcc_armed_raw", True)) and
       not bool(getattr(CS, "cruise_available", True)) and
       not bool(getattr(CS, "cruise_enabled", False)) and
       cruise_state is not None and
-      not bool(getattr(cruise_state, "available", True)) and
-      not bool(getattr(cruise_state, "enabled", True))
+      not filtered_mrcc_available and
+      not filtered_mrcc_enabled
+    )
+
+    icbm = getattr(CC_SP, "intelligentCruiseButtonManagement", None)
+    icbm_set_activity = (
+      icbm is not None and icbm.sendButton in ICBM_SET_BUTTONS
     )
     hud_button_activity = (
       bool(getattr(CS, "tja_button", 0)) or
@@ -304,21 +334,26 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       bool(getattr(CS, "accel_button", 0)) or
       bool(getattr(CS, "decel_button", 0)) or
       bool(getattr(CS, "distance_button", 0)) or
+      icbm_set_activity or
       CC.cruiseControl.cancel or CC.cruiseControl.resume
     )
-    white_hud_base_allowed = (
+    white_hud_trusted = (
       has_tja_mads(self.CP) and
-      bool(self.CP_SP.flags & MazdaFlagsSP.EXPERIMENTAL_MADS_WHITE_HUD) and
       CC_SP.mads.active and
       getattr(CS, "cam_laneinfo_live", False) and
       getattr(CS, "cam_laneinfo_raw", None) == mazdacan.MADS_HUD_OFF and
       CC.hudControl.visualAlert == VisualAlert.none and
-      mrcc_off and
       not self.tja_mrcc_unarm_pending and
       not tja_mrcc_cleanup_tx and
       not hud_button_activity
     )
-    if white_hud_base_allowed:
+
+    white_hud_off_base_allowed = (
+      bool(self.CP_SP.flags & MazdaFlagsSP.EXPERIMENTAL_MADS_WHITE_HUD) and
+      white_hud_trusted and
+      mrcc_off
+    )
+    if white_hud_off_base_allowed:
       self.mads_white_hud_off_frames = min(
         self.mads_white_hud_off_frames + 1,
         MADS_WHITE_HUD_OFF_CONFIRM_FRAMES,
@@ -326,16 +361,37 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     else:
       self.mads_white_hud_off_frames = 0
 
-    white_hud = (
-      white_hud_base_allowed and
+    if not mrcc_active_agreed:
+      self.mads_white_hud_active_probe_sent = False
+
+    white_hud_active_probe_base_allowed = (
+      bool(self.CP_SP.flags & MazdaFlagsSP.EXPERIMENTAL_MADS_WHITE_HUD_ACTIVE_PROBE) and
+      white_hud_trusted and
+      mrcc_active_agreed and
+      not self.mads_white_hud_active_probe_sent
+    )
+    if white_hud_active_probe_base_allowed:
+      self.mads_white_hud_active_frames = min(
+        self.mads_white_hud_active_frames + 1,
+        MADS_WHITE_HUD_OFF_CONFIRM_FRAMES,
+      )
+    else:
+      self.mads_white_hud_active_frames = 0
+
+    white_hud_off = (
+      white_hud_off_base_allowed and
       self.mads_white_hud_off_frames >= MADS_WHITE_HUD_OFF_CONFIRM_FRAMES
     )
+    white_hud_active_probe_ready = (
+      white_hud_active_probe_base_allowed and
+      self.mads_white_hud_active_frames >= MADS_WHITE_HUD_OFF_CONFIRM_FRAMES
+    )
+    white_hud = white_hud_off or white_hud_active_probe_ready
     withdraw_white_now = self.mads_white_hud_on_bus and not white_hud
 
-    # Preserve the normal 2 Hz cadence. The sole exception is an immediate OEM
-    # frame when WHITE becomes unsafe, so the next repeated physical button frame
-    # is not evaluated against a retained TJA=2 state.
-    if self.frame % 50 == 0 or withdraw_white_now:
+    # Preserve the normal 2 Hz cadence. Exceptions: immediate OEM withdraw when WHITE
+    # becomes unsafe, and the ACTIVE probe's single WHITE frame as soon as it qualifies.
+    if self.frame % 50 == 0 or withdraw_white_now or white_hud_active_probe_ready:
       ldw = CC.hudControl.visualAlert == VisualAlert.ldw
       steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
       # TODO: find a way to silence audible warnings so we can add more hud alerts
@@ -344,6 +400,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       alert = (alert[0], mazdacan.apply_mads_white_hud(getattr(CS, "cam_laneinfo_raw", None), alert[1], white_hud), alert[2])
       can_sends.append(alert)
       self.mads_white_hud_on_bus = alert[1] == mazdacan.MADS_HUD_WHITE
+      if white_hud_active_probe_ready and self.mads_white_hud_on_bus:
+        self.mads_white_hud_active_probe_sent = True
+        self.mads_white_hud_active_frames = 0
 
     # send steering command
     can_sends.append(mazdacan.create_steering_control(self.packer, self.CP,

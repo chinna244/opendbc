@@ -46,6 +46,9 @@ class CarState(CarStateBase, CarStateExt):
     # cruise_available, this must reflect an accepted MRCC-off tap while the brake is
     # held so a second TJA press does not mistake the cached state for pre-armed MRCC.
     self.mrcc_armed_raw = False
+    # Raw ACC_ACTIVE only. mrcc_armed_raw stays ACC_OFF|ACC_ACTIVE for cleanup; do not
+    # use it to distinguish ARMED from ACTIVE for the experimental white HUD gate.
+    self.mrcc_active_raw = False
     self.brake_pressed_prev = False
     self.stock_radar_silent_frames = 0
     self.radar_was_silenced = False
@@ -141,6 +144,7 @@ class CarState(CarStateBase, CarStateExt):
 
     acc_armed = cp.vl["PEDALS"]["ACC_OFF"] == 1
     acc_active = cp.vl["PEDALS"]["ACC_ACTIVE"] == 1
+    self.mrcc_active_raw = acc_active
     self.mrcc_armed_raw = acc_armed or acc_active
 
     # CAM_LANEINFO freshness, same shape as stock_radar_silent_frames below: before the
