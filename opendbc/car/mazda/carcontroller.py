@@ -124,14 +124,18 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     can_sends = []
 
     # Radar session sequencing: hold off the teardown until the FSC's cold-boot
-    # radar-presence check has cleared (carstate's settle timer), keep the radar in its
-    # programming session while we own the bus, and on an onroad toggle-off return it
-    # to the default session before card requests the process restart. Never yank the
-    # radar out from under an active stock MRCC engagement (driver SET before the gate
-    # passed on a warm boot): wait for the driver to disengage first.
+    # radar-presence check has cleared (carstate's settle timer). Actively silencing a live
+    # radar disables AEB, so like every disable_ecu caller it only starts at standstill (a
+    # warm process restart while moving waits for the next stop); adopting an already-quiet
+    # radar disables nothing and proceeds anywhere. Keep the radar in its programming
+    # session while we own the bus, and on an onroad toggle-off return it to the default
+    # session before card requests the process restart. Never yank the radar out from under
+    # an active stock MRCC engagement (driver SET before the gate passed on a warm boot):
+    # wait for the driver to disengage first.
     stock_radar_alive = CS.stock_radar_alive
-    teardown_ok = CS.fsc_settled and not (stock_radar_alive and CS.out.cruiseState.enabled)
-    session_state = self.radar_session.update(teardown_ok, stock_radar_alive, CC_SP.stockEcuHandBack)
+    setup_ok = CS.fsc_settled and not (stock_radar_alive and CS.out.cruiseState.enabled)
+    session_state = self.radar_session.update(setup_ok, stock_radar_alive, CC_SP.stockEcuHandBack,
+                                              standstill=CS.out.standstill)
     # synthetic radar frames flow while we own the bus, and keep flowing through the
     # hand-back so the camera never sees a radar gap
     radar_master = session_state in (RadarSessionState.SILENCED, RadarSessionState.HANDBACK)
@@ -146,16 +150,17 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         can_sends.append(make_tester_present_msg(RADAR_ADDR, 0, suppress_response=True))
 
     stopping = CC.actuators.longControlState == LongCtrlState.stopping
-    # A gas press is an override, not a disengagement. The command goes to zero as everywhere
-    # else, but the engaged bits stay set off CC.enabled the way Honda drives ACC_CONTROL's
-    # CONTROL_ON. Clearing them mid-decel takes the PCM out of ACC mode as the driver adds
-    # throttle, so a light pedal input lands as a lurch and a rev flare; stock MRCC holds them
-    # through 9 of 11 decel overrides (analyze_gas_override.py, 576 stock segments).
-    gas_override = CC.enabled and (CC.cruiseControl.override or CS.out.gasPressed)
-    long_engaged = CC.longActive or gas_override
+    # The engaged bits follow CC.enabled the way Honda drives ACC_CONTROL's CONTROL_ON: a gas
+    # press is an override, not a disengagement, so enabled holds while controlsd drops
+    # longActive and the command goes to zero. Clearing the bits mid-decel takes the PCM out
+    # of ACC mode as the driver adds throttle, so a light pedal input lands as a lurch and a
+    # rev flare; stock MRCC holds them through 9 of 11 decel overrides (analyze_gas_override.py,
+    # 576 stock segments). (MADS lateral-only sits outside CC.enabled, so this stays False
+    # with cruise off.)
+    long_engaged = CC.enabled
     sm = self.stop_and_go
     sm.update(long_engaged, stopping, CS.out.standstill, CC.actuators.accel, CS.brake_hold,
-              real_lead=self.lead_adv.real_lead)
+              gas_pressed=CS.out.gasPressed, real_lead=self.lead_adv.real_lead)
     # perception, not control: the advertisement runs engaged or not, like the radar it
     # stands in for; the phase is a stop phase only while we are actually holding
     self.lead_adv.update(CC.hudControl.leadVisible, CC_SP.leadOne.dRel,

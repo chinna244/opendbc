@@ -13,10 +13,11 @@ from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.mazda import longitudinal, mazdacan
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.longitudinal import (ESCORT_DROP_DIST, ESCORT_LEAD_IN_FRAMES, ESCORT_RELV_MAX,
-                                            LEAD_DEBOUNCE_FRAMES, RESUME_UNLATCH_FRAMES,
-                                            AdvertisedLead, ResumeEscort, StandstillHold)
+                                            LEAD_DEBOUNCE_FRAMES, RADAR_SESSION_LIMIT_FRAMES, RESUME_UNLATCH_FRAMES,
+                                            AdvertisedLead, RadarSessionManager, RadarSessionState, ResumeEscort,
+                                            StandstillHold)
 from opendbc.car.mazda.interface import CarInterface
-from opendbc.car.mazda.values import CAR, CarControllerParams
+from opendbc.car.mazda.values import CAR, Buttons, CarControllerParams
 
 
 class TestCarControllerParams:
@@ -299,6 +300,22 @@ class TestStandstillHold:
     self.run(sm, 1, standstill=True, plan_accel=0.3, real_lead=None)
     assert not sm.holding and sm.resume_unlatching
 
+  def test_driver_gas_releases_the_hold_in_protocol(self, sm):
+    # the driver's pedal outranks the hold, the way Toyota's PCM lets the pedal outrank its
+    # standstill request. Holding the stop bits against the throttle until the car moved put
+    # an out-of-protocol release on the bus (stop bits dropping at speed with no unlatch
+    # pulse, route 0000004d t+210.9)
+    self.run(sm, 1, stopping=True)
+    self.run(sm, 100, stopping=True, standstill=True)
+    assert sm.holding
+    self.run(sm, 1, stopping=True, standstill=True, gas_pressed=True)
+    assert not sm.holding and sm.resume_unlatching, "gas at a held standstill must release with a pulse"
+    # no re-hold while the pedal is down, and a fresh hold once it lifts with the car stopped
+    self.run(sm, RESUME_UNLATCH_FRAMES + 5, stopping=True, standstill=True, gas_pressed=True)
+    assert not sm.holding
+    self.run(sm, 1, stopping=True, standstill=True)
+    assert sm.holding
+
   def test_escort_off_releases_a_no_lead_hold_undeferred(self, sm):
     # the attribution trial: with the escort off, a no-lead release fires immediately and
     # pulses with nothing advertised, the exact release route 000000fe faulted on
@@ -422,11 +439,17 @@ class TestAdvertisedLead:
   def test_measurement_is_coasted_across_a_dropout(self, al):
     # leadOne goes to zero the instant vision drops the lead, well before the debounce expires.
     # Advertising a fabricated stand-in there put a stationary object 10.25 m dead ahead on the
-    # bus at 22 m/s; the last real measurement carries the gap instead.
+    # bus at 22 m/s; the last real measurement carries the gap instead -- propagated by its own
+    # range rate, never repeated frozen (a frozen range is the camera's proven SCBS trigger)
     self.run(al, 2 * LEAD_DEBOUNCE_FRAMES, d_rel=120.0, v_rel=0.5)
     assert al.lead == (120.0, 0.5)
-    self.run(al, LEAD_DEBOUNCE_FRAMES - 1, lead_visible=False, d_rel=0., v_rel=0.)
-    assert al.lead == (120.0, 0.5), "dropped the measurement inside the debounce window"
+    coast_frames = LEAD_DEBOUNCE_FRAMES - 1
+    self.run(al, coast_frames, lead_visible=False, d_rel=0., v_rel=0.)
+    assert al.lead is not None, "dropped the measurement inside the debounce window"
+    d, v = al.lead
+    assert v == 0.5
+    assert d == pytest.approx(120.0 + 0.5 * coast_frames * DT_CTRL, abs=1e-6), \
+      "the coast must propagate the range, not freeze it"
 
   def test_holding_reports_the_stop_phase_only_with_a_lead(self, al):
     self.run(al, 2 * LEAD_DEBOUNCE_FRAMES, holding=True)
@@ -881,15 +904,61 @@ SESSION_DFLT_DAT = bytes([0x02, 0x10, 0x01, 0, 0, 0, 0, 0])
 TESTER_PRESENT_DAT = bytes([0x02, 0x3e, 0x80, 0, 0, 0, 0, 0])
 
 
+class TestRadarSessionBounds:
+  """The fire-and-forget UDS session has no readable NRC, so every episode is bounded the
+  way disable_ecu bounds its retries."""
+
+  def test_silencing_gives_up_bounded(self):
+    m = RadarSessionManager()
+    for _ in range(RADAR_SESSION_LIMIT_FRAMES + 2):
+      state = m.update(True, True, False)
+    assert state == RadarSessionState.STOCK and m.silencing_failed
+    # and stays given up for the drive: stock keeps the bus
+    for _ in range(10):
+      assert m.update(True, True, False) == RadarSessionState.STOCK
+
+  def test_handback_stops_waiting_for_a_dead_radar(self):
+    m = RadarSessionManager()
+    m.update(True, False, False)
+    assert m.state == RadarSessionState.SILENCED
+    for _ in range(RADAR_SESSION_LIMIT_FRAMES + 2):
+      state = m.update(True, False, True)
+    assert state == RadarSessionState.STOCK
+
+  def test_silencing_waits_for_standstill_but_adoption_does_not(self):
+    # actively silencing disables AEB, so it only starts pre-motion like disable_ecu;
+    # adopting an already-quiet radar disables nothing and proceeds anywhere
+    m = RadarSessionManager()
+    for _ in range(10):
+      assert m.update(True, True, False, standstill=False) == RadarSessionState.STOCK
+    assert m.update(True, True, False, standstill=True) == RadarSessionState.SILENCING
+    m2 = RadarSessionManager()
+    assert m2.update(True, False, False, standstill=False) == RadarSessionState.SILENCED
+
+
+class TestNonGen1Platforms:
+
+  def test_message_builders_refuse_unknown_platforms(self):
+    # the fall-through used to emit an all-zero CAM_LKAS and return None from the button
+    # builder, straight into can_sends
+    packer = CANPacker("mazda_2017")
+    fake_cp = SimpleNamespace(flags=0, carFingerprint="MAZDA_FUTURE")
+    with pytest.raises(NotImplementedError):
+      mazdacan.create_steering_control(packer, fake_cp, 0, 0, {"BIT_1": 0, "ERR_BIT_1": 0, "ERR_BIT_2": 0})
+    with pytest.raises(NotImplementedError):
+      mazdacan.create_button_cmd(packer, fake_cp, 0, Buttons.CANCEL)
+
+
 class TestRadarSessionSequencing:
   """Boot teardown deferral and the ordered hand-back: what goes on the bus in each
   radar session state, driven through the real CarController.update_longitudinal."""
 
-  def _step(self, cc, stock_radar_alive, fsc_settled, handback=False, cruise_engaged=False):
+  def _step(self, cc, stock_radar_alive, fsc_settled, handback=False, cruise_engaged=False, standstill=True):
+    # standstill=True models the parked boot; actively silencing a live radar is gated on it
     off = structs.CarControl.Actuators.LongControlState.off
     return _step(cc, long_active=False, accel=0., long_state=off, lead_visible=False, available=False,
                  stock_radar_alive=stock_radar_alive, fsc_settled=fsc_settled,
-                 handback=handback, cruise_engaged=cruise_engaged)
+                 handback=handback, cruise_engaged=cruise_engaged, standstill=standstill)
 
   @staticmethod
   def _uds(sends):
