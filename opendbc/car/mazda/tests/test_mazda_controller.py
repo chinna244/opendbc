@@ -96,6 +96,20 @@ class TestMazdaLongitudinalMessages:
   def packer(self):
     return CANPacker("mazda_2017")
 
+  def test_alert_command_relays_state_but_not_the_tja_churn(self, packer):
+    # camera error and line state pass through to the dash; the camera's own TJA/CTS state
+    # machine churns against steering it did not command (442 TJA_TRANSITION toggles in 22
+    # min, route 0000010b) and relaying it flapped the dash, so those two fields stay zeroed
+    cam_msg = {"LINE_VISIBLE": 1, "LINE_NOT_VISIBLE": 0, "LANE_LINES": 2, "BIT1": 1,
+               "BIT2": 0, "BIT3": 0, "NO_ERR_BIT": 0, "ERR_BIT": 1,
+               "TJA": 4, "TJA_TRANSITION": 3, "S1": 1, "S1_HBEAM": 0}
+    dat = mazdacan.create_alert_command(packer, cam_msg, ldw=False, steer_required=False)[1]
+    cp = CANParser("mazda_2017", [("CAM_LANEINFO", float("nan"))], 0)
+    cp.update([(0, [(0x440, dat, 0)])])
+    out = cp.vl["CAM_LANEINFO"]
+    assert out["ERR_BIT"] == 1 and out["LINE_VISIBLE"] == 1 and out["LANE_LINES"] == 2 and out["S1"] == 1
+    assert out["TJA"] == 0 and out["TJA_TRANSITION"] == 0
+
   def test_crz_info_standby_matches_stock(self, packer):
     for counter in range(16):
       checksum = (0x5d - counter) & 0xff
@@ -301,19 +315,19 @@ class TestStandstillHold:
     self.run(sm, 1, stopping=False, plan_accel=0.3)
     assert not sm.holding
 
-  def test_driver_gas_releases_the_hold_in_protocol(self, sm):
+  def test_driver_gas_releases_the_hold_without_a_pulse(self, sm):
     # the driver's pedal outranks the hold, the way Toyota's PCM lets the pedal outrank its
-    # standstill request. Holding the stop bits against the throttle until the car moved put
-    # an out-of-protocol release on the bus (stop bits dropping at speed with no unlatch
-    # pulse, route 0000004d t+210.9)
+    # standstill request -- but the pulse is the ACC's resume protocol, not the driver's:
+    # stock's captured gas-ended hold drops the stop bits with no RESUME_UNLATCHING at all,
+    # and pulsing there latched an SCBS fault (route 00000103 t+163.8)
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True)
     assert sm.holding
     self.run(sm, 1, stopping=True, standstill=True, gas_pressed=True)
-    assert not sm.holding and sm.resume_unlatching, "gas at a held standstill must release with a pulse"
+    assert not sm.holding and not sm.resume_unlatching, "gas release must not fire the ACC resume pulse"
     # no re-hold while the pedal is down, and a fresh hold once it lifts with the car stopped
     self.run(sm, RESUME_UNLATCH_FRAMES + 5, stopping=True, standstill=True, gas_pressed=True)
-    assert not sm.holding
+    assert not sm.holding and not sm.resume_unlatching
     self.run(sm, 1, stopping=True, standstill=True)
     assert sm.holding
 
@@ -349,18 +363,19 @@ class TestStandstillHold:
     assert pulses <= 1200 // (2 * 30), "more pulses than releases"
 
   def test_pulse_never_retriggers_mid_pulse(self, sm):
-    # gas releases bypass the debounce, so they can exercise release -> re-hold -> release
-    # inside one pulse window: the playing pulse must run to completion, not restart
+    # release -> re-hold -> release inside one pulse window: the playing pulse must run to
+    # completion, not restart (the debounce is short enough to fit a second release inside)
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True)
-    self.run(sm, 1, stopping=True, standstill=True, gas_pressed=True)
+    self.run(sm, RELEASE_DEBOUNCE_FRAMES, stopping=True, standstill=True, plan_accel=0.3)
     assert sm.resume_unlatching
-    self.run(sm, 5, stopping=True, standstill=True, gas_pressed=True)
+    self.run(sm, 3, standstill=True, plan_accel=0.3)
     self.run(sm, 1, stopping=True, standstill=True)  # re-hold mid-pulse
     assert sm.holding and not sm.stop_bits
     remaining = sm.unlatch_frames
-    self.run(sm, 1, stopping=True, standstill=True, gas_pressed=True)  # release again mid-pulse
-    assert sm.unlatch_frames == remaining - 1, "pulse restarted mid-pulse"
+    self.run(sm, RELEASE_DEBOUNCE_FRAMES, stopping=True, standstill=True, plan_accel=0.3)  # release again mid-pulse
+    assert not sm.holding
+    assert sm.unlatch_frames == remaining - RELEASE_DEBOUNCE_FRAMES, "pulse restarted mid-pulse"
 
 
 class TestAdvertisedLead:
