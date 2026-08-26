@@ -13,7 +13,8 @@ from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.mazda import longitudinal, mazdacan
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.longitudinal import (ESCORT_DROP_DIST, ESCORT_LEAD_IN_FRAMES, ESCORT_RELV_MAX,
-                                            LEAD_DEBOUNCE_FRAMES, RADAR_SESSION_LIMIT_FRAMES, RESUME_UNLATCH_FRAMES,
+                                            LEAD_DEBOUNCE_FRAMES, RADAR_SESSION_LIMIT_FRAMES, RELEASE_DEBOUNCE_FRAMES,
+                                            RESUME_UNLATCH_FRAMES,
                                             AdvertisedLead, RadarSessionManager, RadarSessionState, ResumeEscort,
                                             StandstillHold)
 from opendbc.car.mazda.interface import CarInterface
@@ -243,6 +244,9 @@ class TestStandstillHold:
     self.run(sm, 1, stopping=True)
     self.run(sm, 500, stopping=True, standstill=True, brake_hold=True)
     assert sm.holding
+    # the release is debounced: a plan asking to move for less than the window changes nothing
+    self.run(sm, RELEASE_DEBOUNCE_FRAMES - 1, standstill=True, plan_accel=0.1)
+    assert sm.holding and not sm.resume_unlatching
     self.run(sm, 1, standstill=True, plan_accel=0.1)
     assert not sm.holding and not sm.car_has_hold
     assert sm.resume_unlatching
@@ -257,16 +261,21 @@ class TestStandstillHold:
   def test_hold_comes_back_if_the_plan_changes_its_mind(self, sm):
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True)
-    self.run(sm, 5, standstill=True, plan_accel=0.2)
+    self.run(sm, RELEASE_DEBOUNCE_FRAMES, standstill=True, plan_accel=0.2)
     assert not sm.holding
     self.run(sm, 1, stopping=True, standstill=True, plan_accel=-1.0)
-    assert sm.holding and sm.stop_bits
+    assert sm.holding
+    # the release pulse is still playing: the stop bits wait it out (stock never emits
+    # STOPPING together with RESUME_UNLATCHING) and reassert the frame it completes
+    assert sm.resume_unlatching and not sm.stop_bits
+    self.run(sm, RESUME_UNLATCH_FRAMES, stopping=True, standstill=True, plan_accel=-1.0)
+    assert sm.holding and sm.stop_bits and not sm.resume_unlatching
 
   def test_unlatch_pulses_once_at_the_release(self, sm):
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True)
     assert not sm.resume_unlatching
-    self.run(sm, 1, standstill=True, plan_accel=0.1)
+    self.run(sm, RELEASE_DEBOUNCE_FRAMES, standstill=True, plan_accel=0.1)
     assert sm.resume_unlatching
     self.run(sm, RESUME_UNLATCH_FRAMES, standstill=True, plan_accel=0.1)
     assert not sm.resume_unlatching
@@ -299,7 +308,7 @@ class TestStandstillHold:
     self.run(sm, 1, stopping=True, real_lead=None)
     self.run(sm, 100, stopping=True, standstill=True, real_lead=None)
     # the plan asks to move but the ghost has not visibly pulled away yet: no release, no pulse
-    self.run(sm, ESCORT_LEAD_IN_FRAMES, standstill=True, plan_accel=0.3, real_lead=None)
+    self.run(sm, RELEASE_DEBOUNCE_FRAMES + ESCORT_LEAD_IN_FRAMES - 1, standstill=True, plan_accel=0.3, real_lead=None)
     assert sm.holding and not sm.resume_unlatching and sm.escort.lead is not None
     self.run(sm, 1, standstill=True, plan_accel=0.3, real_lead=None)
     assert not sm.holding and sm.resume_unlatching
@@ -325,14 +334,59 @@ class TestStandstillHold:
     # pulses with nothing advertised, the exact release route 000000fe faulted on
     self.run(sm, 1, stopping=True, real_lead=None)
     self.run(sm, 100, stopping=True, standstill=True, real_lead=None)
-    self.run(sm, 1, standstill=True, plan_accel=0.3, real_lead=None)
+    self.run(sm, RELEASE_DEBOUNCE_FRAMES, standstill=True, plan_accel=0.3, real_lead=None)
     assert not sm.holding and sm.resume_unlatching and sm.escort.lead is None
 
   def test_with_lead_release_is_not_deferred(self, sm):
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True)
-    self.run(sm, 1, standstill=True, plan_accel=0.3)
+    self.run(sm, RELEASE_DEBOUNCE_FRAMES, standstill=True, plan_accel=0.3)
     assert not sm.holding and sm.resume_unlatching and sm.escort.lead is None
+
+  def test_plan_flap_below_the_debounce_never_releases(self, sm):
+    # the SCBS-axis contamination shape: at a held standstill the lead inches forward and
+    # stops, the plan flapping across zero. Sub-debounce flaps must not release at all, and
+    # no frame may ever carry the stop bits and the release pulse together
+    self.run(sm, 1, stopping=True)
+    self.run(sm, 100, stopping=True, standstill=True)
+    for i in range(600):
+      accel = 0.3 if (i // 10) % 2 == 0 else -1.0  # 0.1 s swings, below the 0.2 s debounce
+      sm.update(long_engaged=True, stopping=accel < 0, standstill=True, plan_accel=accel,
+                brake_hold=False, gas_pressed=False, real_lead=(5.0, 0.))
+      assert not (sm.stop_bits and sm.resume_unlatching), "stop bits and pulse on one frame"
+      assert not sm.resume_unlatching, "a sub-debounce flap fired a release pulse"
+    assert sm.holding
+
+  def test_slow_flap_never_mixes_stop_bits_with_the_pulse(self, sm):
+    # swings long enough to release each time: each release still pulses exactly once, and a
+    # re-hold mid-pulse waits the pulse out before re-asserting the stop bits
+    self.run(sm, 1, stopping=True)
+    self.run(sm, 100, stopping=True, standstill=True)
+    pulses = 0
+    prev_unlatch = False
+    for i in range(1200):
+      accel = 0.3 if (i // 30) % 2 == 0 else -1.0  # 0.3 s swings, above the debounce
+      sm.update(long_engaged=True, stopping=accel < 0, standstill=True, plan_accel=accel,
+                brake_hold=False, gas_pressed=False, real_lead=(5.0, 0.))
+      assert not (sm.stop_bits and sm.resume_unlatching), "stop bits and pulse on one frame"
+      pulses += int(sm.resume_unlatching and not prev_unlatch)
+      prev_unlatch = sm.resume_unlatching
+    assert pulses > 0
+    assert pulses <= 1200 // (2 * 30), "more pulses than releases"
+
+  def test_pulse_never_retriggers_mid_pulse(self, sm):
+    # gas releases bypass the debounce, so they can exercise release -> re-hold -> release
+    # inside one pulse window: the playing pulse must run to completion, not restart
+    self.run(sm, 1, stopping=True)
+    self.run(sm, 100, stopping=True, standstill=True)
+    self.run(sm, 1, stopping=True, standstill=True, gas_pressed=True)
+    assert sm.resume_unlatching
+    self.run(sm, 5, stopping=True, standstill=True, gas_pressed=True)
+    self.run(sm, 1, stopping=True, standstill=True)  # re-hold mid-pulse
+    assert sm.holding and not sm.stop_bits
+    remaining = sm.unlatch_frames
+    self.run(sm, 1, stopping=True, standstill=True, gas_pressed=True)  # release again mid-pulse
+    assert sm.unlatch_frames == remaining - 1, "pulse restarted mid-pulse"
 
 
 class TestResumeEscort:
@@ -400,7 +454,8 @@ class TestResumeEscort:
     monkeypatch.setattr(longitudinal, "ESCORT_ENABLED", True)
     sm = StandstillHold()
     sm.update(True, True, True, -1.024, False, False, real_lead=None)
-    sm.update(True, False, True, 0.3, False, False, real_lead=None)
+    for _ in range(RELEASE_DEBOUNCE_FRAMES):
+      sm.update(True, False, True, 0.3, False, False, real_lead=None)
     assert sm.escort.lead is not None
     sm.update(False, False, True, 0.3, False, False, real_lead=None)
     assert sm.escort.lead is None and not sm.escort.deferring
@@ -771,20 +826,21 @@ class TestLongitudinalIntegration:
       d, v = (_lead_track(trk) if trk is not None and _track_occupied(trk) else (None, None))
       rows.append(Row(i, unlatch, has_lead, phase, d, v))
 
-    # the release waits out the lead-in: no pulse before it, a pulse right after
-    assert not any(r.unlatch for r in rows if r.frame <= ESCORT_LEAD_IN_FRAMES - 2), "released before the escort pulled away"
+    # the release waits out the debounce and the lead-in: no pulse before, a pulse right after
+    assert not any(r.unlatch for r in rows if r.frame <= RELEASE_DEBOUNCE_FRAMES + ESCORT_LEAD_IN_FRAMES - 2), \
+      "released before the escort pulled away"
     pulse_start = next(r.frame for r in rows if r.unlatch)
-    assert pulse_start <= ESCORT_LEAD_IN_FRAMES + 4
+    assert pulse_start <= RELEASE_DEBOUNCE_FRAMES + ESCORT_LEAD_IN_FRAMES + 4
     # from the first advertisement through the pulse the ghost is present, consistent and receding
     escorted = [r for r in rows if r.has_lead == 1]
-    assert escorted and escorted[0].frame <= 2, "the escort was not advertised from the release request"
+    assert escorted and escorted[0].frame <= RELEASE_DEBOUNCE_FRAMES + 2, "the escort was not advertised from the release request"
     at_pulse = next(r for r in rows if r.unlatch)
     assert at_pulse.has_lead == 1 and at_pulse.dist is not None, "pulsed the release with nothing advertised"
     assert at_pulse.relv > 0., "the ghost was not pulling away at the pulse"
     dists = [r.dist for r in escorted if r.dist is not None]
     assert all(a <= b for a, b in zip(dists, dists[1:], strict=False)), "the escort came closer"
     # the exit completes once rolling: everything drops together and stays down
-    dropped = [r for r in rows if r.has_lead == 0]
+    dropped = [r for r in rows if r.frame > pulse_start and r.has_lead == 0]
     assert dropped, "the escort never ended"
     drop = dropped[0].frame
     assert all(r.has_lead == 0 and r.phase == 0 and r.dist is None for r in rows if r.frame >= drop)
@@ -876,11 +932,12 @@ class TestLongitudinalIntegration:
     assert cc.stop_and_go.holding and cc.stop_and_go.car_has_hold
     assert not cc.stop_and_go.stop_bits  # body owns the brakes, stock relaxes here
 
-    sends = _step(cc, long_state=long.pid, accel=0.3, standstill=True,
-                  cruise_engaged=True, brake_hold=True)
+    for _ in range(RELEASE_DEBOUNCE_FRAMES):
+      sends = _step(cc, long_state=long.pid, accel=0.3, standstill=True,
+                    cruise_engaged=True, brake_hold=True)
+      assert not any(a == 0x9d for a, _, _ in sends), "CRZ_BTNS written at the release"
     assert not cc.stop_and_go.holding
     assert cc.stop_and_go.resume_unlatching
-    assert not any(a == 0x9d for a, _, _ in sends), "CRZ_BTNS written at the release"
 
   def test_gas_pedal_without_cruise_stays_disengaged(self, cc):
     # gas pressed while openpilot is not enabled must not advertise an engaged ACC

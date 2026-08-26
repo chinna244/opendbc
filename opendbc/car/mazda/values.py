@@ -47,6 +47,14 @@ class CarControllerParams:
 
   CANCEL_CONTEXT_T = 0.5       # a wheel CANCEL keeps availability drops landing this long after release
 
+  # The plan flapping across zero at a held standstill (a lead inches forward and stops) used
+  # to fire a fresh RESUME_UNLATCHING pulse per flap and re-assert the stop bits mid-pulse, a
+  # combination stock never emits (stock pulses exactly once per release, stop bits already
+  # dropped). The plan must ask to move this long before the hold releases; stock's releases
+  # lag the lead's departure by at least this much (all 23 latched releases show the lead
+  # already opening at >= +0.31 m/s at the pulse, ~0.2 s into a typical drive-off).
+  RELEASE_DEBOUNCE_T = 0.2
+
   # A marginal vision lead flickers leadVisible faster than the camera can be shown a track
   # appearing and vanishing (route 6bb2dc61c4 t+400: 6 toggles in 1.4 s on a 120 m lead), so the
   # advertised lead only follows a state that has held steady, the way Hyundai debounces its

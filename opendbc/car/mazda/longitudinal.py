@@ -108,6 +108,7 @@ class RadarSessionManager:
 
 RESUME_UNLATCH_FRAMES = int(CarControllerParams.RESUME_UNLATCH_T / DT_CTRL)
 LEAD_DEBOUNCE_FRAMES = int(CarControllerParams.LEAD_DEBOUNCE_T / DT_CTRL)
+RELEASE_DEBOUNCE_FRAMES = int(CarControllerParams.RELEASE_DEBOUNCE_T / DT_CTRL)
 
 # Trial (2026-08-26): the escort is off to attribute route 000000fe's fault. That release had
 # two deviations from stock, not one: no advertised object AND a 0.20 s unlatch pulse below
@@ -206,6 +207,7 @@ class StandstillHold:
     self.holding = False
     self.car_has_hold = False
     self.unlatch_frames = 0
+    self.release_frames = 0
     self.escort.reset()
 
   def update(self, long_engaged: bool, stopping: bool, standstill: bool,
@@ -216,19 +218,25 @@ class StandstillHold:
       return
 
     was_holding = self.holding
-    self.escort.update(ESCORT_ENABLED and self.holding and plan_accel > 0., standstill, real_lead)
+    # the plan's request to move is debounced so a one-frame blip (a lead that inches forward
+    # and stops) cannot fire a phantom release pulse at a standstill; the driver's pedal is
+    # not debounced, it outranks the hold immediately
+    self.release_frames = self.release_frames + 1 if plan_accel > 0. else 0
+    plan_wants_go = self.release_frames >= RELEASE_DEBOUNCE_FRAMES
+    self.escort.update(ESCORT_ENABLED and self.holding and plan_wants_go, standstill, real_lead)
     # the plan asking for acceleration releases the hold, and so does the driver's pedal:
     # Toyota's PCM lets the pedal outrank its standstill request the same way. Holding the
     # stop bits against the throttle until the car physically moved put an out-of-protocol
     # release on the bus, stop bits dropping at speed with no unlatch pulse (route 0000004d
     # t+210.9). Stock keeps STOPPING strictly to the final creep: 2,078 rolling STOPPING
     # frames in the corpus, all below 0.55 m/s.
-    release = gas_pressed or (plan_accel > 0. and not self.escort.deferring)
+    release = gas_pressed or (plan_wants_go and not self.escort.deferring)
     self.holding = not release and (stopping or standstill)
 
     if self.unlatch_frames > 0:
       self.unlatch_frames -= 1
-    if was_holding and not self.holding and standstill:
+    # one pulse per release, exactly as stock: never restarted while one is still playing
+    if was_holding and not self.holding and standstill and self.unlatch_frames == 0:
       self.unlatch_frames = RESUME_UNLATCH_FRAMES
 
     # the body only owns the brakes while we are still asking it to hold
@@ -237,8 +245,10 @@ class StandstillHold:
   @property
   def stop_bits(self) -> bool:
     # CRZ_INFO stop flags are held through the approach and the hold, and clear when the car
-    # takes over and the command relaxes
-    return self.holding and not self.car_has_hold
+    # takes over and the command relaxes. A re-hold while a release pulse is still playing
+    # waits the pulse out: stock never puts STOPPING and RESUME_UNLATCHING on the wire
+    # together (its stop bits are already dropped when the pulse fires, every release)
+    return self.holding and not self.car_has_hold and self.unlatch_frames == 0
 
   @property
   def resume_unlatching(self) -> bool:
