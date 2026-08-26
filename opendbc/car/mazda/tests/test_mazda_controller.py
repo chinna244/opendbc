@@ -773,6 +773,60 @@ class TestLongitudinalIntegration:
             standstill=True, cruise_engaged=True)
     assert cc.accel_last == 0., f"hold not released for the driver's gas: {cc.accel_last}"
 
+  def test_release_command_ramps_from_the_hold_value(self, cc):
+    """Stock never lets ACCEL_CMD climb while STOPPING is asserted: through the release
+    debounce the command stays at the hold value, and the ramp starts only once the stop
+    bits drop, so the zero-cross lands after the pulse like every captured stock release.
+    Pre-ramping toward the plan during the debounce put the zero-cross inside the pulse,
+    which the camera latched as an SCBS fault (route 00000100 t+353)."""
+    long = structs.CarControl.Actuators.LongControlState
+    lead = dict(lead_visible=True, lead_d_rel=4.0, lead_v_rel=0.0)
+    for _ in range(int(0.5 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.5, standstill=False, **lead)
+    for _ in range(int(3.0 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.3, standstill=True, **lead)
+    assert cc.accel_last == pytest.approx(-1.3)
+
+    rows = []
+    for _ in range(int(1.5 / 0.01)):
+      sends = _step(cc, long_state=long.pid, accel=1.0, standstill=True, **lead)
+      dat = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
+      if dat is not None:
+        rows.append((decode_accel_cmd_raw(dat), (dat[5] >> 2) & 1, (dat[6] >> 6) & 1))
+
+    debounce = [r for r in rows if r[1]]
+    assert debounce, "no stop-bit frames through the release debounce"
+    assert all(cmd == -1300 for cmd, _, _ in debounce), \
+      f"command moved off the hold while STOPPING was asserted: {sorted({c for c, _, _ in debounce})}"
+
+    pulse = [cmd for cmd, _, unl in rows if unl]
+    assert pulse, "release never pulsed"
+    assert max(pulse) < 0, f"command crossed zero inside the pulse: {max(pulse)}"
+    assert max(cmd for cmd, _, _ in rows) > 500, "command never ramped up after the release"
+
+  def test_latched_release_command_is_capped_through_the_pulse(self, cc):
+    # a body-latched hold releases from ACCEL_HOLD_LATCHED, so the ramp would cross zero
+    # almost immediately; stock peaks at +0.25 m/s2 inside these pulses and so must we
+    long = structs.CarControl.Actuators.LongControlState
+    lead = dict(lead_visible=True, lead_d_rel=4.0, lead_v_rel=0.0)
+    for _ in range(int(0.5 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.5, standstill=False, **lead)
+    for _ in range(int(2.0 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.3, standstill=True, brake_hold=True, **lead)
+    assert cc.accel_last == pytest.approx(CarControllerParams.ACCEL_HOLD_LATCHED)
+
+    rows = []
+    for _ in range(int(1.5 / 0.01)):
+      sends = _step(cc, long_state=long.pid, accel=1.0, standstill=True, brake_hold=True, **lead)
+      dat = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
+      if dat is not None:
+        rows.append((decode_accel_cmd_raw(dat), (dat[6] >> 6) & 1))
+
+    pulse = [cmd for cmd, unl in rows if unl]
+    cap = round(CarControllerParams.ACCEL_RESUME_PULSE_MAX * 1000)
+    assert pulse and max(pulse) == cap, f"in-pulse command off the stock ceiling: {max(pulse, default=None)}"
+    assert max(cmd for cmd, _ in rows) > cap, "command never ramped past the cap after the pulse"
+
   def test_lead_track_follows_the_measured_lead(self, cc):
     # a frozen track is what latches the camera's SCBS fault, so the range we advertise has to
     # move with the lead we are actually following

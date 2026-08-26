@@ -186,9 +186,16 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         # the body ECU is holding the brakes itself, so stop asking for them like stock does
         accel = CarControllerParams.ACCEL_HOLD_LATCHED
       elif sm.holding:
-        # the plan can turn positive while the release is deferred for the escort's lead-in;
-        # never ask the car to move while the stop bits still assert a hold
-        accel = min(accel, 0.)
+        # while the plan is braking the hold command is the plan's own, but the moment it
+        # turns positive (release debounce, escort lead-in) the hold freezes where it is:
+        # stock never lets ACCEL_CMD climb while STOPPING is asserted, and pre-ramping toward
+        # the plan here put the release's zero-cross inside the unlatch pulse, which the
+        # camera latched as an SCBS fault (route 00000100 t+353)
+        accel = min(accel, 0.) if CC.actuators.accel <= 0. else min(self.accel_last, 0.)
+      if sm.resume_unlatching:
+        # cap the launch while the release pulse plays; stock's command is still negative at
+        # the end of every non-latched pulse and peaks at +0.25 m/s2 in latched ones
+        accel = min(accel, CarControllerParams.ACCEL_RESUME_PULSE_MAX)
     self.accel_last = accel
 
     if radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:
