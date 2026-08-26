@@ -27,10 +27,17 @@ def _interface(alpha_long=True):
   return CarInterface(CP, CP_SP)
 
 
+# CAM_LANEINFO's real cadence: a ~2 Hz message with measured periods of 540-563 ms. Tests
+# feed it at this rate, not per control frame: feeding it at 100 Hz masked a freshness window
+# shorter than the message period (the gate never settled on the car while every test passed).
+CAM_LANEINFO_PERIOD_FRAMES = int(0.55 / DT_CTRL)
+
+
 def _feed(CI, payload, seconds):
   frames = int(seconds / DT_CTRL)
   for i in range(frames):
-    CI.update([(int(i * DT_CTRL * 1e9), [(CAM_LANEINFO, payload, 2)])])
+    msgs = [(CAM_LANEINFO, payload, 2)] if i % CAM_LANEINFO_PERIOD_FRAMES == 0 else []
+    CI.update([(int(i * DT_CTRL * 1e9), msgs)])
   return CI.CS.fsc_settled
 
 
@@ -72,6 +79,28 @@ class TestFscSettleGate:
     # cycle (36.5 s, route 7c735af5fce56485|00000011). BIT2 was in the gate, so the radar was
     # never silenced and the two-master guard held accFaulted for the whole drive.
     assert _feed(_interface(), BIT2_LATCHED, CarControllerParams.FSC_SETTLE_T * 1.5)
+
+  def test_settles_at_the_longest_observed_camera_period(self):
+    # the longest inter-frame gap in the corpus is 563 ms; the freshness window has to ride
+    # through every real gap or the settle counter zeroes each time and never reaches 10 s
+    # (the regression that shipped in baf0f383c3 with CAM_LANEINFO_FRESH_T = 0.5)
+    CI = _interface()
+    period = int(0.563 / DT_CTRL)
+    frames = int(CarControllerParams.FSC_SETTLE_T * 1.5 / DT_CTRL)
+    for i in range(frames):
+      msgs = [(CAM_LANEINFO, SETTLED, 2)] if i % period == 0 else []
+      CI.update([(int(i * DT_CTRL * 1e9), msgs)])
+    assert CI.CS.fsc_settled
+
+  def test_camera_dropout_resets_the_settle_timer(self):
+    # the window is a freshness gate, not decoration: a genuine dropout, well past any real
+    # inter-frame gap, must start the settle timer over
+    CI = _interface()
+    _feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T * 0.8)
+    for i in range(int((CarControllerParams.CAM_LANEINFO_FRESH_T + 0.5) / DT_CTRL)):
+      CI.update([(int(i * DT_CTRL * 1e9), [])])
+    assert not _feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T * 0.5)
+    assert _feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T * 0.6)
 
   def test_gate_starts_closed_before_any_camera_frame(self):
     # the parser reads all-zero before the first frame, which would otherwise look settled

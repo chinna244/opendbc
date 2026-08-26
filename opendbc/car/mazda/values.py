@@ -34,7 +34,12 @@ class CarControllerParams:
   STOCK_RADAR_ALIVE_T = 0.05   # stock CRZ_INFO runs at 50 Hz; silent this long = torn down
   STOCK_RADAR_GUARD_T = 1.0    # two-master guard: block engagement until silent this long
   RADAR_SESSION_LIMIT_T = 10.0  # per-episode UDS budget: a silent radar gives up here
-  CAM_LANEINFO_FRESH_T = 0.5   # camera counts as heard from if CAM_LANEINFO arrived this recently
+  # CAM_LANEINFO is a ~2 Hz message (measured periods 540-563 ms across 26+ segments on two
+  # cars), so freshness has to be judged against that cadence: a window shorter than one
+  # period reads every inter-frame gap as a dropout, zeroes the settle timer each time, and
+  # the teardown gate never opens. 1.5 s keeps 2.7x margin over the longest observed period
+  # and still catches a genuine camera dropout.
+  CAM_LANEINFO_FRESH_T = 1.5
 
   # RESUME_UNLATCHING pulse width at the release; stock latched releases pulse 0.22-0.38 s,
   # this sits mid-distribution
