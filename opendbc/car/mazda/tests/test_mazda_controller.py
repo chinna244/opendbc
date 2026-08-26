@@ -10,7 +10,7 @@ import pytest
 
 from opendbc.can import CANPacker, CANParser
 from opendbc.car import Bus, DT_CTRL, structs
-from opendbc.car.mazda import mazdacan
+from opendbc.car.mazda import longitudinal, mazdacan
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.longitudinal import (ESCORT_DROP_DIST, ESCORT_LEAD_IN_FRAMES, ESCORT_RELV_MAX,
                                             LEAD_DEBOUNCE_FRAMES, RESUME_UNLATCH_FRAMES,
@@ -289,7 +289,8 @@ class TestStandstillHold:
     self.run(sm, 1, stopping=False, plan_accel=0.3)
     assert not sm.holding
 
-  def test_no_lead_release_waits_out_the_escort_lead_in(self, sm):
+  def test_no_lead_release_waits_out_the_escort_lead_in(self, sm, monkeypatch):
+    monkeypatch.setattr(longitudinal, "ESCORT_ENABLED", True)
     self.run(sm, 1, stopping=True, real_lead=None)
     self.run(sm, 100, stopping=True, standstill=True, real_lead=None)
     # the plan asks to move but the ghost has not visibly pulled away yet: no release, no pulse
@@ -297,6 +298,14 @@ class TestStandstillHold:
     assert sm.holding and not sm.resume_unlatching and sm.escort.lead is not None
     self.run(sm, 1, standstill=True, plan_accel=0.3, real_lead=None)
     assert not sm.holding and sm.resume_unlatching
+
+  def test_escort_off_releases_a_no_lead_hold_undeferred(self, sm):
+    # the attribution trial: with the escort off, a no-lead release fires immediately and
+    # pulses with nothing advertised, the exact release route 000000fe faulted on
+    self.run(sm, 1, stopping=True, real_lead=None)
+    self.run(sm, 100, stopping=True, standstill=True, real_lead=None)
+    self.run(sm, 1, standstill=True, plan_accel=0.3, real_lead=None)
+    assert not sm.holding and sm.resume_unlatching and sm.escort.lead is None
 
   def test_with_lead_release_is_not_deferred(self, sm):
     self.run(sm, 1, stopping=True)
@@ -366,7 +375,8 @@ class TestResumeEscort:
     self.run(esc, 1, real_lead=(42.0, 1.0))
     assert esc.lead is None and not esc.deferring
 
-  def test_hold_disengage_resets_it(self):
+  def test_hold_disengage_resets_it(self, monkeypatch):
+    monkeypatch.setattr(longitudinal, "ESCORT_ENABLED", True)
     sm = StandstillHold()
     sm.update(True, True, True, -1.024, False, real_lead=None)
     sm.update(True, False, True, 0.3, False, real_lead=None)
@@ -705,11 +715,12 @@ class TestLongitudinalIntegration:
     # and the hold itself is untouched: the plan's brake and the stop bits still go out
     assert cc.stop_and_go.holding and cc.stop_and_go.stop_bits
 
-  def test_no_lead_release_is_escorted_by_a_departing_lead(self, cc):
+  def test_no_lead_release_is_escorted_by_a_departing_lead(self, cc, monkeypatch):
     # Route 000000fe t+401.5: the camera accepted a 6 s no-lead hold (body latched, HOLD on the
     # dash) then latched an SCBS fault 90 ms into the release, the only observable that differed
     # from all 23 stock latched releases being has_lead=0/phase=0/empty tracks. Stock's releases
     # carry a lead already pulling away when RESUME_UNLATCHING fires, so ours do too.
+    monkeypatch.setattr(longitudinal, "ESCORT_ENABLED", True)
     long = structs.CarControl.Actuators.LongControlState
     hold_kw = dict(long_state=long.stopping, accel=-1.024, standstill=True,
                    lead_visible=False, lead_d_rel=0.0, cruise_engaged=True, brake_hold=True)

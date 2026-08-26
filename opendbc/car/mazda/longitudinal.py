@@ -73,6 +73,13 @@ class RadarSessionManager:
 RESUME_UNLATCH_FRAMES = int(CarControllerParams.RESUME_UNLATCH_T / DT_CTRL)
 LEAD_DEBOUNCE_FRAMES = int(CarControllerParams.LEAD_DEBOUNCE_T / DT_CTRL)
 
+# Trial (2026-08-26): the escort is off to attribute route 000000fe's fault. That release had
+# two deviations from stock, not one: no advertised object AND a 0.20 s unlatch pulse below
+# stock's observed 0.22-0.38 s floor; the pulse now sits mid-distribution. A clean no-lead
+# resume here means the camera never needed the object and the escort can be deleted; a fault
+# proves the object requirement single-variable and the escort comes back on.
+ESCORT_ENABLED = False
+
 # The escort ghost's kinematics; single consumer, so they live with it
 ESCORT_LEAD_IN_FRAMES = int(0.3 / DT_CTRL)  # the ghost pulls away this long before the release fires
 ESCORT_RELV_STEP = 1.25 * DT_CTRL           # m/s per frame, opening-rate ramp
@@ -173,7 +180,7 @@ class StandstillHold:
       return
 
     was_holding = self.holding
-    self.escort.update(self.holding and plan_accel > 0., standstill, real_lead)
+    self.escort.update(ESCORT_ENABLED and self.holding and plan_accel > 0., standstill, real_lead)
     # the plan asking for acceleration releases the hold; so does the car simply moving with
     # the plan no longer stopping (a driver-gas drive-off under an override, where the plan's
     # command is zeroed and would otherwise never ask). Stock keeps STOPPING strictly to the
