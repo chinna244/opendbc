@@ -150,6 +150,8 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.assertFalse(self.safety.get_controls_allowed_lateral())
 
     # Engage actual cruise without a TJA press.
+    if hasattr(self, "_press_set"):
+      self._press_set()
     self._rx(self._pcm_status_msg(False))
     self._rx(self._pcm_status_msg(True))
     self.assertTrue(self.safety.get_controls_allowed())
@@ -556,10 +558,6 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
         self.safety.set_controls_allowed(True)
         self.assertTrue(self._tx(msg))
 
-
-class TestMazdaIgnition(unittest.TestCase):
-  TX_MSGS: list = []
-
   def test_synthetic_lead_radar_track_allowed_disengaged(self):
     # DIST_OBJ and RELV_OBJ are free fields; the template bytes must match. The non-template
     # frames are real on-road emissions (route 6bb2dc61c4), which a byte-exact check silently
@@ -668,6 +666,28 @@ class TestMazdaIgnition(unittest.TestCase):
 
       self.safety.set_controls_allowed(True)
       self.assertTrue(self._tx(self._crz_ctrl_cmd_msg(True, bus)))
+
+
+class TestMazdaIgnition(unittest.TestCase):
+  TX_MSGS: list = []
+
+  def setUp(self):
+    self.safety = libsafety_py.libsafety
+    self.safety.init_tests()
+
+  def _msg(self, byte0):
+    return make_msg(0, 0x9E, dat=bytes([byte0]) + b"\x00" * 7)
+
+  # 0x9E byte 0 high 3 bits == 6 (0xC0)
+  def test_ignition_on(self):
+    self.safety.ignition_can_hook(self._msg(0xC0))
+    self.assertTrue(self.safety.get_ignition_can())
+
+  def test_ignition_off(self):
+    self.safety.ignition_can_hook(self._msg(0xC0))
+    self.assertTrue(self.safety.get_ignition_can())
+    self.safety.ignition_can_hook(self._msg(0x20))
+    self.assertFalse(self.safety.get_ignition_can())
 
 
 class TestMazdaStockSteeringSafety(TestMazdaSafety):
