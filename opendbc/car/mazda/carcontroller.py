@@ -193,9 +193,12 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         # camera latched as an SCBS fault (route 00000100 t+353)
         accel = min(accel, 0.) if CC.actuators.accel <= 0. else min(self.accel_last, 0.)
       if sm.resume_unlatching:
-        # cap the launch while the release pulse plays; stock's command is still negative at
-        # the end of every non-latched pulse and peaks at +0.25 m/s2 in latched ones
-        accel = min(accel, CarControllerParams.ACCEL_RESUME_PULSE_MAX)
+        # cap the launch while the release pulse plays, by the release's own kind: stock's
+        # command is still negative at the end of every non-latched pulse but peaks at +0.25
+        # m/s2 inside latched ones. Both observed SCBS latches (routes 000000fe and 00000100)
+        # fired at a zero-cross inside a non-latched pulse, so those never go positive; a
+        # no-lead hold relaxes the plan to ~0 and would otherwise cross in the first frame.
+        accel = min(accel, CarControllerParams.ACCEL_RESUME_PULSE_MAX if sm.latched_release else 0.)
     self.accel_last = accel
 
     if radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:

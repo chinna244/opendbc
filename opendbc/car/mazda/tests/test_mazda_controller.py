@@ -804,6 +804,28 @@ class TestLongitudinalIntegration:
     assert max(pulse) < 0, f"command crossed zero inside the pulse: {max(pulse)}"
     assert max(cmd for cmd, _, _ in rows) > 500, "command never ramped up after the release"
 
+  def test_near_zero_hold_release_never_goes_positive_in_the_pulse(self, cc):
+    # a no-lead hold relaxes the plan to ~0, so the release ramp would cross zero in the
+    # first pulse frame; both observed SCBS latches fired at exactly that zero-cross inside
+    # a non-latched pulse (routes 000000fe t+44.54, 00000100 t+353.18)
+    long = structs.CarControl.Actuators.LongControlState
+    for _ in range(int(0.5 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-0.5, standstill=False)
+    for _ in range(int(2.0 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-0.02, standstill=True)
+    assert cc.accel_last == pytest.approx(-0.02)
+
+    rows = []
+    for _ in range(int(1.5 / 0.01)):
+      sends = _step(cc, long_state=long.pid, accel=1.0, standstill=True)
+      dat = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
+      if dat is not None:
+        rows.append((decode_accel_cmd_raw(dat), (dat[6] >> 6) & 1))
+
+    pulse = [cmd for cmd, unl in rows if unl]
+    assert pulse and max(pulse) <= 0, f"non-latched pulse went positive: {max(pulse, default=None)}"
+    assert max(cmd for cmd, _ in rows) > 500, "command never ramped up after the pulse"
+
   def test_latched_release_command_is_capped_through_the_pulse(self, cc):
     # a body-latched hold releases from ACCEL_HOLD_LATCHED, so the ramp would cross zero
     # almost immediately; stock peaks at +0.25 m/s2 inside these pulses and so must we

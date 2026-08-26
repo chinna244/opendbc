@@ -111,11 +111,12 @@ RESUME_UNLATCH_FRAMES = int(CarControllerParams.RESUME_UNLATCH_T / DT_CTRL)
 LEAD_DEBOUNCE_FRAMES = int(CarControllerParams.LEAD_DEBOUNCE_T / DT_CTRL)
 RELEASE_DEBOUNCE_FRAMES = int(CarControllerParams.RELEASE_DEBOUNCE_T / DT_CTRL)
 
-# Trial (2026-08-26): the escort is off to attribute route 000000fe's fault. That release had
-# two deviations from stock, not one: no advertised object AND a 0.20 s unlatch pulse below
-# stock's observed 0.22-0.38 s floor; the pulse now sits mid-distribution. A clean no-lead
-# resume here means the camera never needed the object and the escort can be deleted; a fault
-# proves the object requirement single-variable and the escort comes back on.
+# Trial (2026-08-26): the escort is off to attribute route 000000fe's fault. The command-shape
+# analysis has since made the object theory unlikely: fe's fault fired at an ACCEL_CMD
+# zero-cross inside the unlatch pulse (t+44.54, cmd +80, ss=1), the identical signature to
+# route 00000100's fault with a real lead advertised, so one mechanism explains both and the
+# non-latched pulse now holds the command at or below zero. A clean no-lead resume confirms
+# the camera never needed the object and the escort gets deleted; a fault brings it back on.
 ESCORT_ENABLED = False
 
 # The escort ghost's kinematics; single consumer, so they live with it
@@ -209,6 +210,7 @@ class StandstillHold:
     self.car_has_hold = False
     self.unlatch_frames = 0
     self.release_frames = 0
+    self.latched_release = False
     self.escort.reset()
 
   def update(self, long_engaged: bool, stopping: bool, standstill: bool,
@@ -239,6 +241,9 @@ class StandstillHold:
     # one pulse per release, exactly as stock: never restarted while one is still playing
     if was_holding and not self.holding and standstill and self.unlatch_frames == 0:
       self.unlatch_frames = RESUME_UNLATCH_FRAMES
+      # car_has_hold still carries last frame's value here: whether the body owned the brakes
+      # going into this release decides the command ceiling through the pulse
+      self.latched_release = self.car_has_hold
 
     # the body only owns the brakes while we are still asking it to hold
     self.car_has_hold = self.holding and standstill and brake_hold
