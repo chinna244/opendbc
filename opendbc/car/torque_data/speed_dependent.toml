@@ -24,9 +24,13 @@ laf_bp      = [2.43, 2.93, 2.37, 1.21, 1.16, 1.53, 1.76]
 friction_bp = [0.156, 0.142, 0.124, 0.153, 0.139, 0.122, 0.108]
 
 [MAZDA_CX9_2021]
-# Same steer-to-zero EPS family as the CX-5 2022 (KSD5 firmware is in
-# STEER_TO_ZERO_EPS_FW), so the same STEER_MAX schedule (1200 below the 14.2 m/s
-# cliff, 800 above) and the same cliff-aligned bin layout apply.
+# Measured on an EPS-SWAPPED CX-9 2021 running the CX-5 2022 donor EPS
+# (KSD5/KBST firmware, STEER_TO_ZERO_EPS_FW), under that EPS's STEER_MAX
+# schedule (1200 below the 14.2 m/s cliff, 800 above) and cliff-aligned bin
+# layout. The stock CX-9 2021 EPS (TC3M) keeps a 45 kph floor and a flat 800,
+# so these LAF values would be mis-scaled there — requires_steer_to_zero
+# suppresses the entry unless the swap is fingerprinted (minSteerSpeed == 0).
+requires_steer_to_zero = true
 # Refreshed 2026-08-25 from this car's own LiveTorqueParameters cache, read off
 # route 00000012--eba222b1f2 (2026-08-23). Bins 6.5-16.4 were learning live in
 # that drive; 21.0 and 28.0 came out of the cache from earlier drives on the
