@@ -221,6 +221,9 @@ MADS_HUD_SAFE_BASE_PAYLOADS = frozenset({
   bytes.fromhex("4201000000000040"),
   bytes.fromhex("4221000000000040"),
   bytes.fromhex("0221000000001040"),
+  # LINE_VISIBLE=1 idle-family frames (routes 1a/1b/19); TJA XOR only, no field replacement.
+  bytes.fromhex("4361000000000040"),
+  bytes.fromhex("4102000000001040"),
 })
 # OFF→WHITE is TJA 0→2 only (DBC TJA motorola start 38). XOR this into an allowed
 # base; never replace the whole frame with MADS_HUD_WHITE.

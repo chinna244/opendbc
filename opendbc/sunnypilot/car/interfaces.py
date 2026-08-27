@@ -186,5 +186,3 @@ def _initialize_mazda(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_
   if CP.brand == "mazda" and has_tja_mads(CP):
     if int(params_dict.get("MazdaExperimentalMadsWhiteHud", 0)) == 1:
       CP_SP.flags |= MazdaFlagsSP.EXPERIMENTAL_MADS_WHITE_HUD.value
-    if int(params_dict.get("MazdaExperimentalMadsWhiteHudActive", 0)) == 1:
-      CP_SP.flags |= MazdaFlagsSP.EXPERIMENTAL_MADS_WHITE_HUD_ACTIVE.value
