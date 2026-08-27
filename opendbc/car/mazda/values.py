@@ -52,8 +52,14 @@ class CarControllerParams:
   # braking, a tuple stock never emits, and the camera latched SCBS 90 ms in
   # (route 00000053 t+714.8, second CX-5, with a real departing lead advertised)
   RESUME_UNLATCH_LATCHED_T = 0.18  # s, 9 wire frames, the latched-family mode
-  RESUME_BLIP_DELAY_T = 0.06       # s between the stop-bit drop and the never-latched blip
-  RESUME_BLIP_T = 0.04             # s, 2 wire frames
+  # The unlatch pulse is a last resort, not the release protocol. Every RESUME_UNLATCHING
+  # pulse this port has ever put on the wire with a healthy camera latched the SCBS fault
+  # 80-90 ms in -- 4 for 4, across four builds whose pulse shape converged to a byte-level
+  # stock twin (routes 000000fe t+406.0, 00000115 t+385.9, 00000118 t+580.7, 00000053 t+714.8).
+  # So the command relaxes first and the body is given this long to drop GEAR.BRAKE_HOLD on
+  # its own; the pulse only fires if it does not. Stock's never-latched blip is dropped
+  # outright: nothing is latched there, so it unlatches nothing.
+  RESUME_PULSE_DEFER_T = 0.3       # s the body gets to release before we resort to the pulse
 
   CANCEL_CONTEXT_T = 0.5       # a wheel CANCEL keeps availability drops landing this long after release
 
