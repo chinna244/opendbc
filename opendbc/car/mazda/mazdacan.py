@@ -182,8 +182,7 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool)
   # command (TJA_TRANSITION toggled 442 times in 22 min on route 0000010b) and relaying that
   # flapped the dash lane indicators, so those two stay zeroed as they always were.
   # White HUD (apply_mads_white_hud) still sets TJA via XOR on the packed bytes when MADS is active.
-  values = {s: cam_msg.get(s, 0) for s in [
-    "LINE_VISIBLE",
+  values = {s: cam_msg.get(s, 0) for s in [    "LINE_VISIBLE",
     "LINE_NOT_VISIBLE",
     "LANE_LINES",
     "BIT1",
