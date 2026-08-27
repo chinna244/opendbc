@@ -44,7 +44,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     apply_torque = 0
 
-    # Speed-dependent STEER_MAX (CX-5 2022: 1200 below 32 mph, 800 above)
+    # Speed-dependent STEER_MAX (CX-5 2022: 1200 below 32 mph, 800 above). This is the scale
+    # from the controller's normalized output to CAN counts, so it stays put -- see values.py.
     if hasattr(self.params, 'STEER_MAX_LOOKUP'):
       steer_max = round(float(np.interp(CS.out.vEgoRaw, self.params.STEER_MAX_LOOKUP[0],
                                          self.params.STEER_MAX_LOOKUP[1])))
@@ -54,6 +55,21 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     if CC.latActive:
       # calculate steer and also set limits due to driver torque
       new_torque = int(round(CC.actuators.torque * steer_max))
+
+      # Clamp to what the EPS will actually apply at this speed. Counts above the ceiling are
+      # not delivered (0 of 7.5M frames above 32.5 mph ever exceeded 620), so this costs no
+      # torque at the wheel; what it buys is honesty. new_actuators.torque below reports the
+      # clamped value, so controlsd's steer_limited_by_safety fires while the EPS is railed and
+      # the lateral controller freezes its integrator instead of winding up against a limit it
+      # cannot see. Deliberately separate from steer_max: scaling that down would shrink every
+      # sub-saturation command and invalidate the speed-dependent latAccelFactor seeds.
+      # Applied before apply_driver_steer_torque_limits, whose driver-torque term only ever
+      # narrows the window further (max_steer_allowed = min(steer_max, driver_max_torque)).
+      if hasattr(self.params, 'EPS_CEILING_LOOKUP'):
+        eps_ceiling = round(float(np.interp(CS.out.vEgoRaw, self.params.EPS_CEILING_LOOKUP[0],
+                                            self.params.EPS_CEILING_LOOKUP[1])))
+        new_torque = int(np.clip(new_torque, -eps_ceiling, eps_ceiling))
+
       apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
                                                       CS.out.steeringTorque, self.params, steer_max)
 

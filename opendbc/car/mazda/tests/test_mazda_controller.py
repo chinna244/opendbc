@@ -35,6 +35,33 @@ class TestCarControllerParams:
       minSteerSpeed = 0.0
     return CarControllerParams(FakeCP())
 
+  def test_eps_ceiling_never_exceeds_steer_max_scale(self, cx5_2022_params):
+    # The ceiling is a clamp on delivered-torque counts; the scale is STEER_MAX. The clamp is
+    # only meaningful if it sits at or below the scale at every speed.
+    bp, vals = cx5_2022_params.EPS_CEILING_LOOKUP
+    for v in np.arange(0.0, 40.0, 0.25):
+      ceiling = np.interp(v, bp, vals)
+      steer_max = np.interp(v, cx5_2022_params.STEER_MAX_LOOKUP[0],
+                            cx5_2022_params.STEER_MAX_LOOKUP[1])
+      assert 0 < ceiling <= steer_max, f"ceiling {ceiling} vs steer_max {steer_max} at {v} m/s"
+
+  def test_eps_ceiling_is_monotone_and_matches_the_measured_rails(self, cx5_2022_params):
+    # Measured over 11.4M clean frames: 1148 below 18 mph, a monotone rolloff, hard 620 from
+    # 32.5 mph up (docs/mazda-lkas-camera-tx-census.md). Nothing above 620 was ever delivered
+    # above 32.5 mph in 7.5M frames, so the high-speed leg must not drift back up.
+    bp, vals = cx5_2022_params.EPS_CEILING_LOOKUP
+    assert list(vals) == sorted(vals, reverse=True), "ceiling must fall monotonically with speed"
+    assert np.interp(5.0, bp, vals) == 1148
+    assert np.interp(14.5, bp, vals) == 620
+    assert np.interp(35.0, bp, vals) == 620
+
+  def test_steer_delta_up_matches_the_eps_rate_limit_at_this_steer_step(self, cx5_2022_params):
+    # The EPS rate limit is per unit TIME (~1200 units/s), while STEER_DELTA_UP is per frame,
+    # so the two are only matched at STEER_STEP = 1. Changing one without the other silently
+    # rescales the commanded slew rate.
+    rate_hz = 1.0 / DT_CTRL / CarControllerParams.STEER_STEP
+    assert cx5_2022_params.STEER_DELTA_UP * rate_hz == pytest.approx(1200, rel=0.01)
+
   @pytest.fixture
   def pre_2022_params(self):
     class FakeCP:
