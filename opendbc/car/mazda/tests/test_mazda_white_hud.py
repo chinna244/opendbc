@@ -3,6 +3,8 @@ from types import SimpleNamespace
 import pytest
 
 from opendbc.car import Bus, DT_CTRL, gen_empty_fingerprint, structs
+from opendbc.car.can_definitions import CanData
+from opendbc.can import CANParser
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.carcontroller import MADS_WHITE_HUD_OFF_CONFIRM_FRAMES, CarController
 from opendbc.car.mazda.carstate import CAM_LANEINFO_STALE_FRAMES
@@ -13,6 +15,25 @@ from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP
 OFF = mazdacan.MADS_HUD_OFF
 WHITE = mazdacan.MADS_HUD_WHITE
 UNKNOWN = bytes.fromhex("4201000a00001040")
+WHITE_TJA_XOR = mazdacan.MADS_HUD_WHITE_TJA_XOR
+SAFE_BASES = sorted(mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS)
+_LANEINFO_SIGS = [
+  "LINE_VISIBLE", "LINE_NOT_VISIBLE", "LANE_LINES", "BIT1", "BIT2", "BIT3",
+  "NO_ERR_BIT", "ERR_BIT", "TJA", "TJA_TRANSITION", "S1", "S1_HBEAM",
+]
+
+
+def _cam_laneinfo_from_raw(raw: bytes) -> dict:
+  cp = CANParser("mazda_2017", [("CAM_LANEINFO", 0)], 2)
+  cp.update([(0, [CanData(0x440, raw, 2)])])
+  return {s: int(cp.vl["CAM_LANEINFO"][s]) for s in _LANEINFO_SIGS}
+
+
+@pytest.mark.parametrize("base", SAFE_BASES)
+def test_allowlist_payload_only_flips_white_tja_bits(base):
+  out = mazdacan.apply_mads_white_hud(base, base, True)
+  assert bytes(a ^ b for a, b in zip(base, out, strict=True)) == WHITE_TJA_XOR
+  assert mazdacan.is_mads_white_hud(out)
 
 
 @pytest.mark.parametrize(("fsc_dat", "current_dat", "enabled", "expected"), [
@@ -21,9 +42,27 @@ UNKNOWN = bytes.fromhex("4201000a00001040")
   (UNKNOWN, OFF, True, OFF),
   (OFF, UNKNOWN, True, UNKNOWN),
   (None, OFF, True, OFF),
+  # FSC/packer disagreement: never paint
+  (OFF, bytes.fromhex("4221000000001040"), True, bytes.fromhex("4221000000001040")),
+  # already-WHITE / nonzero TJA form is not an allowlisted base
+  (WHITE, WHITE, True, WHITE),
 ])
-def test_exact_payload_gate(fsc_dat, current_dat, enabled, expected):
+def test_white_hud_payload_gate(fsc_dat, current_dat, enabled, expected):
   assert mazdacan.apply_mads_white_hud(fsc_dat, current_dat, enabled) == expected
+
+
+def test_unknown_payload_passthrough_unchanged():
+  assert mazdacan.apply_mads_white_hud(UNKNOWN, UNKNOWN, True) == UNKNOWN
+  assert not mazdacan.is_mads_white_hud(UNKNOWN)
+
+
+def test_nonzero_tja_or_transition_frames_are_not_allowlisted():
+  # Existing TJA=2 WHITE form and a crafted TJA_TRANSITION!=0 frame must never paint.
+  tja_trans = bytes.fromhex("4201000000001048")  # OFF with TJA_TRANSITION bit flipped (not audited)
+  assert WHITE not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert tja_trans not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert mazdacan.apply_mads_white_hud(WHITE, WHITE, True) == WHITE
+  assert mazdacan.apply_mads_white_hud(tja_trans, tja_trans, True) == tja_trans
 
 
 def test_raw_latch_accepts_only_camera_bus_eight_byte_frames():
@@ -62,14 +101,14 @@ def test_raw_liveness_expires_and_recovers_on_the_receiving_frame():
 
 class TestWhiteHudController:
   @staticmethod
-  def _controller(candidate=CAR.MAZDA_CX5_2022, off_flag=True, active_probe_flag=False):
+  def _controller(candidate=CAR.MAZDA_CX5_2022, off_flag=True, active_flag=False):
     fingerprint = {0: {}, 1: {}, 2: {}}
     CP = CarInterface.get_params(candidate, fingerprint, [], alpha_long=False, is_release=False, docs=False)
     CP_SP = CarInterface.get_params_sp(CP, candidate, fingerprint, [], False, False, False)
     if off_flag:
       CP_SP.flags |= MazdaFlagsSP.EXPERIMENTAL_MADS_WHITE_HUD.value
-    if active_probe_flag:
-      CP_SP.flags |= MazdaFlagsSP.EXPERIMENTAL_MADS_WHITE_HUD_ACTIVE_PROBE.value
+    if active_flag:
+      CP_SP.flags |= MazdaFlagsSP.EXPERIMENTAL_MADS_WHITE_HUD_ACTIVE.value
     return CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
 
   @staticmethod
@@ -96,8 +135,7 @@ class TestWhiteHudController:
       mrcc_active_raw=raw_active,
       cam_lkas_live=True,
       cam_lkas={"ERR_BIT_1": 0, "ERR_BIT_2": 0, "LINE_NOT_VISIBLE": 0, "BIT_1": 1},
-      cam_laneinfo={"LINE_VISIBLE": 0, "LINE_NOT_VISIBLE": 1, "LANE_LINES": 1,
-                    "BIT1": 1, "BIT2": 0, "BIT3": 1, "NO_ERR_BIT": 0, "ERR_BIT": 0, "TJA": 0, "TJA_TRANSITION": 0, "S1": 1, "S1_HBEAM": 0},
+      cam_laneinfo=_cam_laneinfo_from_raw(raw),
       cam_laneinfo_raw=raw,
       cam_laneinfo_live=live,
       crz_btns_counter=0,
@@ -132,6 +170,16 @@ class TestWhiteHudController:
       _, sends = controller.update(CC, CC_SP, self._carstate(), round(frame * DT_CTRL * 1e9))
     assert self._hud(sends) == WHITE
 
+  @pytest.mark.parametrize("base", SAFE_BASES)
+  def test_each_allowlist_base_becomes_tja_only_white_after_stable_off(self, base):
+    CC, CC_SP = self._controls(active=True)
+    controller = self._controller()
+    for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 1):
+      _, sends = controller.update(CC, CC_SP, self._carstate(raw=base), round(frame * DT_CTRL * 1e9))
+    out = self._hud(sends)
+    assert bytes(a ^ b for a, b in zip(base, out, strict=True)) == WHITE_TJA_XOR
+    assert mazdacan.is_mads_white_hud(out)
+
   @pytest.mark.parametrize(("off_flag", "active", "raw", "live"), [
     (False, True, OFF, True),
     (True, False, OFF, True),
@@ -141,7 +189,13 @@ class TestWhiteHudController:
   def test_all_disabled_or_untrusted_cases_keep_current_off(self, off_flag, active, raw, live):
     CC, CC_SP = self._controls(active=active)
     _, sends = self._controller(off_flag=off_flag).update(CC, CC_SP, self._carstate(raw=raw, live=live), 0)
-    assert self._hud(sends) == OFF
+    hud = self._hud(sends)
+    assert not mazdacan.is_mads_white_hud(hud)
+    # Unknown FSC: passthrough of packed laneinfo, never forced WHITE.
+    if raw == UNKNOWN:
+      assert hud != WHITE
+    else:
+      assert hud == OFF
 
   def test_existing_steer_required_warning_is_unchanged(self):
     CC, CC_SP = self._controls(active=True, visual_alert=structs.CarControl.HUDControl.VisualAlert.steerRequired)
@@ -186,7 +240,7 @@ class TestWhiteHudController:
 
     _, sends = controller.update(CC, CC_SP, self._carstate(**state),
                                  round((MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 1) * DT_CTRL * 1e9))
-    assert self._hud(sends) != WHITE
+    assert not mazdacan.is_mads_white_hud(self._hud(sends))
     assert controller.frame == MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 2
 
   def test_cleanup_pending_withdraws_white_immediately(self):
@@ -270,7 +324,7 @@ class TestWhiteHudController:
     assert not controller.mads_white_hud_on_bus
 
 
-class TestWhiteHudActiveProbe:
+class TestWhiteHudActive:
   @staticmethod
   def _active_carstate(**overrides):
     state = dict(
@@ -282,51 +336,49 @@ class TestWhiteHudActiveProbe:
     state.update(overrides)
     return TestWhiteHudController._carstate(**state)
 
-  def test_active_probe_sends_one_white_after_stable_active(self):
-    controller = TestWhiteHudController._controller(off_flag=False, active_probe_flag=True)
+  def test_active_continuous_white_at_two_hz_after_stable_active(self):
+    controller = TestWhiteHudController._controller(off_flag=False, active_flag=True)
     CC, CC_SP = TestWhiteHudController._controls(active=True)
     white_frames = []
-    for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 5):
+    for frame in range(200):
       _, sends = controller.update(CC, CC_SP, self._active_carstate(), round(frame * DT_CTRL * 1e9))
       if any(addr == 0x440 for addr, _dat, _bus in sends):
         hud = TestWhiteHudController._hud(sends)
-        if hud == WHITE:
+        if mazdacan.is_mads_white_hud(hud):
           white_frames.append(frame)
+          assert bytes(a ^ b for a, b in zip(OFF, hud, strict=True)) == WHITE_TJA_XOR
 
-    assert len(white_frames) == 1
-    assert white_frames[0] == MADS_WHITE_HUD_OFF_CONFIRM_FRAMES - 1
-    assert controller.mads_white_hud_active_probe_sent
+    # Qualifies at 0.5 s; first HUD slot at frame 50, then 100, 150.
+    assert white_frames == [50, 100, 150]
 
-    for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 5, 200):
-      _, sends = controller.update(CC, CC_SP, self._active_carstate(), round(frame * DT_CTRL * 1e9))
-      if any(addr == 0x440 for addr, _dat, _bus in sends):
-        assert TestWhiteHudController._hud(sends) != WHITE
-
-  def test_active_probe_does_not_run_without_flag(self):
-    controller = TestWhiteHudController._controller(off_flag=False, active_probe_flag=False)
+  def test_active_does_not_run_without_flag(self):
+    controller = TestWhiteHudController._controller(off_flag=False, active_flag=False)
     CC, CC_SP = TestWhiteHudController._controls(active=True)
     for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 5):
       _, sends = controller.update(CC, CC_SP, self._active_carstate(), round(frame * DT_CTRL * 1e9))
       if any(addr == 0x440 for addr, _dat, _bus in sends):
-        assert TestWhiteHudController._hud(sends) != WHITE
+        assert not mazdacan.is_mads_white_hud(TestWhiteHudController._hud(sends))
 
   @pytest.mark.parametrize("state", [
+    # ARMED: raw ACC_OFF, filtered available without enabled
     {"raw_active": False, "raw_armed": True, "filtered_available": True, "filtered_enabled": False},
+    # raw/filtered disagreement
     {"raw_active": True, "filtered_enabled": False, "filtered_available": True},
     {"raw_active": False, "raw_armed": False, "filtered_enabled": True, "filtered_available": True},
+    {"raw_active": True, "filtered_enabled": True, "filtered_available": False},
     {"cancel_button": 1},
     {"tja_button": 1},
   ])
-  def test_armed_or_transition_never_emits_active_probe_white(self, state):
-    controller = TestWhiteHudController._controller(off_flag=False, active_probe_flag=True)
+  def test_armed_or_disagreement_never_emits_active_white(self, state):
+    controller = TestWhiteHudController._controller(off_flag=False, active_flag=True)
     CC, CC_SP = TestWhiteHudController._controls(active=True)
     for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 10):
       _, sends = controller.update(CC, CC_SP, self._active_carstate(**state), round(frame * DT_CTRL * 1e9))
       if any(addr == 0x440 for addr, _dat, _bus in sends):
-        assert TestWhiteHudController._hud(sends) != WHITE
+        assert not mazdacan.is_mads_white_hud(TestWhiteHudController._hud(sends))
 
-  def test_icbm_set_activity_blocks_active_probe(self):
-    controller = TestWhiteHudController._controller(off_flag=False, active_probe_flag=True)
+  def test_icbm_set_activity_blocks_active_white(self):
+    controller = TestWhiteHudController._controller(off_flag=False, active_flag=True)
     CC, CC_SP = TestWhiteHudController._controls(active=True)
     CC_SP.intelligentCruiseButtonManagement.sendButton = (
       structs.IntelligentCruiseButtonManagement.SendButtonState.increase
@@ -334,27 +386,53 @@ class TestWhiteHudActiveProbe:
     for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 10):
       _, sends = controller.update(CC, CC_SP, self._active_carstate(), round(frame * DT_CTRL * 1e9))
       if any(addr == 0x440 for addr, _dat, _bus in sends):
-        assert TestWhiteHudController._hud(sends) != WHITE
+        assert not mazdacan.is_mads_white_hud(TestWhiteHudController._hud(sends))
 
-  def test_leaving_active_resets_probe_for_next_episode(self):
-    controller = TestWhiteHudController._controller(off_flag=False, active_probe_flag=True)
+  def test_armed_withdraws_active_white_and_requalifies_after_active_returns(self):
+    controller = TestWhiteHudController._controller(off_flag=False, active_flag=True)
     CC, CC_SP = TestWhiteHudController._controls(active=True)
-    for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 1):
-      controller.update(CC, CC_SP, self._active_carstate(), round(frame * DT_CTRL * 1e9))
-    assert controller.mads_white_hud_active_probe_sent
 
-    for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 2, MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 20):
-      controller.update(
+    # Qualify continuous ACTIVE WHITE
+    for frame in range(51):
+      _, sends = controller.update(CC, CC_SP, self._active_carstate(), round(frame * DT_CTRL * 1e9))
+    assert mazdacan.is_mads_white_hud(TestWhiteHudController._hud(sends))
+
+    # Enter ARMED — WHITE must withdraw immediately
+    _, sends = controller.update(
+      CC, CC_SP,
+      TestWhiteHudController._carstate(filtered_available=True, filtered_enabled=False, raw_armed=True),
+      round(51 * DT_CTRL * 1e9),
+    )
+    assert not mazdacan.is_mads_white_hud(TestWhiteHudController._hud(sends))
+    assert controller.mads_white_hud_active_frames == 0
+
+    # Stay ARMED a bit — never WHITE
+    for frame in range(52, 80):
+      _, sends = controller.update(
         CC, CC_SP,
         TestWhiteHudController._carstate(filtered_available=True, filtered_enabled=False, raw_armed=True),
         round(frame * DT_CTRL * 1e9),
       )
-    assert not controller.mads_white_hud_active_probe_sent
+      if any(addr == 0x440 for addr, _dat, _bus in sends):
+        assert not mazdacan.is_mads_white_hud(TestWhiteHudController._hud(sends))
 
-    white_count = 0
-    start = MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 20
-    for frame in range(start, start + MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 5):
+    # Return to ACTIVE — must requalify 0.5 s before WHITE returns
+    white_frames = []
+    for frame in range(80, 250):
       _, sends = controller.update(CC, CC_SP, self._active_carstate(), round(frame * DT_CTRL * 1e9))
-      if any(addr == 0x440 for addr, _dat, _bus in sends) and TestWhiteHudController._hud(sends) == WHITE:
-        white_count += 1
-    assert white_count == 1
+      if any(addr == 0x440 for addr, _dat, _bus in sends) and mazdacan.is_mads_white_hud(TestWhiteHudController._hud(sends)):
+        white_frames.append(frame)
+    assert white_frames[0] >= 80 + MADS_WHITE_HUD_OFF_CONFIRM_FRAMES - 1
+    assert white_frames == [150, 200]
+
+  @pytest.mark.parametrize("base", SAFE_BASES)
+  def test_active_allowlist_bases_use_shared_tja_xor(self, base):
+    controller = TestWhiteHudController._controller(off_flag=False, active_flag=True)
+    CC, CC_SP = TestWhiteHudController._controls(active=True)
+    for frame in range(51):
+      _, sends = controller.update(
+        CC, CC_SP, self._active_carstate(raw=base), round(frame * DT_CTRL * 1e9),
+      )
+    out = TestWhiteHudController._hud(sends)
+    assert bytes(a ^ b for a, b in zip(base, out, strict=True)) == WHITE_TJA_XOR
+    assert mazdacan.is_mads_white_hud(out)

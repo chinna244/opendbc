@@ -208,13 +208,42 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool)
 
 MADS_HUD_OFF = bytes.fromhex("4201000000001040")
 MADS_HUD_WHITE = bytes.fromhex("4201000020001040")
+# Route 13 CX-5 2022: every observed FSC CAM_LANEINFO idle-family frame that only
+# differs from OFF in BIT1/BIT2/S1/S1_HBEAM. Explicit hex allowlist — do not widen
+# to a field-based rule until more routes are audited.
+MADS_HUD_SAFE_BASE_PAYLOADS = frozenset({
+  bytes.fromhex("4201000000001040"),
+  bytes.fromhex("4221000000004040"),
+  bytes.fromhex("4221000000001040"),
+  bytes.fromhex("4201000000004040"),
+  bytes.fromhex("0221000000000040"),
+  bytes.fromhex("4201000000000040"),
+  bytes.fromhex("4221000000000040"),
+  bytes.fromhex("0221000000001040"),
+})
+# OFF→WHITE is TJA 0→2 only (DBC TJA motorola start 38). XOR this into an allowed
+# base; never replace the whole frame with MADS_HUD_WHITE.
+MADS_HUD_WHITE_TJA_XOR = bytes.fromhex("0000000020000000")
 
 
 def apply_mads_white_hud(fsc_dat: bytes | None, current_dat: bytes, enabled: bool) -> bytes:
-  """Change only the captured settled OFF display frame; preserve every other HUD state."""
-  if enabled and fsc_dat == MADS_HUD_OFF and current_dat == MADS_HUD_OFF:
-    return MADS_HUD_WHITE
-  return current_dat
+  """Set TJA=2 on an allowlisted FSC frame only; preserve every other byte."""
+  if not enabled or fsc_dat is None:
+    return current_dat
+  if fsc_dat not in MADS_HUD_SAFE_BASE_PAYLOADS or current_dat not in MADS_HUD_SAFE_BASE_PAYLOADS:
+    return current_dat
+  # Require FSC and packed HUD to agree so we never paint over a diverging alert pack.
+  if fsc_dat != current_dat:
+    return current_dat
+  return bytes(a ^ b for a, b in zip(current_dat, MADS_HUD_WHITE_TJA_XOR, strict=True))
+
+
+def is_mads_white_hud(dat: bytes) -> bool:
+  """True when dat is an allowlisted base with only the WHITE TJA bit set."""
+  if len(dat) != 8:
+    return False
+  base = bytes(a ^ b for a, b in zip(dat, MADS_HUD_WHITE_TJA_XOR, strict=True))
+  return base in MADS_HUD_SAFE_BASE_PAYLOADS and dat != base
 
 
 def create_button_cmd(packer, CP, counter, button, CS=None):
