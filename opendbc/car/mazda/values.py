@@ -42,9 +42,18 @@ class CarControllerParams:
   CAM_LANEINFO_PERIOD_T = 0.563
   CAM_LANEINFO_FRESH_T = 1.5
 
-  # RESUME_UNLATCHING pulse width at the release; stock latched releases pulse 0.22-0.38 s,
-  # this sits mid-distribution
-  RESUME_UNLATCH_T = 0.26
+  # RESUME_UNLATCHING at the release comes in two families (33-pulse census over the stock
+  # corpus, tools/mazda_long release grammar scan, 2026-08-27):
+  #   - a body-latched hold pulses 6-11 wire frames (0.12-0.20 s, mode 9) while the command
+  #     ramps off the relaxed -0.001; nothing stock ever pulsed longer than 0.20 s
+  #   - a never-latched stop only blips 1-6 wire frames (mostly 2-3), starting ~3 wire frames
+  #     AFTER the stop bits drop, once the command has relax-jumped into its release band
+  # Treating every release as a long latched-style pulse held the unlatch bit over hold-grade
+  # braking, a tuple stock never emits, and the camera latched SCBS 90 ms in
+  # (route 00000053 t+714.8, second CX-5, with a real departing lead advertised)
+  RESUME_UNLATCH_LATCHED_T = 0.18  # s, 9 wire frames, the latched-family mode
+  RESUME_BLIP_DELAY_T = 0.06       # s between the stop-bit drop and the never-latched blip
+  RESUME_BLIP_T = 0.04             # s, 2 wire frames
 
   CANCEL_CONTEXT_T = 0.5       # a wheel CANCEL keeps availability drops landing this long after release
 
@@ -70,11 +79,21 @@ class CarControllerParams:
   ACCEL_HOLD_LATCHED = -0.001  # m/s2
 
   # ACCEL_CMD ceiling while a body-latched release's RESUME_UNLATCHING pulse plays: stock's
-  # latched releases peak at +0.24-0.25 m/s2 (raw +182/+195) in the pulse tail. Non-latched
-  # pulses are capped at zero instead -- stock's are still <= -0.27 m/s2 when the pulse ends,
-  # and both observed SCBS latches (routes 000000fe, 00000100) fired at a zero-cross inside a
-  # non-latched pulse.
+  # latched releases peak at +0.24-0.25 m/s2 (raw +182/+195) in the pulse tail, +0.34 worst
+  # case. Never-latched blips are capped at zero -- stock's command is still negative in every
+  # never-latched pulse frame of the corpus.
   ACCEL_RESUME_PULSE_MAX = 0.25  # m/s2, latched releases only
+
+  # The release command itself follows stock's shape, not a slew off the hold value. At a
+  # never-latched release stock relax-jumps the command in ONE frame from the hold value into
+  # a -0.27..-0.18 start (pulse-frame commands span -0.269..-0.111 across the whole corpus)
+  # and then ramps ~+25 raw per 50 Hz frame straight through the drive-off; a latched release
+  # ramps at the same rate off the relaxed -0.001. Slewing up from -1.024 instead kept
+  # hold-grade braking on the wire beneath the release pulse (route 00000053 t+714.8), and
+  # pre-ramping toward the plan crossed zero inside it (route 00000100 t+353) -- the band
+  # between those two edges is what the camera accepts.
+  ACCEL_RELEASE_BAND = -0.26  # m/s2, the one-frame relax target at a never-latched release
+  ACCEL_RELEASE_RAMP = 1.25   # m/s3, stock's release ramp (+25 raw per 50 Hz frame)
 
   # Command slew limits, m/s3, on the plan-following command only. Asymmetric on purpose: the
   # windup limit is what keeps the command from dumping the brake in one frame (the driver-felt

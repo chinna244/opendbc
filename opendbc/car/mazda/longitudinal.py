@@ -107,7 +107,9 @@ class RadarSessionManager:
     return self.state
 
 
-RESUME_UNLATCH_FRAMES = int(CarControllerParams.RESUME_UNLATCH_T / DT_CTRL)
+RESUME_UNLATCH_LATCHED_FRAMES = int(CarControllerParams.RESUME_UNLATCH_LATCHED_T / DT_CTRL)
+RESUME_BLIP_DELAY_FRAMES = int(CarControllerParams.RESUME_BLIP_DELAY_T / DT_CTRL)
+RESUME_BLIP_FRAMES = int(CarControllerParams.RESUME_BLIP_T / DT_CTRL)
 LEAD_DEBOUNCE_FRAMES = int(CarControllerParams.LEAD_DEBOUNCE_T / DT_CTRL)
 RELEASE_DEBOUNCE_FRAMES = int(CarControllerParams.RELEASE_DEBOUNCE_T / DT_CTRL)
 
@@ -139,9 +141,11 @@ class StandstillHold:
     self.unlatch_frames = 0
     self.release_frames = 0
     self.latched_release = False
+    self.just_released = False
 
   def update(self, long_engaged: bool, stopping: bool, standstill: bool,
              plan_accel: float, brake_hold: bool, gas_pressed: bool) -> None:
+    self.just_released = False
     if not long_engaged:
       self._reset()
       return
@@ -170,10 +174,19 @@ class StandstillHold:
     # t+163.8; if that fault ever recurs on a gas release, the command side is the next
     # candidate -- stock's steps positive off the pedal where ours holds the override zero)
     if was_holding and not self.holding and standstill and not gas_pressed and self.unlatch_frames == 0:
-      self.unlatch_frames = RESUME_UNLATCH_FRAMES
       # car_has_hold still carries last frame's value here: whether the body owned the brakes
-      # going into this release decides the command ceiling through the pulse
+      # going into this release picks the pulse family (values.py census). A latched release
+      # pulses immediately, spanning the body's actual unlatch; a never-latched release has
+      # nothing to unlatch and only blips, after the command's relax jump has played
       self.latched_release = self.car_has_hold
+      self.unlatch_frames = RESUME_UNLATCH_LATCHED_FRAMES if self.latched_release else \
+                            (RESUME_BLIP_DELAY_FRAMES + RESUME_BLIP_FRAMES)
+      self.just_released = True
+    elif self.holding and not self.latched_release and self.unlatch_frames > 0:
+      # an aborted never-latched release cancels its pending blip: nothing is latched, so the
+      # blip is vestigial, and playing it against a re-asserted hold would put the unlatch bit
+      # over a hold-grade command -- the exact tuple the camera latches on (route 00000053)
+      self.unlatch_frames = 0
 
     # the body only owns the brakes while we are still asking it to hold
     self.car_has_hold = self.holding and standstill and brake_hold
@@ -188,7 +201,11 @@ class StandstillHold:
 
   @property
   def resume_unlatching(self) -> bool:
-    return self.unlatch_frames > 0
+    if self.latched_release:
+      return self.unlatch_frames > 0
+    # the never-latched blip waits out its delay: stock's blips start ~3 wire frames after
+    # the stop bits drop, once the command has relax-jumped into the release band
+    return 0 < self.unlatch_frames <= RESUME_BLIP_FRAMES
 
   @property
   def acc_active_2(self) -> bool:
