@@ -271,6 +271,61 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
       self.safety.set_controls_allowed(True)
       self.assertTrue(self._tx(self._crz_ctrl_cmd_msg(True, bus)))
 
+  # a stock armed-idle CRZ_INFO standby frame, checksum-correct: what the controller emits
+  # from the moment the radar teardown lands
+  SYNTHETIC_CRZ_INFO_STANDBY = bytes.fromhex("01ffe3ffc000005d")
+
+  def _acc_armed_msg(self, armed):
+    # PEDALS with MRCC armed-but-idle (ACC_OFF), the state that persists across ignition
+    values = {"ACC_OFF": armed, "BRAKE_ON": 0}
+    return self.packer.make_can_msg_safety("PEDALS", 0, values)
+
+  def test_acc_main_waits_for_the_radar_mastery_latch(self):
+    # Routes 116/117 (2026-08-27): MADS keys lateral off acc_main_on's rising edge, and the
+    # software gates its availability on 1 s of stock-radar silence. The panda cannot rx the
+    # stock CRZ_INFO (deliberately not an rx check: it goes stale at the teardown), so it
+    # mirrors the latch off the observable stand-in: our own first synthetic CRZ_INFO tx
+    # (= the teardown landing) plus 1 s of the 50 Hz PEDALS clock. Both machines then arm on
+    # the same frame; before that, MRCC-armed PEDALS must not raise acc_main_on, or the edge
+    # is consumed at boot and the software's later MADS window transmits into rejections
+    # that starve the EPS of 0x243.
+    self.safety.set_mads_params(True, False, False)
+    # boot: teardown not landed yet, MRCC main armed from the first frame
+    for _ in range(120):
+      self._rx(self._acc_armed_msg(True))
+      self.assertFalse(self.safety.get_acc_main_on())
+      self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self.assertFalse(self._tx(self._torque_cmd_msg(5)))
+    # the teardown lands: the controller starts replaying the radar
+    self.assertTrue(self._tx(common.make_msg(0, 0x21b, 8, self.SYNTHETIC_CRZ_INFO_STANDBY)))
+    # the latch completes after 1 s of the 50 Hz PEDALS clock
+    for _ in range(50):
+      self.assertFalse(self.safety.get_acc_main_on())
+      self._rx(self._acc_armed_msg(True))
+    self.assertTrue(self.safety.get_acc_main_on())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.assertTrue(self._tx(self._torque_cmd_msg(5)))
+
+  def test_camera_bus_radar_tx_does_not_master(self):
+    # only the main-bus replay marks mastery; the camera-bus copy is a duplicate
+    self.safety.set_mads_params(True, False, False)
+    self.assertTrue(self._tx(common.make_msg(2, 0x21b, 8, self.SYNTHETIC_CRZ_INFO_STANDBY)))
+    for _ in range(60):
+      self._rx(self._acc_armed_msg(True))
+    self.assertFalse(self.safety.get_acc_main_on())
+
+  def test_acc_main_follows_armed_state_after_the_latch(self):
+    # after the latch, acc_main_on tracks PEDALS arming both ways (main off must still exit)
+    self.safety.set_mads_params(True, False, False)
+    self.assertTrue(self._tx(common.make_msg(0, 0x21b, 8, self.SYNTHETIC_CRZ_INFO_STANDBY)))
+    for _ in range(60):
+      self._rx(self._acc_armed_msg(True))
+    self.assertTrue(self.safety.get_acc_main_on())
+    self._rx(self._acc_armed_msg(False))
+    self.assertFalse(self.safety.get_acc_main_on())
+    self._rx(self._acc_armed_msg(True))
+    self.assertTrue(self.safety.get_acc_main_on())
+
   def test_crz_info_active_gated_on_controls(self):
     # ACC_ACTIVE mirrors CRZ_CTRL's gate: an engaged-claiming accel frame must not flow while
     # controls are not allowed. The body raises PEDALS.ACC_ACTIVE off the SET press before

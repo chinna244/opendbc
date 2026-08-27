@@ -34,6 +34,22 @@
 static bool mazda_longitudinal = false;
 static uint32_t mazda_engage_btn_frames = 0U;
 
+// Radar-mastery latch mirrored from carstate: the software gates cruise availability on the
+// stock radar having been silent for 1 s (STOCK_RADAR_GUARD_T), and MADS keys lateral off
+// acc_main_on's rising edge. Without the same latch here the panda's edge fires at boot
+// (MRCC main persists over ignition), is consumed and exited long before the software
+// engages, and the software's whole MADS window then transmits into rejections -- starving
+// the EPS of 0x243 while the camera's own copy is relay-blocked, which latches the dash
+// LKAS error (routes 00000116/00000117, 2026-08-27). The rx hook never sees the stock
+// CRZ_INFO (it is deliberately not an rx check: it goes stale at the teardown), so the
+// observable stand-in is our own first synthetic CRZ_INFO tx -- the controller starts
+// emitting it the moment the UDS teardown lands, the same moment the stock radar goes
+// quiet, and the software's silence guard runs 1 s from there. PEDALS is the 50 Hz clock.
+#define MAZDA_RADAR_SILENT_FRAMES 50U
+static bool mazda_radar_mastered = false;
+static uint32_t mazda_mastered_pedals_frames = 0U;
+static bool mazda_radar_was_silenced = false;
+
 // With longitudinal control the stock radar is silenced and openpilot replays its frames,
 // so allowed tx patterns are pinned to byte-exact stock captures wherever possible.
 
@@ -137,6 +153,15 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
     if (msg->addr == MAZDA_PEDALS) {
       bool brake = (msg->data[0] & 0x10U);
       if (mazda_longitudinal) {
+        // PEDALS clocks the silence guard from the mastery point: sticky once set, like
+        // carstate's radar_was_silenced (a returning radar is carstate's accFaulted, not a
+        // MADS exit)
+        if (mazda_radar_mastered && (mazda_mastered_pedals_frames < MAZDA_RADAR_SILENT_FRAMES)) {
+          mazda_mastered_pedals_frames += 1U;
+        }
+        mazda_radar_was_silenced = mazda_radar_was_silenced ||
+                                   (mazda_mastered_pedals_frames >= MAZDA_RADAR_SILENT_FRAMES);
+
         // The radar teardown removes the stock CRZ_CTRL frame, so derive cruise state from
         // PEDALS: ACC_OFF (bit 2) means MRCC is armed but idle, ACC_ACTIVE (bit 3) means
         // engaged. Brake-only samples can arrive with both bits low mid-press; skip those
@@ -145,7 +170,9 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
         bool acc_armed = GET_BIT(msg, 2U) || cruise_engaged;
 
         if (acc_armed || cruise_engaged_prev || (!brake && !brake_pressed_prev)) {
-          acc_main_on = acc_armed;
+          // gated on the latch so the MADS arming edge lands on the same frame as the
+          // software's cruiseState.available, and both machines arm together
+          acc_main_on = acc_armed && mazda_radar_was_silenced;
           // Arm only on an engaged rising edge backed by a recent SET/RES press, the
           // hyundai_common form: ACC_ACTIVE alone is the body answering frames we fabricate.
           // The tx hooks already drop engaged-claiming frames while controls are not
@@ -270,11 +297,20 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     }
   }
 
+  // radar mastery: our first synthetic CRZ_INFO on the main bus marks the teardown landing,
+  // the same moment the stock radar goes quiet
+  if (tx && main_bus && (msg->addr == MAZDA_CRZ_INFO) && mazda_longitudinal) {
+    mazda_radar_mastered = true;
+  }
+
   return tx;
 }
 
 static safety_config mazda_init(uint16_t param) {
   mazda_engage_btn_frames = 0U;
+  mazda_radar_mastered = false;
+  mazda_mastered_pedals_frames = 0U;
+  mazda_radar_was_silenced = false;
 
   static const CanMsg MAZDA_TX_MSGS[] = {
     {MAZDA_LKAS, 0, 8, .check_relay = true},
