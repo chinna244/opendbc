@@ -6,7 +6,8 @@ See the LICENSE.md file in the root directory for more details.
 
 ICBM button emission: discrete taps at the ECU's measured 5 Hz registration floor (a
 tighter cadence makes the body ECU drop presses), sustained holds at the CRZ_BTNS native
-50 Hz rate, and same-frame suppression while the driver presses a physical button.
+10 Hz wire rate (measurement rationale on HOLD_PERIOD in icbm.py), and same-frame
+suppression while the driver presses a physical button.
 """
 import unittest
 from types import SimpleNamespace
@@ -71,12 +72,12 @@ class TestIcbmEmission(unittest.TestCase):
     assert all(g >= 20 for g in self.gaps(sends))
 
   def test_hold_emits_at_native_rate(self):
-    """A hold must out-shout the wheel's genuine 50 Hz frames: one forged frame per native
-    message slot for as long as the servo asserts it."""
-    sends = self.run_frames([SendButtonState.increaseHold] * 100)
+    """One forged frame per native 10 Hz CRZ_BTNS slot, so the +1 counter offset stays
+    unique (see HOLD_PERIOD in icbm.py for the wire measurement)."""
+    sends = self.run_frames([SendButtonState.increaseHold] * 200)
 
-    assert len(sends) >= 30, f"hold must emit at ~50 Hz, got {len(sends)} in 1 s"
-    assert all(g <= 3 for g in self.gaps(sends)), f"hold gaps too wide: {self.gaps(sends)}"
+    assert len(sends) >= 15, f"hold must emit at ~10 Hz, got {len(sends)} in 2 s"
+    assert all(10 <= g <= 12 for g in self.gaps(sends)), f"hold gaps off native rate: {self.gaps(sends)}"
 
   def test_hold_release_stops_emission(self):
     self.run_frames([SendButtonState.increaseHold] * 60)
