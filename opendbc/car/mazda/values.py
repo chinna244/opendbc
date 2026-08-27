@@ -60,10 +60,17 @@ class CarControllerParams:
   # braking, a tuple stock never emits, and the camera latched SCBS 90 ms in
   # (route 00000053 t+714.8, second CX-5, with a real departing lead advertised)
   RESUME_UNLATCH_LATCHED_T = 0.18  # s, 9 wire frames, the latched-family mode
-  # The unlatch pulse is a last resort, not the release protocol. Every RESUME_UNLATCHING
-  # pulse this port has ever put on the wire with a healthy camera latched the SCBS fault
-  # 80-90 ms in -- 4 for 4, across four builds whose pulse shape converged to a byte-level
-  # stock twin (routes 000000fe t+406.0, 00000115 t+385.9, 00000118 t+580.7, 00000053 t+714.8).
+  # The unlatch pulse is a last resort, not the release protocol. Of the 11 RESUME_UNLATCHING
+  # pulses this port has ever put on the wire, 8 went out to a healthy camera and all 8 latched
+  # the SCBS fault 80-90 ms in (routes 0000007e, 0000007f, 000000fe, 00000100, 00000103,
+  # 00000115, 00000118, 00000053); the other 3 hit a camera already faulted. There is no clean
+  # pulse anywhere in our history, across builds whose shape converged to a byte-level twin of
+  # a stock latched release.
+  #
+  # Across those 8 every candidate signal takes both values and still latches -- phase 0/2/3,
+  # RADAR_HAS_LEAD 0/1, ACC_ACTIVE_2 0/1, GEAR.BRAKE_HOLD 0/1 (4 latched-family, 4 not),
+  # longActive 0/1, lead 0.0-7.5 m. Seven rounds of matching stock's pulse grammar each found a
+  # deviation to fix and each was falsified by the next drive; the only invariant is the pulse.
   # So the command relaxes first and the body is given this long to drop GEAR.BRAKE_HOLD on
   # its own; the pulse only fires if it does not. Stock's never-latched blip is dropped
   # outright: nothing is latched there, so it unlatches nothing.
