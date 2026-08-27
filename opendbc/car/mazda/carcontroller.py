@@ -290,8 +290,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     # CAM_LANEINFO.TJA=2 draws the WHITE wheel, but it is not display-only: the
     # Mazda body/MRCC consumes it too. Fail closed around every cruise/TJA
-    # interaction. OFF uses continuous 2 Hz WHITE after stable MRCC-off; the
-    # separate ACTIVE probe emits one WHITE frame after stable MRCC-active.
+    # interaction. OFF and ACTIVE each use continuous 2 Hz WHITE after 0.5 s
+    # stable qualification; ARMED is a hard deny.
     cruise_state = getattr(CS.out, "cruiseState", None)
     if self.CP.openpilotLongitudinalControl:
       filtered_mrcc_available = bool(getattr(CS, "cruise_available", False))

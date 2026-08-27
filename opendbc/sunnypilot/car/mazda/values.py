@@ -10,6 +10,6 @@ from enum import IntFlag
 class MazdaFlagsSP(IntFlag):
   # Default-on trial: show Mazda's captured white steering icon while MADS is active and MRCC is off.
   EXPERIMENTAL_MADS_WHITE_HUD = 1
-  # Default-off: continuous 2 Hz WHITE while MADS is active and MRCC is stably ACTIVE.
+  # Default-on trial: continuous 2 Hz WHITE while MADS is active and MRCC is stably ACTIVE.
   # Same allowlist/TJA XOR path as OFF; ARMED remains a hard deny.
   EXPERIMENTAL_MADS_WHITE_HUD_ACTIVE = 2
