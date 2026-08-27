@@ -347,7 +347,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     )
     white_hud_trusted = (
       has_tja_mads(self.CP) and
-      CC_SP.mads.active and
+      bool(getattr(getattr(CC_SP, "mads", None), "active", False)) and
       getattr(CS, "cam_laneinfo_live", False) and
       getattr(CS, "cam_laneinfo_raw", None) in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS and
       CC.hudControl.visualAlert == VisualAlert.none and
