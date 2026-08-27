@@ -57,6 +57,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.radar_counter = 0
     self.radar_session = RadarSessionManager()
     self.accel_last = 0.
+    self.release_ramp = None
     self.tja_button_prev = False
     self.tja_mrcc_unarm_pending = False
     self.tja_mrcc_saw_armed = False
@@ -493,13 +494,32 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.lead_adv.update(CC.hudControl.leadVisible, CC_SP.leadOne.dRel,
                          CC_SP.leadOne.vRel, sm.holding)
 
+    if sm.just_released:
+      # the release command follows stock's shape, not a slew off the hold value: a
+      # never-latched stop relax-jumps into the release band in one frame, a latched hold
+      # ramps off the relaxed -0.001 (values.py census). Slewing up from -1.024 instead kept
+      # hold-grade braking under the release pulse, and the camera latched it as an SCBS
+      # fault 90 ms in (route 00000053 t+714.8, real departing lead advertised)
+      self.release_ramp = CarControllerParams.ACCEL_HOLD_LATCHED if sm.latched_release else \
+                          CarControllerParams.ACCEL_RELEASE_BAND
+    elif sm.holding or not CC.longActive:
+      # a re-hold or a driver override takes the command back; the ramp is release-only
+      self.release_ramp = None
+
     accel = 0.
     if CC.longActive:
       accel = float(np.clip(CC.actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-      # Slew limit the plan-following command. accel_last is tracked through overrides too, so
-      # taking control back when the driver lifts off ramps in instead of stepping.
-      accel = rate_limit(accel, self.accel_last, CarControllerParams.ACCEL_WINDDOWN_LIMIT,
-                         CarControllerParams.ACCEL_WINDUP_LIMIT)
+      if self.release_ramp is not None and self.release_ramp < accel:
+        # the release owns the command until its ramp catches the plan: stock climbs
+        # ~+1.25 m/s3 straight through the blip or pulse and on into the drive-off
+        accel = self.release_ramp
+        self.release_ramp += CarControllerParams.ACCEL_RELEASE_RAMP * DT_CTRL
+      else:
+        self.release_ramp = None
+        # Slew limit the plan-following command. accel_last is tracked through overrides too,
+        # so taking control back when the driver lifts off ramps in instead of stepping.
+        accel = rate_limit(accel, self.accel_last, CarControllerParams.ACCEL_WINDDOWN_LIMIT,
+                           CarControllerParams.ACCEL_WINDUP_LIMIT)
       if sm.car_has_hold:
         # the body ECU is holding the brakes itself, so stop asking for them like stock does
         accel = CarControllerParams.ACCEL_HOLD_LATCHED
@@ -511,11 +531,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         # camera latched as an SCBS fault (route 00000100 t+353)
         accel = min(accel, 0.) if CC.actuators.accel <= 0. else min(self.accel_last, 0.)
       if sm.resume_unlatching:
-        # cap the launch while the release pulse plays, by the release's own kind: stock's
-        # command is still negative at the end of every non-latched pulse but peaks at +0.25
-        # m/s2 inside latched ones. Both observed SCBS latches (routes 000000fe and 00000100)
-        # fired at a zero-cross inside a non-latched pulse, so those never go positive; a
-        # no-lead hold relaxes the plan to ~0 and would otherwise cross in the first frame.
+        # ceiling by pulse family: stock's command is negative in every never-latched blip
+        # frame of the corpus and peaks at +0.25 m/s2 inside latched pulses. The ramp already
+        # stays inside both; this is the invariant, kept as a guard.
         accel = min(accel, CarControllerParams.ACCEL_RESUME_PULSE_MAX if sm.latched_release else 0.)
     self.accel_last = accel
 
