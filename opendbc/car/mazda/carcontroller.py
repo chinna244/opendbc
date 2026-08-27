@@ -193,9 +193,14 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       accel = float(np.clip(CC.actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
       if self.release_ramp is not None and self.release_ramp < accel:
         # the release owns the command until its ramp catches the plan: stock climbs
-        # ~+1.25 m/s3 straight through the blip or pulse and on into the drive-off
+        # ~+1.25 m/s3 straight through the blip or pulse and on into the drive-off.
+        # A latched release does not start climbing until the body lets go: stock pins
+        # the command at -1 raw until GEAR.BRAKE_HOLD drops in every latched release of
+        # the corpus, and climbing against the still-latched hold is what the camera
+        # faulted 90 ms into the pulse (route 00000115 t+381.3)
         accel = self.release_ramp
-        self.release_ramp += CarControllerParams.ACCEL_RELEASE_RAMP * DT_CTRL
+        if not (sm.latched_release and CS.brake_hold):
+          self.release_ramp += CarControllerParams.ACCEL_RELEASE_RAMP * DT_CTRL
       else:
         self.release_ramp = None
         # Slew limit the plan-following command. accel_last is tracked through overrides too,
@@ -213,10 +218,18 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         # camera latched as an SCBS fault (route 00000100 t+353)
         accel = min(accel, 0.) if CC.actuators.accel <= 0. else min(self.accel_last, 0.)
       if sm.resume_unlatching:
-        # ceiling by pulse family: stock's command is negative in every never-latched blip
-        # frame of the corpus and peaks at +0.25 m/s2 inside latched pulses. The ramp already
-        # stays inside both; this is the invariant, kept as a guard.
-        accel = min(accel, CarControllerParams.ACCEL_RESUME_PULSE_MAX if sm.latched_release else 0.)
+        if sm.latched_release:
+          # stock's latched pulse runs -1 raw to +0.25 m/s2. The ceiling is an invariant
+          # the ramp already keeps. The floor does real work on a re-hold that lands while
+          # the pulse is still playing: the pulse runs out (stock never restarts one), and
+          # this keeps the re-hold's braking off the pulse frames -- hold-grade command
+          # under RESUME_UNLATCHING is the exact tuple the camera latches on
+          accel = min(max(accel, CarControllerParams.ACCEL_HOLD_LATCHED),
+                      CarControllerParams.ACCEL_RESUME_PULSE_MAX)
+        else:
+          # stock's command is negative in every never-latched blip frame of the corpus;
+          # the blip already stays under this, kept as a guard
+          accel = min(accel, 0.)
     self.accel_last = accel
 
     if radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:

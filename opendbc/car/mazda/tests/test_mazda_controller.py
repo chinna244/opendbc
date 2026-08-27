@@ -790,10 +790,14 @@ class TestLongitudinalIntegration:
     ramping = [c for c, _, _ in post][:20]
     assert all(20 <= b - a <= 30 for a, b in zip(ramping, ramping[1:], strict=False)), f"off the stock ramp: {ramping}"
 
-  def test_latched_release_speaks_the_stock_pulse_shape(self, cc):
-    # a body-latched hold releases from ACCEL_HOLD_LATCHED with a 9-wire-frame pulse while the
-    # command climbs stock's ~+25 raw per frame ramp, ending inside stock's +0.15..+0.25 peak
-    # family and never past the +0.25 ceiling (census: 6-11 frames, cmd -1 climbing to +24..+342)
+  @pytest.mark.parametrize("drop_wire_frames", [1, 2, 3])
+  def test_latched_release_speaks_the_stock_pulse_shape(self, cc, drop_wire_frames):
+    # a body-latched hold releases with a 9-wire-frame pulse: the command sits pinned at the
+    # relaxed -1 raw for as long as the body still reports GEAR.BRAKE_HOLD (as in every latched
+    # release of the census -- climbing before the drop faulted the camera 90 ms in, route
+    # 00000115 t+381.3), then climbs stock's ~+25 raw per frame ramp, peaking inside stock's
+    # family and never past the +0.25 ceiling (census: 6-11 frames, hold drop 1-3 frames in,
+    # cmd -1 climbing to +24..+342)
     long = structs.CarControl.Actuators.LongControlState
     lead = dict(lead_visible=True, lead_d_rel=4.0, lead_v_rel=0.0)
     for _ in range(int(0.5 / 0.01)):
@@ -802,22 +806,33 @@ class TestLongitudinalIntegration:
       _step(cc, long_state=long.stopping, accel=-1.3, standstill=True, brake_hold=True, **lead)
     assert cc.accel_last == pytest.approx(CarControllerParams.ACCEL_HOLD_LATCHED)
 
+    # the body reacts to the pulse: BRAKE_HOLD drops 1-3 wire frames after it starts (census)
     rows = []
-    for _ in range(int(1.5 / 0.01)):
-      sends = _step(cc, long_state=long.pid, accel=1.0, standstill=True, brake_hold=True, **lead)
+    pulse_started = None
+    for i in range(int(1.5 / 0.01)):
+      body_holds = pulse_started is None or i < pulse_started + 2 * drop_wire_frames
+      sends = _step(cc, long_state=long.pid, accel=1.0, standstill=True, brake_hold=body_holds, **lead)
       dat = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
       if dat is not None:
-        rows.append((decode_accel_cmd_raw(dat), (dat[6] >> 6) & 1))
+        unl = (dat[6] >> 6) & 1
+        rows.append((decode_accel_cmd_raw(dat), unl, body_holds))
+        if pulse_started is None and unl:
+          pulse_started = i
 
-    pulse = [cmd for cmd, unl in rows if unl]
+    pulse = [(cmd, held) for cmd, unl, held in rows if unl]
     cap = round(CarControllerParams.ACCEL_RESUME_PULSE_MAX * 1000)
     assert len(pulse) == RESUME_UNLATCH_LATCHED_FRAMES // 2, f"pulse ran {len(pulse)} wire frames"
-    # first emitted frame is the relaxed hold, give or take one control-frame ramp step
-    # (the release decision and the 50 Hz emission are not phase-locked)
-    assert -1 <= pulse[0] <= 15, f"pulse must ramp off the relaxed hold: {pulse[0]}"
-    assert all(20 <= b - a <= 30 for a, b in zip(pulse, pulse[1:], strict=False)), f"off the stock ramp: {pulse}"
-    assert 150 <= max(pulse) <= cap, f"in-pulse peak outside the stock family: {max(pulse)}"
-    assert max(cmd for cmd, _ in rows) > cap, "command never ramped past the cap after the pulse"
+    # the contract the route 115 fault turned on: no pulse frame moves off the relaxed hold
+    # while the body still reports its latch
+    pinned = [cmd for cmd, held in pulse if held]
+    assert len(pinned) == drop_wire_frames and all(cmd == -1 for cmd in pinned), \
+      f"command moved under the latched hold: {pinned}"
+    # then the ramp: stock's +25 raw per wire frame from the relaxed hold
+    ramp = [cmd for cmd, held in pulse if not held]
+    assert -1 <= ramp[0] <= 15, f"ramp must start off the relaxed hold: {ramp[0]}"
+    assert all(20 <= b - a <= 30 for a, b in zip(ramp, ramp[1:], strict=False)), f"off the stock ramp: {ramp}"
+    assert -1 + (len(ramp) - 1) * 20 <= max(ramp) <= cap, f"in-pulse peak outside the ramp's own family: {max(ramp)}"
+    assert max(cmd for cmd, _, _ in rows) > cap, "command never ramped past the cap after the pulse"
 
   def test_lead_track_follows_the_measured_lead(self, cc):
     # a frozen track is what latches the camera's SCBS fault, so the range we advertise has to
