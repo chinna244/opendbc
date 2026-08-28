@@ -191,14 +191,15 @@ class TestTwoMasterGuard:
   phase and must only hold availability low (no fault alert); once the radar has been silenced,
   hearing it again is a genuine two-master conflict and must raise accFaulted."""
 
-  def _feed_guard(self, CI, seconds, radar_alive, start_frame=0):
+  def _feed_guard(self, CI, seconds, radar_alive, start_frame=0, acc_active=False):
     from opendbc.can import CANPacker
     from opendbc.car.mazda import mazdacan
     packer = CANPacker("mazda_2017")
     ret = None
     frames = int(seconds / DT_CTRL)
     for i in range(start_frame, start_frame + frames):
-      msgs = [packer.make_can_msg("PEDALS", 0, {"ACC_OFF": 1})]
+      msgs = [packer.make_can_msg("PEDALS", 0, {"ACC_OFF": 0 if acc_active else 1,
+                                                "ACC_ACTIVE": 1 if acc_active else 0})]
       if radar_alive:
         msgs.append(mazdacan.create_acc_command(packer, 0, i, 0., long_active=False, acc_available=True))
       ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(m[0], m[1], m[2]) for m in msgs])])
@@ -234,6 +235,35 @@ class TestTwoMasterGuard:
                               radar_alive=False, start_frame=n)
     assert not ret.accFaulted
     assert ret.cruiseState.available
+
+  def test_stock_engagement_inside_the_guard_is_not_reported(self):
+    # The radar is still master during the boot phase, so a stock MRCC engage is not ours to
+    # report. Availability was already gated; leaking enabled through it opened MADS with
+    # every off-switch shut (route 00000057).
+    CI = _interface()
+    ret, _ = self._feed_guard(CI, 5.0, radar_alive=True, acc_active=True)
+    assert not ret.cruiseState.available
+    assert not ret.cruiseState.enabled
+
+  def test_engagement_still_live_when_the_guard_lifts_is_not_adopted(self):
+    # Silence alone must not turn a pre-existing stock engagement into an openpilot engage:
+    # that edge would arrive with no driver input behind it.
+    CI = _interface()
+    ret, n = self._feed_guard(CI, 5.0, radar_alive=True, acc_active=True)
+    ret, n = self._feed_guard(CI, CarControllerParams.STOCK_RADAR_GUARD_T + 0.5,
+                              radar_alive=False, acc_active=True, start_frame=n)
+    assert ret.cruiseState.available
+    assert not ret.cruiseState.enabled
+
+  def test_engagement_after_an_idle_sample_is_adopted(self):
+    CI = _interface()
+    ret, n = self._feed_guard(CI, 5.0, radar_alive=True, acc_active=True)
+    ret, n = self._feed_guard(CI, CarControllerParams.STOCK_RADAR_GUARD_T + 0.5,
+                              radar_alive=False, acc_active=True, start_frame=n)
+    ret, n = self._feed_guard(CI, 0.2, radar_alive=False, acc_active=False, start_frame=n)
+    assert not ret.cruiseState.enabled
+    ret, n = self._feed_guard(CI, 0.2, radar_alive=False, acc_active=True, start_frame=n)
+    assert ret.cruiseState.enabled
 
 
 class TestSpeedSignLimit:
