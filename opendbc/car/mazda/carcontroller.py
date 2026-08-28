@@ -78,7 +78,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     apply_torque = 0
 
-    # Speed-dependent STEER_MAX (CX-5 2022: 1200 below 32 mph, 800 above)
+    # Speed-dependent STEER_MAX (CX-5 2022: 1200 below 32 mph, 800 above). This is the scale
+    # from the controller's normalized output to CAN counts, so it stays put -- see values.py.
     if hasattr(self.params, 'STEER_MAX_LOOKUP'):
       steer_max = round(float(np.interp(CS.out.vEgoRaw, self.params.STEER_MAX_LOOKUP[0],
                                          self.params.STEER_MAX_LOOKUP[1])))
@@ -90,6 +91,21 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     if CC.latActive and fsc_ok:
       # calculate steer and also set limits due to driver torque
       new_torque = int(round(CC.actuators.torque * steer_max))
+
+      # Clamp to what the EPS will actually apply at this speed. Counts above the ceiling are
+      # not delivered (0 of 7.5M frames above 32.5 mph ever exceeded 620), so this costs no
+      # torque at the wheel; what it buys is honesty. new_actuators.torque below reports the
+      # clamped value, so controlsd's steer_limited_by_safety fires while the EPS is railed and
+      # the lateral controller freezes its integrator instead of winding up against a limit it
+      # cannot see. Deliberately separate from steer_max: scaling that down would shrink every
+      # sub-saturation command and invalidate the speed-dependent latAccelFactor seeds.
+      # Applied before apply_driver_steer_torque_limits, whose driver-torque term only ever
+      # narrows the window further (max_steer_allowed = min(steer_max, driver_max_torque)).
+      if hasattr(self.params, 'EPS_CEILING_LOOKUP'):
+        eps_ceiling = round(float(np.interp(CS.out.vEgoRaw, self.params.EPS_CEILING_LOOKUP[0],
+                                            self.params.EPS_CEILING_LOOKUP[1])))
+        new_torque = int(np.clip(new_torque, -eps_ceiling, eps_ceiling))
+
       apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
                                                       CS.out.steeringTorque, self.params, steer_max)
 
@@ -477,9 +493,14 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       accel = float(np.clip(CC.actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
       if self.release_ramp is not None and self.release_ramp < accel:
         # the release owns the command until its ramp catches the plan: stock climbs
-        # ~+1.25 m/s3 straight through the blip or pulse and on into the drive-off
+        # ~+1.25 m/s3 straight through the blip or pulse and on into the drive-off.
+        # A latched release does not start climbing until the body lets go: stock pins
+        # the command at -1 raw until GEAR.BRAKE_HOLD drops in every latched release of
+        # the corpus, and climbing against the still-latched hold is what the camera
+        # faulted 90 ms into the pulse (route 00000115 t+381.3)
         accel = self.release_ramp
-        self.release_ramp += CarControllerParams.ACCEL_RELEASE_RAMP * DT_CTRL
+        if not (sm.latched_release and CS.brake_hold):
+          self.release_ramp += CarControllerParams.ACCEL_RELEASE_RAMP * DT_CTRL
       else:
         self.release_ramp = None
         # Slew limit the plan-following command. accel_last is tracked through overrides too,
@@ -497,10 +518,18 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         # camera latched as an SCBS fault (route 00000100 t+353)
         accel = min(accel, 0.) if CC.actuators.accel <= 0. else min(self.accel_last, 0.)
       if sm.resume_unlatching:
-        # ceiling by pulse family: stock's command is negative in every never-latched blip
-        # frame of the corpus and peaks at +0.25 m/s2 inside latched pulses. The ramp already
-        # stays inside both; this is the invariant, kept as a guard.
-        accel = min(accel, CarControllerParams.ACCEL_RESUME_PULSE_MAX if sm.latched_release else 0.)
+        if sm.latched_release:
+          # stock's latched pulse runs -1 raw to +0.25 m/s2. The ceiling is an invariant
+          # the ramp already keeps. The floor does real work on a re-hold that lands while
+          # the pulse is still playing: the pulse runs out (stock never restarts one), and
+          # this keeps the re-hold's braking off the pulse frames -- hold-grade command
+          # under RESUME_UNLATCHING is the exact tuple the camera latches on
+          accel = min(max(accel, CarControllerParams.ACCEL_HOLD_LATCHED),
+                      CarControllerParams.ACCEL_RESUME_PULSE_MAX)
+        else:
+          # stock's command is negative in every never-latched blip frame of the corpus;
+          # the blip already stays under this, kept as a guard
+          accel = min(accel, 0.)
     self.accel_last = accel
 
     if radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:

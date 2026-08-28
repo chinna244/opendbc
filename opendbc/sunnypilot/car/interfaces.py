@@ -47,6 +47,20 @@ def get_speed_dep_config():
     return tomllib.load(f)
 
 
+def get_speed_dep_config_for_car(CP):
+  """The speed-dep entry for this car, honoring the entry's validity predicate.
+
+  An entry measured on a zero-min-steer-speed EPS (e.g. an EPS-swapped car) declares
+  requires_steer_to_zero: its LAF values were learned under that EPS's STEER_MAX
+  schedule, and the same model with its stock EPS runs a different schedule, so the
+  seeds would be mis-scaled there. minSteerSpeed == 0 is the CP-level signature of
+  that EPS (the same proxy the carcontroller keys the schedule on)."""
+  cfg = get_speed_dep_config().get(CP.carFingerprint, {})
+  if cfg.get('requires_steer_to_zero') and CP.minSteerSpeed > 0:
+    return {}
+  return cfg
+
+
 class CarInterfaceBaseSP:
   @staticmethod
   def torque_from_lateral_accel_linear_in_torque_space(latcontrol_inputs: LatControlInputs, torque_params: structs.CarParams.LateralTorqueTuning,

@@ -61,11 +61,13 @@ class RadarInterface(RadarInterfaceBase):
       ang = msg['ANG_OBJ']
       relv = msg['RELV_OBJ']
 
-      # Empty slots have all three fields set to sentinel values.
-      # Also skip tracks whose RELV encoding is not yet decoded — without
-      # a valid vRel the downstream Kalman filter and MPC solver break.
-      if dist == SENTINEL_DIST or ang == SENTINEL_ANG or relv == SENTINEL_RELV \
-         or addr not in RADAR_USABLE_ADDRS:
+      # Empty slots set ALL THREE fields to sentinel values — require the full triple,
+      # since each sentinel alone is a reachable real value (relv -16 raw = -1.0 m/s);
+      # measured distribution in tests/test_mazda_radar.py. Also skip tracks whose RELV
+      # encoding is not yet decoded — without a valid vRel the downstream Kalman filter
+      # and MPC solver break.
+      slot_empty = dist == SENTINEL_DIST and ang == SENTINEL_ANG and relv == SENTINEL_RELV
+      if slot_empty or addr not in RADAR_USABLE_ADDRS:
         if addr in self.pts:
           del self.pts[addr]
         continue

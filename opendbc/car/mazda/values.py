@@ -17,7 +17,15 @@ Ecu = CarParams.Ecu
 class CarControllerParams:
   STEER_DRIVER_ALLOWANCE = 15     # allowed driver torque before start limiting
   STEER_DRIVER_FACTOR = 1         # from dbc
-  STEER_STEP = 1  # 100 Hz
+  # 100 Hz. The stock camera commands CAM_LKAS at 16.6 Hz (60 ms); we send 6x that. The EPS
+  # rate limit is per unit TIME (~1200 units/s), not per received frame -- measured on a stock
+  # drive where the camera commands at 16.6 Hz and the EPS still steps 12 units per 10 ms
+  # (docs/mazda-lkas-camera-tx-census.md). So the cadence buys no extra authority, but
+  # STEER_DELTA_UP/DOWN are per-frame, which makes this constant load-bearing:
+  # STEER_DELTA_UP * (1/DT_CTRL/STEER_STEP) = 12 * 100 = 1200 units/s matches the EPS exactly.
+  # Changing STEER_STEP without rescaling STEER_DELTA_UP by the same factor silently cuts the
+  # commanded slew rate (STEER_STEP=6 would give 200 units/s, 6x slower than the hardware).
+  STEER_STEP = 1
 
   ACCEL_MAX = 2.0   # m/s2
   ACCEL_MIN = -3.5  # m/s2
@@ -54,8 +62,14 @@ class CarControllerParams:
   # braking, a tuple stock never emits, and the camera latched SCBS 90 ms in
   # (route 00000053 t+714.8, second CX-5, with a real departing lead advertised)
   RESUME_UNLATCH_LATCHED_T = 0.18  # s, 9 wire frames, the latched-family mode
-  RESUME_BLIP_DELAY_T = 0.06       # s between the stop-bit drop and the never-latched blip
-  RESUME_BLIP_T = 0.04             # s, 2 wire frames
+  # The unlatch pulse is a last resort, not the release protocol. Every RESUME_UNLATCHING
+  # pulse this port has ever put on the wire with a healthy camera latched the SCBS fault
+  # 80-90 ms in -- 4 for 4, across four builds whose pulse shape converged to a byte-level
+  # stock twin (routes 000000fe t+406.0, 00000115 t+385.9, 00000118 t+580.7, 00000053 t+714.8).
+  # So the command relaxes first and the body is given this long to drop GEAR.BRAKE_HOLD on
+  # its own; the pulse only fires if it does not. Stock's never-latched blip is dropped
+  # outright: nothing is latched there, so it unlatches nothing.
+  RESUME_PULSE_DEFER_T = 0.3       # s the body gets to release before we resort to the pulse
 
   CANCEL_CONTEXT_T = 0.5       # a wheel CANCEL keeps availability drops landing this long after release
 
@@ -114,14 +128,36 @@ class CarControllerParams:
     # CX-9 that shares this EPS and CX-5-EPS swaps keep it. steer_to_zero sets minSteerSpeed == 0
     # (interface.py / STEER_TO_ZERO_EPS_FW) — the same EPS-present proxy carstate.py gates on.
     if CP.minSteerSpeed == 0:
-      self.STEER_MAX = 1200        # theoretical max_steer 2047; EPS clips above ceiling per speed
+      # STEER_MAX is the SCALE from the controller's normalized output to CAN counts
+      # (carcontroller: new_torque = actuators.torque * steer_max), not just a ceiling, and
+      # latAccelFactor is proportional to it. Changing it rescales every sub-saturation
+      # command and invalidates every speed_dependent.toml LAF seed at once, so it is left
+      # alone; the EPS's real ceiling is enforced separately by EPS_CEILING_LOOKUP below.
+      self.STEER_MAX = 1200        # theoretical max_steer 2047
       # 1200 below 32 mph for full low-speed authority and feedforward overshoot.
-      # 800 above for smoother highway steering with 22% PID headroom above EPS ceiling (620).
+      # 800 above for smoother highway steering.
       self.STEER_MAX_LOOKUP = ([0., 14.2, 14.5], [1200, 1200, 800])
-      # EPS hardware rate limit: 12 units/frame at all speeds (4-unit quantization, max 3 steps).
+      # EPS hardware rate limit: 12 units/frame at 100 Hz (4-unit quantization, max 3 steps).
+      # Per unit time, not per frame -- see the STEER_STEP note above before changing either.
       self.STEER_DELTA_UP = 12
       self.STEER_DELTA_DOWN = 25
       self.STEER_DRIVER_MULTIPLIER = 15   # weight driver torque (tuned for the CX-5 EPS; upstream stock is 1)
+      # Torque the EPS will actually apply, by speed. Measured over 11,408,748 clean frames
+      # (4798 segments, not LKAS_BLOCK / not steeringPressed / vEgo > 2) from 0x241
+      # STEER_RATE, which the EPS itself transmits: LKAS_EFFECTIVE is what it applied.
+      # Above 32.5 mph ZERO of 7,490,617 frames exceeded 620; below 18 mph none exceeded
+      # 1148. The rail is a function of instantaneous speed with no memory -- decel, steady
+      # and accel rails are identical (spread 0) from 32-60 mph -- and is left/right
+      # symmetric. Derivation: tools/mazda_long/eps_ceiling_curve.py, and
+      # docs/mazda-lkas-camera-tx-census.md.
+      #
+      # Commanding above this delivers no extra torque at the wheel, it only hides actuator
+      # saturation from the controller: controlsd derives steer_limited_by_safety from
+      # actuators.torque vs actuatorsOutput.torque, so without the clamp the request and the
+      # report agree at 1.0 while the EPS sits railed, the integrator never freezes, and it
+      # winds up to be paid back as overshoot on release.
+      self.EPS_CEILING_LOOKUP = ([8.0, 8.5, 9.4, 10.3, 11.2, 12.1, 13.0, 13.9, 14.5],
+                                 [1148, 1132, 1092, 1048, 1012,  920,  808,  676,  620])
     else:
       self.STEER_MAX = 800         # theoretical max_steer 2047
       self.STEER_DELTA_UP = 10

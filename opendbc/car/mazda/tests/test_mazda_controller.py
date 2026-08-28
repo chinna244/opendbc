@@ -14,7 +14,7 @@ from opendbc.car.mazda.carcontroller import (CarController, TJA_MRCC_FIRST_TX_DE
                                              TJA_MRCC_RAW_OFF_CONFIRM_FRAMES, TJA_MRCC_MAX_TX_FRAMES,
                                              TJA_MRCC_RELEASE_WAIT_FRAMES)
 from opendbc.car.mazda.longitudinal import (LEAD_DEBOUNCE_FRAMES, RADAR_SESSION_LIMIT_FRAMES, RELEASE_DEBOUNCE_FRAMES,
-                                            RESUME_BLIP_DELAY_FRAMES, RESUME_BLIP_FRAMES, RESUME_UNLATCH_LATCHED_FRAMES,
+                                            RESUME_PULSE_DEFER_FRAMES, RESUME_UNLATCH_LATCHED_FRAMES,
                                             AdvertisedLead, RadarSessionManager, RadarSessionState, StandstillHold)
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams, MazdaSafetyFlags
@@ -36,6 +36,33 @@ class TestCarControllerParams:
       carFingerprint = CAR.MAZDA_CX9_2021
       minSteerSpeed = 0.0
     return CarControllerParams(FakeCP())
+
+  def test_eps_ceiling_never_exceeds_steer_max_scale(self, cx5_2022_params):
+    # The ceiling is a clamp on delivered-torque counts; the scale is STEER_MAX. The clamp is
+    # only meaningful if it sits at or below the scale at every speed.
+    bp, vals = cx5_2022_params.EPS_CEILING_LOOKUP
+    for v in np.arange(0.0, 40.0, 0.25):
+      ceiling = np.interp(v, bp, vals)
+      steer_max = np.interp(v, cx5_2022_params.STEER_MAX_LOOKUP[0],
+                            cx5_2022_params.STEER_MAX_LOOKUP[1])
+      assert 0 < ceiling <= steer_max, f"ceiling {ceiling} vs steer_max {steer_max} at {v} m/s"
+
+  def test_eps_ceiling_is_monotone_and_matches_the_measured_rails(self, cx5_2022_params):
+    # Measured over 11.4M clean frames: 1148 below 18 mph, a monotone rolloff, hard 620 from
+    # 32.5 mph up (docs/mazda-lkas-camera-tx-census.md). Nothing above 620 was ever delivered
+    # above 32.5 mph in 7.5M frames, so the high-speed leg must not drift back up.
+    bp, vals = cx5_2022_params.EPS_CEILING_LOOKUP
+    assert list(vals) == sorted(vals, reverse=True), "ceiling must fall monotonically with speed"
+    assert np.interp(5.0, bp, vals) == 1148
+    assert np.interp(14.5, bp, vals) == 620
+    assert np.interp(35.0, bp, vals) == 620
+
+  def test_steer_delta_up_matches_the_eps_rate_limit_at_this_steer_step(self, cx5_2022_params):
+    # The EPS rate limit is per unit TIME (~1200 units/s), while STEER_DELTA_UP is per frame,
+    # so the two are only matched at STEER_STEP = 1. Changing one without the other silently
+    # rescales the commanded slew rate.
+    rate_hz = 1.0 / DT_CTRL / CarControllerParams.STEER_STEP
+    assert cx5_2022_params.STEER_DELTA_UP * rate_hz == pytest.approx(1200, rel=0.01)
 
   @pytest.fixture
   def pre_2022_params(self):
@@ -264,9 +291,10 @@ class TestStandstillHold:
     assert sm.holding and not sm.resume_unlatching
     self.run(sm, 1, standstill=True, brake_hold=True, plan_accel=0.1)
     assert not sm.holding and not sm.car_has_hold
-    # the body owned the brakes, so this is the latched family: the pulse spans the body's
-    # actual unlatch and starts with the release itself
-    assert sm.latched_release and sm.resume_unlatching
+    # the body owned the brakes, so this is the latched family -- but the pulse is deferred:
+    # the command relaxes first and the body gets RESUME_PULSE_DEFER_T to let go by itself
+    assert sm.latched_release and not sm.resume_unlatching
+    assert sm.pulse_deferred_frames > 0
 
   def test_release_holds_for_as_long_as_the_plan_wants_to_move(self, sm):
     # the failed-resume regression: no release window to run out from under the plan
@@ -280,29 +308,51 @@ class TestStandstillHold:
     self.run(sm, 100, stopping=True, standstill=True)
     self.run(sm, RELEASE_DEBOUNCE_FRAMES, standstill=True, plan_accel=0.2)
     assert not sm.holding
-    assert sm.unlatch_frames > 0 and not sm.resume_unlatching  # blip still waiting out its delay
+    # nothing was latched, so this release emits no unlatch bit at all, deferred or otherwise
+    assert sm.unlatch_frames == 0 and not sm.resume_unlatching
     self.run(sm, 1, stopping=True, standstill=True, plan_accel=-1.0)
     assert sm.holding
-    # an aborted never-latched release cancels its vestigial blip and the stop bits come
-    # straight back: nothing was latched, and a blip over a re-asserted hold command is the
-    # tuple the camera latches on (route 00000053)
     assert not sm.resume_unlatching and sm.unlatch_frames == 0
     assert sm.stop_bits
 
-  def test_never_latched_release_blips_after_a_delay(self, sm):
-    # stock's never-latched releases blip RESUME_UNLATCHING for ~2 wire frames, ~3 wire frames
-    # after the stop bits drop (33-pulse corpus census); the delay covers the command's
-    # one-frame relax jump into the release band
+  def test_never_latched_release_emits_no_pulse(self, sm):
+    # a never-latched release has nothing latched to unlatch, so it puts no RESUME_UNLATCHING
+    # on the wire at all. Stock blips here, but every pulse this port has emitted latched the
+    # camera's SCBS fault (4/4), and mimicking a blip that unlatches nothing is not worth one
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True)
     assert not sm.resume_unlatching
     self.run(sm, RELEASE_DEBOUNCE_FRAMES, standstill=True, plan_accel=0.1)
     assert not sm.holding and not sm.latched_release
-    assert not sm.resume_unlatching, "blip fired before the relax jump played"
-    self.run(sm, RESUME_BLIP_DELAY_FRAMES, standstill=True, plan_accel=0.1)
-    assert sm.resume_unlatching
-    self.run(sm, RESUME_BLIP_FRAMES, standstill=True, plan_accel=0.1)
+    self.run(sm, int(1.0 / DT_CTRL), standstill=True, plan_accel=0.1)
+    assert not sm.resume_unlatching and sm.unlatch_frames == 0
+
+  def test_latched_release_skips_the_pulse_when_the_body_lets_go(self, sm):
+    # the common case the deferral exists for: the body drops GEAR.BRAKE_HOLD off the
+    # relaxing command, so no unlatch bit ever reaches the camera
+    self.run(sm, 1, stopping=True)
+    self.run(sm, 100, stopping=True, standstill=True, brake_hold=True)
+    self.run(sm, RELEASE_DEBOUNCE_FRAMES, standstill=True, brake_hold=True, plan_accel=0.1)
+    assert sm.latched_release and not sm.resume_unlatching
+    # body lets go a few frames in, well inside the grace period
+    self.run(sm, 5, standstill=True, brake_hold=False, plan_accel=0.1)
+    assert sm.pulse_deferred_frames == 0
+    self.run(sm, int(1.0 / DT_CTRL), standstill=True, brake_hold=False, plan_accel=0.1)
+    assert not sm.resume_unlatching, "pulse fired even though the body had already released"
+
+  def test_latched_release_falls_back_to_the_pulse_if_the_body_holds_on(self, sm):
+    # the safety net: a body that will not let go still gets stock's pulse, because a car
+    # that will not move is worse than the SCBS latch
+    self.run(sm, 1, stopping=True)
+    self.run(sm, 100, stopping=True, standstill=True, brake_hold=True)
+    self.run(sm, RELEASE_DEBOUNCE_FRAMES, standstill=True, brake_hold=True, plan_accel=0.1)
     assert not sm.resume_unlatching
+    self.run(sm, RESUME_PULSE_DEFER_FRAMES - 1, standstill=True, brake_hold=True, plan_accel=0.1)
+    assert not sm.resume_unlatching, "pulse fired before the grace period expired"
+    self.run(sm, 1, standstill=True, brake_hold=True, plan_accel=0.1)
+    assert sm.resume_unlatching
+    self.run(sm, RESUME_UNLATCH_LATCHED_FRAMES, standstill=True, brake_hold=True, plan_accel=0.1)
+    assert not sm.resume_unlatching, "fallback pulse outran its length"
 
   def test_long_disengage_resets(self, sm):
     self.run(sm, 1, stopping=True)
@@ -357,22 +407,29 @@ class TestStandstillHold:
       assert not sm.resume_unlatching, "a sub-debounce flap fired a release pulse"
     assert sm.holding
 
-  def test_slow_flap_never_mixes_stop_bits_with_the_pulse(self, sm):
-    # swings long enough to release each time: each release still pulses exactly once, and a
-    # re-hold mid-pulse waits the pulse out before re-asserting the stop bits
+  @pytest.mark.parametrize("brake_hold", [False, True])
+  def test_slow_flap_never_mixes_stop_bits_with_the_pulse(self, sm, brake_hold):
+    # swings long enough to release each time. Nothing latched (brake_hold False) must never
+    # put an unlatch bit on the wire; a body that holds on through every swing falls back to
+    # at most one pulse per release, and a re-hold mid-pulse waits it out before re-asserting
+    # the stop bits
     self.run(sm, 1, stopping=True)
-    self.run(sm, 100, stopping=True, standstill=True)
+    self.run(sm, 100, stopping=True, standstill=True, brake_hold=brake_hold)
     pulses = 0
     prev_unlatch = False
+    swing = RELEASE_DEBOUNCE_FRAMES + RESUME_PULSE_DEFER_FRAMES + 30  # long enough to reach the fallback
     for i in range(1200):
-      accel = 0.3 if (i // 30) % 2 == 0 else -1.0  # 0.3 s swings, above the debounce
+      accel = 0.3 if (i // swing) % 2 == 0 else -1.0
       sm.update(long_engaged=True, stopping=accel < 0, standstill=True, plan_accel=accel,
-                brake_hold=False, gas_pressed=False)
+                brake_hold=brake_hold, gas_pressed=False)
       assert not (sm.stop_bits and sm.resume_unlatching), "stop bits and pulse on one frame"
       pulses += int(sm.resume_unlatching and not prev_unlatch)
       prev_unlatch = sm.resume_unlatching
-    assert pulses > 0
-    assert pulses <= 1200 // (2 * 30), "more pulses than releases"
+    if brake_hold:
+      assert pulses > 0
+      assert pulses <= 1 + 1200 // (2 * swing), "more pulses than releases"
+    else:
+      assert pulses == 0, "a never-latched release put an unlatch bit on the wire"
 
   def test_latched_pulse_runs_to_completion_through_a_re_hold(self, sm):
     # a latched pulse spans the body's actual unlatch, so a re-hold mid-pulse waits it out
@@ -383,7 +440,9 @@ class TestStandstillHold:
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True, brake_hold=True)
     self.run(sm, RELEASE_DEBOUNCE_FRAMES, standstill=True, brake_hold=True, plan_accel=0.3)
-    assert sm.latched_release and sm.resume_unlatching
+    assert sm.latched_release and not sm.resume_unlatching  # deferred while the body holds on
+    self.run(sm, RESUME_PULSE_DEFER_FRAMES, standstill=True, brake_hold=True, plan_accel=0.3)
+    assert sm.resume_unlatching, "the body never let go, so the fallback pulse must fire"
     self.run(sm, 3, standstill=True, plan_accel=0.3)
     self.run(sm, 1, stopping=True, standstill=True)  # re-hold mid-pulse, body already let go
     assert sm.holding and not sm.stop_bits
@@ -704,9 +763,8 @@ class TestLongitudinalIntegration:
   def test_release_command_holds_through_the_debounce_then_jumps(self, cc):
     """Stock never lets ACCEL_CMD climb while STOPPING is asserted: through the release
     debounce the command stays at the hold value. Once the stop bits drop it relax-jumps
-    into stock's release band and ramps, so the zero-cross lands after the blip like every
-    captured stock release. Pre-ramping toward the plan during the debounce put the
-    zero-cross inside the pulse (route 00000100 t+353); slewing up off the hold value put
+    into stock's release band and ramps. Pre-ramping toward the plan during the debounce put
+    the zero-cross inside the pulse (route 00000100 t+353); slewing up off the hold value put
     hold-grade braking under it (route 00000053 t+714.8). Both latched SCBS."""
     long = structs.CarControl.Actuators.LongControlState
     lead = dict(lead_visible=True, lead_d_rel=4.0, lead_v_rel=0.0)
@@ -728,15 +786,14 @@ class TestLongitudinalIntegration:
     assert all(cmd == -1300 for cmd, _, _ in debounce), \
       f"command moved off the hold while STOPPING was asserted: {sorted({c for c, _, _ in debounce})}"
 
-    pulse = [cmd for cmd, _, unl in rows if unl]
-    assert pulse, "release never pulsed"
-    assert max(pulse) < 0, f"command crossed zero inside the pulse: {max(pulse)}"
+    # nothing was latched, so no unlatch bit goes out at all
+    assert not any(unl for _, _, unl in rows), "a never-latched release pulsed"
     assert max(cmd for cmd, _, _ in rows) > 500, "command never ramped up after the release"
 
-  def test_near_zero_hold_release_never_goes_positive_in_the_pulse(self, cc):
-    # a no-lead hold relaxes the plan to ~0, so the release ramp would cross zero in the
-    # first pulse frame; both observed SCBS latches fired at exactly that zero-cross inside
-    # a non-latched pulse (routes 000000fe t+44.54, 00000100 t+353.18)
+  def test_near_zero_hold_release_emits_no_pulse(self, cc):
+    # a no-lead hold relaxes the plan to ~0, so the release ramp would cross zero in the first
+    # pulse frame -- the shape behind the routes 000000fe t+44.54 / 00000100 t+353.18 latches.
+    # Nothing is latched here, so the release now carries no unlatch bit for it to land in.
     long = structs.CarControl.Actuators.LongControlState
     for _ in range(int(0.5 / 0.01)):
       _step(cc, long_state=long.stopping, accel=-0.5, standstill=False)
@@ -751,17 +808,17 @@ class TestLongitudinalIntegration:
       if dat is not None:
         rows.append((decode_accel_cmd_raw(dat), (dat[6] >> 6) & 1))
 
-    pulse = [cmd for cmd, unl in rows if unl]
-    assert pulse and max(pulse) <= 0, f"non-latched pulse went positive: {max(pulse, default=None)}"
-    assert max(cmd for cmd, _ in rows) > 500, "command never ramped up after the pulse"
+    assert not any(unl for _, unl in rows), "a never-latched release pulsed"
+    assert max(cmd for cmd, _ in rows) > 500, "command never ramped up after the release"
 
   def test_never_latched_release_speaks_the_stock_wire_grammar(self, cc):
     """Route 00000053 t+714.8 (second CX-5): slewing off the hold value under a 13-frame pulse
     put hold-grade braking beneath RESUME_UNLATCHING, a (stop, unlatch, cmd) tuple stock never
     emits, and the camera latched SCBS 90 ms in with a real departing lead advertised. Stock's
     never-latched grammar (33-pulse census): the command relax-jumps into the -0.27..-0.11 band
-    in one frame, the blip runs ~2 wire frames starting ~3 wire frames after the drop, the
-    command never goes positive under the blip, and the ramp climbs ~+25 raw per wire frame."""
+    in one frame and the ramp climbs ~+25 raw per wire frame. Stock also blips RESUME_UNLATCHING
+    here; we do not -- nothing is latched, and 4 of 4 pulses this port ever emitted latched the
+    camera -- so the blip assertions are replaced by requiring no unlatch bit at all."""
     long = structs.CarControl.Actuators.LongControlState
     lead = dict(lead_visible=True, lead_d_rel=4.0, lead_v_rel=0.0)
     for _ in range(int(0.5 / 0.01)):
@@ -783,19 +840,19 @@ class TestLongitudinalIntegration:
     # the relax jump: no post-drop frame ever carries hold-grade braking again
     assert all(cmd >= -280 for cmd, _, _ in post), f"command stayed at hold depth after the drop: {min(c for c, _, _ in post)}"
     assert post[0][0] <= -180, f"release did not start inside the stock band: {post[0][0]}"
-    # the blip: 2 wire frames, starting 2-4 wire frames after the drop, command in the band
-    blip = [i for i, (_, _, unl) in enumerate(post) if unl]
-    assert len(blip) == RESUME_BLIP_FRAMES // 2, f"blip ran {len(blip)} wire frames"
-    assert 2 <= blip[0] <= 4, f"blip started {blip[0]} wire frames after the drop"
-    assert all(-280 <= post[i][0] <= -100 for i in blip), f"blip command outside the stock band: {[post[i][0] for i in blip]}"
+    assert not any(unl for _, _, unl in rows), "a never-latched release pulsed"
     # the ramp: stock's +25 raw per wire frame, straight through the drive-off
     ramping = [c for c, _, _ in post][:20]
     assert all(20 <= b - a <= 30 for a, b in zip(ramping, ramping[1:], strict=False)), f"off the stock ramp: {ramping}"
 
-  def test_latched_release_speaks_the_stock_pulse_shape(self, cc):
-    # a body-latched hold releases from ACCEL_HOLD_LATCHED with a 9-wire-frame pulse while the
-    # command climbs stock's ~+25 raw per frame ramp, ending inside stock's +0.15..+0.25 peak
-    # family and never past the +0.25 ceiling (census: 6-11 frames, cmd -1 climbing to +24..+342)
+  @pytest.mark.parametrize("drop_wire_frames", [1, 2, 3])
+  def test_latched_release_speaks_the_stock_pulse_shape(self, cc, drop_wire_frames):
+    # a body-latched hold releases with a 9-wire-frame pulse: the command sits pinned at the
+    # relaxed -1 raw for as long as the body still reports GEAR.BRAKE_HOLD (as in every latched
+    # release of the census -- climbing before the drop faulted the camera 90 ms in, route
+    # 00000115 t+381.3), then climbs stock's ~+25 raw per frame ramp, peaking inside stock's
+    # family and never past the +0.25 ceiling (census: 6-11 frames, hold drop 1-3 frames in,
+    # cmd -1 climbing to +24..+342)
     long = structs.CarControl.Actuators.LongControlState
     lead = dict(lead_visible=True, lead_d_rel=4.0, lead_v_rel=0.0)
     for _ in range(int(0.5 / 0.01)):
@@ -804,22 +861,33 @@ class TestLongitudinalIntegration:
       _step(cc, long_state=long.stopping, accel=-1.3, standstill=True, brake_hold=True, **lead)
     assert cc.accel_last == pytest.approx(CarControllerParams.ACCEL_HOLD_LATCHED)
 
+    # the body reacts to the pulse: BRAKE_HOLD drops 1-3 wire frames after it starts (census)
     rows = []
-    for _ in range(int(1.5 / 0.01)):
-      sends = _step(cc, long_state=long.pid, accel=1.0, standstill=True, brake_hold=True, **lead)
+    pulse_started = None
+    for i in range(int(1.5 / 0.01)):
+      body_holds = pulse_started is None or i < pulse_started + 2 * drop_wire_frames
+      sends = _step(cc, long_state=long.pid, accel=1.0, standstill=True, brake_hold=body_holds, **lead)
       dat = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
       if dat is not None:
-        rows.append((decode_accel_cmd_raw(dat), (dat[6] >> 6) & 1))
+        unl = (dat[6] >> 6) & 1
+        rows.append((decode_accel_cmd_raw(dat), unl, body_holds))
+        if pulse_started is None and unl:
+          pulse_started = i
 
-    pulse = [cmd for cmd, unl in rows if unl]
+    pulse = [(cmd, held) for cmd, unl, held in rows if unl]
     cap = round(CarControllerParams.ACCEL_RESUME_PULSE_MAX * 1000)
     assert len(pulse) == RESUME_UNLATCH_LATCHED_FRAMES // 2, f"pulse ran {len(pulse)} wire frames"
-    # first emitted frame is the relaxed hold, give or take one control-frame ramp step
-    # (the release decision and the 50 Hz emission are not phase-locked)
-    assert -1 <= pulse[0] <= 15, f"pulse must ramp off the relaxed hold: {pulse[0]}"
-    assert all(20 <= b - a <= 30 for a, b in zip(pulse, pulse[1:], strict=False)), f"off the stock ramp: {pulse}"
-    assert 150 <= max(pulse) <= cap, f"in-pulse peak outside the stock family: {max(pulse)}"
-    assert max(cmd for cmd, _ in rows) > cap, "command never ramped past the cap after the pulse"
+    # the contract the route 115 fault turned on: no pulse frame moves off the relaxed hold
+    # while the body still reports its latch
+    pinned = [cmd for cmd, held in pulse if held]
+    assert len(pinned) == drop_wire_frames and all(cmd == -1 for cmd in pinned), \
+      f"command moved under the latched hold: {pinned}"
+    # then the ramp: stock's +25 raw per wire frame from the relaxed hold
+    ramp = [cmd for cmd, held in pulse if not held]
+    assert -1 <= ramp[0] <= 15, f"ramp must start off the relaxed hold: {ramp[0]}"
+    assert all(20 <= b - a <= 30 for a, b in zip(ramp, ramp[1:], strict=False)), f"off the stock ramp: {ramp}"
+    assert -1 + (len(ramp) - 1) * 20 <= max(ramp) <= cap, f"in-pulse peak outside the ramp's own family: {max(ramp)}"
+    assert max(cmd for cmd, _, _ in rows) > cap, "command never ramped past the cap after the pulse"
 
   def test_lead_track_follows_the_measured_lead(self, cc):
     # a frozen track is what latches the camera's SCBS fault, so the range we advertise has to
@@ -936,7 +1004,8 @@ class TestLongitudinalIntegration:
 
   def test_body_latched_hold_releases_in_protocol(self, cc):
     # the release the button used to stand in for: stop bits already relaxed to the body, then
-    # the plan asks to move and RESUME_UNLATCHING pulses while the command ramps positive
+    # the plan asks to move. The unlatch pulse is deferred -- the relaxed command is given
+    # RESUME_PULSE_DEFER_T to get the body to let go on its own before we resort to it.
     long = structs.CarControl.Actuators.LongControlState
     for _ in range(200):
       _step(cc, long_state=long.stopping, accel=-1.024, standstill=True,
@@ -949,7 +1018,11 @@ class TestLongitudinalIntegration:
                     cruise_engaged=True, brake_hold=True)
       assert not any(a == CRZ_BTNS for a, _, _ in sends), "CRZ_BTNS written at the release"
     assert not cc.stop_and_go.holding
-    assert cc.stop_and_go.resume_unlatching
+    assert not cc.stop_and_go.resume_unlatching, "pulse fired before the body was given a chance"
+    for _ in range(RESUME_PULSE_DEFER_FRAMES):
+      _step(cc, long_state=long.pid, accel=0.3, standstill=True,
+            cruise_engaged=True, brake_hold=True)
+    assert cc.stop_and_go.resume_unlatching, "body never let go, so the fallback must pulse"
 
   def test_gas_pedal_without_cruise_stays_disengaged(self, cc):
     # gas pressed while openpilot is not enabled must not advertise an engaged ACC
