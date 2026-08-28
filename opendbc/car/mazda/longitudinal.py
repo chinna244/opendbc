@@ -142,10 +142,12 @@ class StandstillHold:
     self.latched_release = False
     self.just_released = False
     self.pulse_deferred_frames = 0
+    self.just_fell_back = False
 
   def update(self, long_engaged: bool, stopping: bool, standstill: bool,
              plan_accel: float, brake_hold: bool, gas_pressed: bool) -> None:
     self.just_released = False
+    self.just_fell_back = False
     if not long_engaged:
       self._reset()
       return
@@ -195,10 +197,12 @@ class StandstillHold:
       else:
         self.pulse_deferred_frames -= 1
         if self.pulse_deferred_frames == 0:
-          # the body is still holding the brakes after the grace period, so fall back to
-          # stock's unlatch pulse: a car that will not move is worse than the SCBS latch,
-          # and the logs then say plainly that the pulse is load-bearing after all
+          # the body ignored the nudge too, so fall back to stock's unlatch pulse: a car that
+          # will not move is worse than the SCBS latch. The nudge is abandoned with it -- the
+          # fallback speaks stock's shape, command pinned at the relaxed hold until the body
+          # lets go, which is what the pulse census says every stock latched release does
           self.unlatch_frames = RESUME_UNLATCH_LATCHED_FRAMES
+          self.just_fell_back = True
 
     # the body only owns the brakes while we are still asking it to hold
     self.car_has_hold = self.holding and standstill and brake_hold
@@ -210,6 +214,11 @@ class StandstillHold:
     # waits the pulse out: stock never puts STOPPING and RESUME_UNLATCHING on the wire
     # together (its stop bits are already dropped when the pulse fires, every release)
     return self.holding and not self.car_has_hold and self.unlatch_frames == 0
+
+  @property
+  def deferring_release(self) -> bool:
+    # the window where we ask the body to let go without the unlatch bit
+    return self.pulse_deferred_frames > 0
 
   @property
   def resume_unlatching(self) -> bool:
