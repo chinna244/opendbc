@@ -887,6 +887,56 @@ class TestLongitudinalIntegration:
     assert -1 + (len(ramp) - 1) * 20 <= max(ramp) <= cap, f"in-pulse peak outside the ramp's own family: {max(ramp)}"
     assert max(cmd for cmd, _, _ in rows) > cap, "command never ramped past the cap after the pulse"
 
+  def test_latched_release_nudges_before_it_pulses(self, cc):
+    """Route 0000011d t+398.0: a deferral that only withholds the pulse puts nothing new on
+    the wire, because a body-latched hold already sits at the relaxed command with the stop
+    bits dropped. The body sat through 300 ms of it and moved 40 ms after the pulse fired.
+    So the deferral now climbs into a small positive request first, and the body gets that
+    instead of silence."""
+    long = structs.CarControl.Actuators.LongControlState
+    lead = dict(lead_visible=True, lead_d_rel=4.0, lead_v_rel=0.0)
+    for _ in range(int(0.5 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.5, standstill=False, **lead)
+    for _ in range(int(2.0 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.3, standstill=True, brake_hold=True, **lead)
+
+    # body holds on throughout: the nudge plays, then the fallback pulse
+    rows = []
+    for _ in range(int(1.2 / 0.01)):
+      sends = _step(cc, long_state=long.pid, accel=1.0, standstill=True, brake_hold=True, **lead)
+      dat = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
+      if dat is not None:
+        rows.append((decode_accel_cmd_raw(dat), (dat[6] >> 6) & 1))
+
+    nudge = [cmd for cmd, unl in rows if not unl]
+    cap = round(CarControllerParams.ACCEL_DEFER_NUDGE * 1000)
+    assert max(nudge) > 0, "the deferral never asked the body for anything"
+    assert max(nudge) <= cap + 1, f"nudge climbed past its cap: {max(nudge)}"
+    # and when the body ignores it, the fallback still speaks stock's pinned shape
+    pulse = [cmd for cmd, unl in rows if unl]
+    assert pulse, "body never released and the fallback pulse never fired"
+    assert pulse[0] == -1, f"fallback pulse did not snap back to the relaxed hold: {pulse[0]}"
+
+  def test_body_releasing_on_the_nudge_never_pulses(self, cc):
+    # the outcome we are actually after: the body honours the request and no unlatch bit
+    # ever reaches the camera
+    long = structs.CarControl.Actuators.LongControlState
+    lead = dict(lead_visible=True, lead_d_rel=4.0, lead_v_rel=0.0)
+    for _ in range(int(0.5 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.5, standstill=False, **lead)
+    for _ in range(int(2.0 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.3, standstill=True, brake_hold=True, **lead)
+
+    rows = []
+    for i in range(int(1.2 / 0.01)):
+      holds = i < 25  # body lets go a quarter second in, inside the deferral
+      sends = _step(cc, long_state=long.pid, accel=1.0, standstill=True, brake_hold=holds, **lead)
+      dat = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
+      if dat is not None:
+        rows.append((decode_accel_cmd_raw(dat), (dat[6] >> 6) & 1))
+    assert not any(unl for _, unl in rows), "pulsed even though the body released on the nudge"
+    assert max(cmd for cmd, _ in rows) > 500, "never ramped away after the release"
+
   def test_lead_track_follows_the_measured_lead(self, cc):
     # a frozen track is what latches the camera's SCBS fault, so the range we advertise has to
     # move with the lead we are actually following

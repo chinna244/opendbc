@@ -74,7 +74,14 @@ class CarControllerParams:
   # So the command relaxes first and the body is given this long to drop GEAR.BRAKE_HOLD on
   # its own; the pulse only fires if it does not. Stock's never-latched blip is dropped
   # outright: nothing is latched there, so it unlatches nothing.
-  RESUME_PULSE_DEFER_T = 0.3       # s the body gets to release before we resort to the pulse
+  # Route 0000011d proved the body will not let go on its own: the command is already at
+  # ACCEL_HOLD_LATCHED and the stop bits are already dropped during a body-latched hold, so a
+  # deferral that only withholds the pulse puts nothing new on the wire at all. The body sat
+  # through 300 ms of that silence and released 40 ms after the pulse finally fired. So the
+  # deferral now makes an actual request -- a small positive command, the one release signal
+  # we have never tried -- and only falls back to the pulse if the body ignores it too.
+  RESUME_PULSE_DEFER_T = 0.5       # s the nudge gets before we resort to the pulse
+  ACCEL_DEFER_NUDGE = 0.15         # m/s2, the release request made while the body still holds
 
   CANCEL_CONTEXT_T = 0.5       # a wheel CANCEL keeps availability drops landing this long after release
 
