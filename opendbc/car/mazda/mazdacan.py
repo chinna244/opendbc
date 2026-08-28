@@ -214,6 +214,9 @@ MADS_HUD_WHITE = bytes.fromhex("4201000020001040")
 # to a field-based rule until more routes are audited.
 MADS_HUD_SAFE_BASE_PAYLOADS = frozenset({
   bytes.fromhex("4201000000001040"),
+  # Route 1c CX-5 2022: FSC counter nibble in byte 7 toggles 0x40/0x60; every named
+  # CAM_LANEINFO field matches 4201000000001040 and TJA XOR leaves byte 7 untouched.
+  bytes.fromhex("4201000000001060"),
   bytes.fromhex("4221000000004040"),
   bytes.fromhex("4221000000001040"),
   bytes.fromhex("4201000000004040"),
