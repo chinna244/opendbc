@@ -35,6 +35,7 @@ class CarState(CarStateBase, CarStateExt):
 
     self.cruise_available = False
     self.cruise_enabled = False
+    self.cruise_enabled_blocked = True
     self.brake_pressed_prev = False
     self.stock_radar_silent_frames = 0
     self.radar_was_silenced = False
@@ -193,8 +194,20 @@ class CarState(CarStateBase, CarStateExt):
       ret.accFaulted = self.radar_was_silenced and not silenced
       self.radar_was_silenced |= silenced
 
+      # The guard used to ride on availability alone. MADS engages off the enabled edge but
+      # only ever releases off an availability falling edge, so pinning availability low held
+      # the engage path open while shutting every off-switch: a stock MRCC engage inside the
+      # guard window latched lateral on with no way out short of ignition off (route
+      # 00000057 t+13.7-37.7, cancel at t+28.9 did nothing). Gate both halves together.
+      # Adopting a live engagement the instant the guard lifts would be an engage the driver
+      # never asked for, so the stock state has to pass through idle once before it counts.
+      if not self.radar_was_silenced:
+        self.cruise_enabled_blocked = True
+      elif not self.cruise_enabled:
+        self.cruise_enabled_blocked = False
+
       ret.cruiseState.available = self.cruise_available and self.radar_was_silenced
-      ret.cruiseState.enabled = self.cruise_enabled
+      ret.cruiseState.enabled = self.cruise_enabled and not self.cruise_enabled_blocked
 
       # FSC settle timer (the radar teardown gate): the camera broadcasts a boot-in-progress
       # state on CAM_LANEINFO (NO_ERR_BIT, a pure boot marker clearing at 2.8-6.0 s and never
