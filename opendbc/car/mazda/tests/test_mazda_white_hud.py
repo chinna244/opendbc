@@ -20,6 +20,10 @@ LANE_VISIBLE_4361_WHITE = bytes.fromhex("4361000020000040")
 LANE_VISIBLE_4102_WHITE = bytes.fromhex("4102000020001040")
 COUNTER_1060 = bytes.fromhex("4201000000001060")
 COUNTER_1060_WHITE = bytes.fromhex("4201000020001060")
+LANE_AHB_4122 = bytes.fromhex("4122000000001040")
+LANE_AHB_4122_WHITE = bytes.fromhex("4122000020001040")
+COUNTER_4361_0060 = bytes.fromhex("4361000000000060")
+COUNTER_4361_0060_WHITE = bytes.fromhex("4361000020000060")
 UNKNOWN = bytes.fromhex("4201000a00001040")
 WHITE_TJA_XOR = mazdacan.MADS_HUD_WHITE_TJA_XOR
 SAFE_BASES = sorted(mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS)
@@ -133,6 +137,20 @@ def test_counter_1060_preserves_byte7_nibble_vs_1040_white():
   assert bytes(a ^ b for a, b in zip(COUNTER_1060, counter_white, strict=True)) == WHITE_TJA_XOR
 
 
+def test_lane_ahb_4122_only_tja_xor_changes():
+  out = mazdacan.apply_mads_white_hud(LANE_AHB_4122, LANE_AHB_4122, True)
+  assert out == LANE_AHB_4122_WHITE
+  assert bytes(a ^ b for a, b in zip(LANE_AHB_4122, out, strict=True)) == WHITE_TJA_XOR
+  assert out[1] == 0x22
+
+
+def test_counter_4361_0060_only_tja_xor_changes():
+  out = mazdacan.apply_mads_white_hud(COUNTER_4361_0060, COUNTER_4361_0060, True)
+  assert out == COUNTER_4361_0060_WHITE
+  assert bytes(a ^ b for a, b in zip(COUNTER_4361_0060, out, strict=True)) == WHITE_TJA_XOR
+  assert COUNTER_4361_0060_WHITE[7] == 0x60
+
+
 class TestWhiteHudController:
   @staticmethod
   def _controller(candidate=CAR.MAZDA_CX5_2022, off_flag=True):
@@ -211,7 +229,7 @@ class TestWhiteHudController:
     assert bytes(a ^ b for a, b in zip(base, out, strict=True)) == WHITE_TJA_XOR
     assert mazdacan.is_mads_white_hud(out)
 
-  @pytest.mark.parametrize("base", [LANE_VISIBLE_4361, LANE_VISIBLE_4102, COUNTER_1060])
+  @pytest.mark.parametrize("base", [LANE_VISIBLE_4361, LANE_VISIBLE_4102, COUNTER_1060, LANE_AHB_4122, COUNTER_4361_0060])
   def test_lane_visible_bases_become_tja_only_white_after_stable_off(self, base):
     CC, CC_SP = self._controls(active=True)
     controller = self._controller()
