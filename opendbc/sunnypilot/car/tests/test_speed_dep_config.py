@@ -4,6 +4,8 @@ Copyright (c) 2026-, Zeph Leggett.
 This file is part of zoompilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 """
+import pytest
+
 from opendbc.car.structs import CarParams
 from opendbc.sunnypilot.car.interfaces import get_speed_dep_config_for_car, get_steer_max_schedule
 
@@ -49,3 +51,24 @@ class TestSteerMaxSchedule:
     a = get_speed_dep_config_for_car(_cx5_cp())
     a['steer_max_schedule'] = 'mutated'
     assert get_speed_dep_config_for_car(_cx5_cp())['steer_max_schedule'] != 'mutated'
+
+
+class TestSteerRailSchedule:
+  def test_mazda_steer_to_zero_rail(self):
+    from opendbc.sunnypilot.car.interfaces import get_steer_rail_schedule
+    bp, rail = get_steer_rail_schedule(_cx5_cp())
+    assert all(0.0 < r <= 1.0 for r in rail)
+    # the rail bottoms out just below the cliff (648/1200) and recovers above it (620/800)
+    assert rail[bp.index(14.2)] == min(rail)
+    assert rail[bp.index(14.2)] == pytest.approx(0.54, abs=0.01)
+    assert rail[bp.index(14.5)] == pytest.approx(620.0 / 800.0, abs=1e-6)
+
+  def test_no_ceiling_returns_none(self):
+    from opendbc.sunnypilot.car.interfaces import get_steer_rail_schedule
+    cp = CarParams()
+    cp.brand = 'mazda'
+    cp.minSteerSpeed = 20.0  # stock EPS params have no ceiling lookup
+    assert get_steer_rail_schedule(cp) is None
+    cp2 = CarParams()
+    cp2.brand = 'toyota'
+    assert get_steer_rail_schedule(cp2) is None
