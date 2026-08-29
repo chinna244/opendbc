@@ -61,6 +61,32 @@ def get_steer_max_schedule(CP):
   return [float(x) for x in lookup[0]], [float(x) for x in lookup[1]]
 
 
+def get_steer_rail_schedule(CP):
+  """Normalized fraction of the carcontroller's steer scale the EPS will actually deliver,
+  by speed: EPS_CEILING_LOOKUP / STEER_MAX(v), piecewise-linear on the union of both
+  schedules' breakpoints, clipped to 1.0. None when the brand declares no ceiling (the
+  EPS delivers the full scale everywhere). Lets a lateral controller treat reaching the
+  measured rail as actuator saturation instead of comparing against a full-scale command
+  it can never deliver above the ceiling's falloff."""
+  try:
+    values = __import__(f'opendbc.car.{CP.brand}.values', fromlist=['CarControllerParams'])
+    ccp = values.CarControllerParams(CP)
+  except (ImportError, AttributeError, TypeError):
+    return None
+  ceiling = getattr(ccp, 'EPS_CEILING_LOOKUP', None)
+  if ceiling is None:
+    return None
+  sm_lookup = getattr(ccp, 'STEER_MAX_LOOKUP', None)
+  if sm_lookup is not None:
+    sm_bp, sm_v = [float(x) for x in sm_lookup[0]], [float(x) for x in sm_lookup[1]]
+  else:
+    sm_bp, sm_v = [0.0], [float(ccp.STEER_MAX)]
+  ceil_bp, ceil_v = [float(x) for x in ceiling[0]], [float(x) for x in ceiling[1]]
+  bp = sorted(set(ceil_bp + sm_bp))
+  rail = [min(1.0, float(np.interp(v, ceil_bp, ceil_v)) / float(np.interp(v, sm_bp, sm_v))) for v in bp]
+  return bp, rail
+
+
 def get_speed_dep_config_for_car(CP):
   """The speed-dep entry for this car, honoring the entry's validity predicate.
 
