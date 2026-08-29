@@ -45,6 +45,22 @@ def get_speed_dep_config():
     return tomllib.load(f)
 
 
+def get_steer_max_schedule(CP):
+  """The carcontroller's normalized-torque-to-CAN-counts scale by speed, read from the
+  brand's CarControllerParams. Returns (speed_bp, steer_max_v), or None when the brand
+  has no speed-dependent STEER_MAX (a flat scale cancels out of per-count LAF math, so
+  consumers skip the normalization entirely)."""
+  try:
+    values = __import__(f'opendbc.car.{CP.brand}.values', fromlist=['CarControllerParams'])
+    ccp = values.CarControllerParams(CP)
+  except (ImportError, AttributeError, TypeError):
+    return None
+  lookup = getattr(ccp, 'STEER_MAX_LOOKUP', None)
+  if lookup is None:
+    return None
+  return [float(x) for x in lookup[0]], [float(x) for x in lookup[1]]
+
+
 def get_speed_dep_config_for_car(CP):
   """The speed-dep entry for this car, honoring the entry's validity predicate.
 
@@ -52,10 +68,20 @@ def get_speed_dep_config_for_car(CP):
   requires_steer_to_zero: its LAF values were learned under that EPS's STEER_MAX
   schedule, and the same model with its stock EPS runs a different schedule, so the
   seeds would be mis-scaled there. minSteerSpeed == 0 is the CP-level signature of
-  that EPS (the same proxy the carcontroller keys the schedule on)."""
+  that EPS (the same proxy the carcontroller keys the schedule on).
+
+  An active entry carries the platform's STEER_MAX schedule under 'steer_max_schedule'
+  when one exists: bin LAF values are normalized units learned under one scale each,
+  so a consumer interpolating across bins needs the schedule to do it in per-count
+  space instead of smearing the scale's step across the bin span."""
   cfg = get_speed_dep_config().get(CP.carFingerprint, {})
   if cfg.get('requires_steer_to_zero') and CP.minSteerSpeed > 0:
     return {}
+  cfg = dict(cfg)
+  if cfg:
+    schedule = get_steer_max_schedule(CP)
+    if schedule is not None:
+      cfg['steer_max_schedule'] = schedule
   return cfg
 
 
