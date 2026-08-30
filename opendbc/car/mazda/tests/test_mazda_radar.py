@@ -26,6 +26,7 @@ PACKER = CANPacker("mazda_2017")
 
 
 def _radar_interface():
+  # stock-long: under alpha long the stock radar is torn down and radarUnavailable is True
   fingerprint = gen_empty_fingerprint()
   CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, fingerprint, [], alpha_long=False,
                                is_release=False, docs=False)
@@ -70,6 +71,7 @@ class TestRadarSentinels:
     rr = burst(ri, 0, {0x361: track_msg(0x361, dist=40.0, ang=0.0, relv=-1.0625)})
     track_id = rr.points[0].trackId
 
+    # lead decelerates through exactly -1.0 m/s: the track must survive with its identity
     rr = burst(ri, int(0.1e9), {0x361: track_msg(0x361, dist=39.875, ang=0.0, relv=SENTINEL_RELV)})
     assert len(rr.points) == 1
     assert rr.points[0].vRel == SENTINEL_RELV

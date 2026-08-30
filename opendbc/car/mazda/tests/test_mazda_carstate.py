@@ -10,6 +10,8 @@ CAM_EMPTY = 0x21d
 CAM_PEDESTRIAN = 0x25d
 RADAR_UDS_RESP = 0x76c
 
+# Real CAM_LANEINFO prefixes, captured on two CX-5 2022s running the same FSC firmware
+# (GSH7-67XK2-U). Only byte 1 differs: bit 5 is BIT2, bit 6 is NO_ERR_BIT.
 BOOTING = bytes([0x42, 0b01000001, 0, 0, 0, 0, 0, 0])       # NO_ERR_BIT set: still booting
 SETTLED = bytes([0x42, 0b00000001, 0, 0, 0, 0, 0, 0])       # markers clear: settled
 BIT2_LATCHED = bytes([0x41, 0b00100001, 0, 0, 0, 0, 0, 0])  # BIT2 stuck high for a whole cycle
@@ -25,10 +27,14 @@ def _interface(alpha_long=True):
   return CarInterface(CP, CP_SP)
 
 
+# CAM_LANEINFO's real cadence: tests feed it at the longest measured period (values.py), not
+# per control frame. Feeding it at 100 Hz masked a freshness window shorter than the message
+# period (the gate never settled on the car while every test passed).
 CAM_LANEINFO_PERIOD_FRAMES = int(CarControllerParams.CAM_LANEINFO_PERIOD_T / DT_CTRL)
 
 
 def _feed(CI, payload, seconds):
+  # payload None = a camera dropout, nothing on the bus at all
   frames = int(seconds / DT_CTRL)
   for i in range(frames):
     msgs = [(CAM_LANEINFO, payload, 2)] if payload is not None and i % CAM_LANEINFO_PERIOD_FRAMES == 0 else []
@@ -38,6 +44,9 @@ def _feed(CI, payload, seconds):
 
 @pytest.mark.parametrize("alpha_long", [False, True])
 def test_carstate_runs_with_real_parsers(alpha_long):
+  # vl_all, unlike vl, has no lazy message registration: every message read through it
+  # must be listed in get_can_parsers. The op-long FSC settle gate crashed card on its
+  # first update when CAM_LANEINFO was missing from the cam parser (KeyError, 2026-07-29).
   CI = _interface(alpha_long)
   assert CI.CP.openpilotLongitudinalControl == alpha_long
   for _ in range(10):
@@ -56,6 +65,7 @@ class TestFscSettleGate:
     assert not _feed(_interface(), BOOTING, settle * 2)
 
   def test_never_settles_while_err_bit_is_set(self):
+    # a latched i-ACTIVSENSE fault shows the boot markers clear, so ERR_BIT must veto on its own
     settle = CarControllerParams.FSC_SETTLE_T
     assert not _feed(_interface(), FAULTED, settle * 2)
 
@@ -66,12 +76,20 @@ class TestFscSettleGate:
     assert _feed(CI, SETTLED, 1.5)
 
   def test_a_latched_bit2_does_not_block_the_teardown_forever(self):
+    # One CX-5 2022 cold-booted with BIT2 high and NO_ERR_BIT clear for an entire ignition
+    # cycle (36.5 s, route 7c735af5fce56485|00000011). BIT2 was in the gate, so the radar was
+    # never silenced and the two-master guard held accFaulted for the whole drive.
     assert _feed(_interface(), BIT2_LATCHED, CarControllerParams.FSC_SETTLE_T * 1.5)
 
   def test_settles_at_the_longest_observed_camera_period(self):
+    # _feed runs at the longest measured period, the worst case the freshness window has to
+    # ride through: a shorter window zeroes the settle counter on every gap and the gate
+    # never opens (the regression that shipped in baf0f383c3 with CAM_LANEINFO_FRESH_T = 0.5)
     assert _feed(_interface(), SETTLED, CarControllerParams.FSC_SETTLE_T * 1.5)
 
   def test_camera_dropout_resets_the_settle_timer(self):
+    # the window is a freshness gate, not decoration: a genuine dropout, well past any real
+    # inter-frame gap, must start the settle timer over
     CI = _interface()
     _feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T * 0.8)
     _feed(CI, None, CarControllerParams.CAM_LANEINFO_FRESH_T + 0.5)
@@ -79,6 +97,7 @@ class TestFscSettleGate:
     assert _feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T * 0.6)
 
   def test_gate_starts_closed_before_any_camera_frame(self):
+    # the parser reads all-zero before the first frame, which would otherwise look settled
     CI = _interface()
     for i in range(int(CarControllerParams.FSC_SETTLE_T * 2 / DT_CTRL)):
       CI.update([(int(i * DT_CTRL * 1e9), [])])
@@ -104,11 +123,13 @@ class TestStockFcw:
     assert self._feed_21d(CI, self.IDLE, 2).stockFcw is False
 
   def test_no_fcw_before_first_camera_frame(self):
+    # the parser reads STATUS as 0 before the first frame, which is != 0x7f
     CI = _interface()
     ret, _ = CI.update([(0, [])])
     assert ret.stockFcw is False
 
   def test_ped_warning_bit_sets_fcw(self):
+    # never observed in 1.57M corpus frames, wired for coverage: PED_WARNING is bit 9
     CI = _interface()
     self._feed_21d(CI, self.IDLE)
     ret, _ = CI.update([(int(1 * DT_CTRL * 1e9), [(CAM_PEDESTRIAN, bytes.fromhex("07fa3c0000000000"), 2), (CAM_EMPTY, self.IDLE, 2)])])
@@ -122,6 +143,7 @@ class TestRadarSessionResponse:
   def test_negative_response_sets_refused(self):
     CI = _interface()
     assert not CI.CS.radar_session_refused
+    # 03 7F 10 22: conditionsNotCorrect to a session-control request
     CI.update([(0, [(RADAR_UDS_RESP, bytes.fromhex("037f102200000000"), 0)])])
     assert CI.CS.radar_session_refused
     CI.update([(int(DT_CTRL * 1e9), [])])
@@ -129,11 +151,13 @@ class TestRadarSessionResponse:
 
   def test_positive_response_is_not_a_refusal(self):
     CI = _interface()
+    # the real capture: 06 50 02 with the session parameter record (P2*=5.0 s)
     CI.update([(0, [(RADAR_UDS_RESP, bytes.fromhex("065002001901f400"), 0)])])
     assert not CI.CS.radar_session_refused
 
   def test_response_pending_is_not_a_refusal(self):
     CI = _interface()
+    # 03 7F 10 78: requestCorrectlyReceived-ResponsePending; UDS clients wait through it
     CI.update([(0, [(RADAR_UDS_RESP, bytes.fromhex("037f107800000000"), 0)])])
     assert not CI.CS.radar_session_refused
 
@@ -151,11 +175,13 @@ class TestBrakeHold:
   ])
   def test_decodes_the_hold_bit(self, payload, expected):
     CI = _interface()
+    # CANParser registers a message lazily on first access, so the first frame only arms it
     for i in range(2):
       CI.update([(int(i * DT_CTRL * 1e9), [(0x228, bytes.fromhex(payload), 0)])])
     assert CI.CS.brake_hold is expected
 
   def test_defaults_to_not_held(self):
+    # nothing parsed yet must read as "the car is not holding", the direction that keeps braking
     assert not _interface().CS.brake_hold
 
 
@@ -179,6 +205,7 @@ class TestTwoMasterGuard:
     return ret, start_frame + frames
 
   def test_boot_phase_is_not_a_fault(self):
+    # radar broadcasting, teardown not started: engagement blocked quietly, no Cruise Fault
     CI = _interface()
     ret, _ = self._feed_guard(CI, 5.0, radar_alive=True)
     assert not ret.accFaulted
@@ -199,19 +226,27 @@ class TestTwoMasterGuard:
                               radar_alive=False, start_frame=n)
     ret, n = self._feed_guard(CI, 0.5, radar_alive=True, start_frame=n)
     assert ret.accFaulted
+    # availability keys on the latched "was silenced", so a transient return does not
+    # yank lateral out from under MADS on top of the fault
     assert ret.cruiseState.available
+    # silence restores the clean state
     ret, n = self._feed_guard(CI, CarControllerParams.STOCK_RADAR_GUARD_T + 0.5,
                               radar_alive=False, start_frame=n)
     assert not ret.accFaulted
     assert ret.cruiseState.available
 
   def test_stock_engagement_inside_the_guard_is_not_reported(self):
+    # The radar is still master during the boot phase, so a stock MRCC engage is not ours to
+    # report. Availability was already gated; leaking enabled through it opened MADS with
+    # every off-switch shut (route 00000057).
     CI = _interface()
     ret, _ = self._feed_guard(CI, 5.0, radar_alive=True, acc_active=True)
     assert not ret.cruiseState.available
     assert not ret.cruiseState.enabled
 
   def test_engagement_still_live_when_the_guard_lifts_is_not_adopted(self):
+    # Silence alone must not turn a pre-existing stock engagement into an openpilot engage:
+    # that edge would arrive with no driver input behind it.
     CI = _interface()
     ret, n = self._feed_guard(CI, 5.0, radar_alive=True, acc_active=True)
     ret, n = self._feed_guard(CI, CarControllerParams.STOCK_RADAR_GUARD_T + 0.5,
@@ -278,6 +313,7 @@ class TestCancelUnderBraking:
   swallowed until the brake released 4 s later)."""
 
   def _armed_and_silent(self, CI):
+    # get past the two-master guard with the main armed so availability starts True
     from opendbc.can import CANPacker
     packer = CANPacker("mazda_2017")
     guard = CarControllerParams.STOCK_RADAR_GUARD_T + 0.5
@@ -309,6 +345,8 @@ class TestCancelUnderBraking:
     assert not ret.cruiseState.available
 
   def test_cancel_context_outlives_the_press(self):
+    # the PEDALS reaction can trail the button: press-and-release while still armed, then the
+    # bits drop only after the button is back up -- the context memory has to carry it
     CI = _interface()
     packer, n = self._armed_and_silent(CI)
     ret = None
@@ -344,7 +382,10 @@ class TestCruiseStandstill:
     return ret.cruiseState.standstill
 
   def test_not_reported_under_openpilot_longitudinal(self):
+    # the stock MRCC is not in the loop at all here: its radar is silenced and we synthesize
+    # its frames, so there is no stock standstill state to report
     assert not self._standstill(alpha_long=True)
 
   def test_still_reported_with_stock_longitudinal(self):
+    # stock long still needs it: it is what drives CC.cruiseControl.resume in controlsd
     assert self._standstill(alpha_long=False)
