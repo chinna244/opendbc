@@ -141,21 +141,25 @@ class CarControllerParams:
   # itself: Mazda runs the default ki of 0, so its pid state emits the plan's a_target verbatim
   # with no integrator to wind up against a car that is not moving.
   #
-  # The ceiling is stock's own. Across the 6 stock stop->go episodes in the corpus the command
-  # on the last still frame -- what the car actually broke away at -- was +0.66, +0.96, +1.11
-  # and +1.32 for the four body-latched releases (median +1.03), and -0.001 and +0.65 for the
-  # two never-latched ones; stock then carried on to +1.25..+1.68 in the drive-off. So pulling
-  # away from a stop is a firm request on this car, not a creep, and a ceiling below ~+1.0
-  # would sit under stock's own median and leave the CX-9 exactly where it was. +1.3 is stock's
-  # observed maximum. The override still only ever climbs until the car moves, so a car that
-  # creeps off at zero command (one of the two never-latched stock releases did) never reaches
-  # it -- but the ~0.3 s actuator dead time does carry the command ~0.38 past the breakaway
-  # value before standstill clears, which is inside stock's range and is why the cap matters.
+  # The ceiling is stock's own. Over all 31 stock stop->go episodes in the corpus (the whole
+  # population -- stock MRCC is rarely still engaged at a standstill), the command on the last
+  # still frame, i.e. what the car actually broke away at:
+  #   body-latched  (n=21): min +0.405  p25 +0.810  median +0.958  max +1.425
+  #   never-latched (n=10): min -0.001  p25 +0.213  median +0.665  max +1.416
+  # and stock then carries on to a median +1.38 / max +1.94 through the drive-off. So pulling
+  # away from a stop is a firm request on this car, not a creep: a ceiling below ~+1.0 sits
+  # under stock's own median and would leave the CX-9 exactly where it was. +1.45 clears every
+  # breakaway stock has ever needed here, so we never give up earlier than stock would.
+  #
+  # The override still only climbs until the car moves, and stock's own median says most stops
+  # break away far below this -- one never-latched stock release moved at -0.001, pure creep.
+  # The ~0.3 s actuator dead time carries the command ~0.38 past the value that actually broke
+  # the car free before standstill clears, which is why the cap is what bounds the worst case.
   #
   # What the corpus does NOT settle is the CX-9 itself: the qlog carries no CAN, so
   # GEAR.BRAKE_HOLD and the stop bits are unobservable there. A body brake latch invisible to
   # us is still on the table, and would not be cured by asking harder. An rlog would settle it.
-  ACCEL_BREAKAWAY_MAX = 1.3  # m/s2, ceiling for the still-stopped release ramp
+  ACCEL_BREAKAWAY_MAX = 1.45  # m/s2, ceiling for the still-stopped release ramp
   # ...and it gives up after this long, so a car held by something we cannot see -- a kerb, a
   # steep grade, a foot on the brake -- settles back onto the plan instead of being leaned on
   # indefinitely.
