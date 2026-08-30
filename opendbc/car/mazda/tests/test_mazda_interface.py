@@ -27,7 +27,7 @@ def _params(candidate, car_fw=None, alpha_long=False):
 
 
 class TestMazdaEpsSwap:
-  """A 2022+ CX-5 EPS swapped into an older Mazda brings the EPS-derived behaviour with it.
+  """A 2022+ CX-5 EPS swapped into an older Mazda brings the EPS-derived behavior with it.
 
   Pre-2022 Mazdas are dashcam only because their EPS locks steering out after ~5 s hands-off
   and below 45 kph. That lockout lives in the EPS, so the swap lifts it. Everything keyed on
