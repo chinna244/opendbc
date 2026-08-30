@@ -98,8 +98,8 @@ static bool mazda_synthetic_lead_radar_track_msg_valid(const CANPacket_t *msg) {
   // match it exactly. A byte-exact check here silently dropped every real-lead frame and
   // starved the camera of the track (route 6bb2dc61c4: 982 asked, 0 transmitted).
   return (msg->addr == MAZDA_RADAR_TRACK_4) &&
-         ((msg->data[1] & 0x0fU) == 0x00U) && (msg->data[2] == 0x00U) &&
-         ((msg->data[4] & 0x1fU) == 0x1dU) && (msg->data[5] == 0xc0U) &&
+         ((msg->data[1] & 0x0fU) == 0x0eU) && (msg->data[2] == 0x00U) &&
+         ((msg->data[4] & 0x1fU) == 0x1cU) && (msg->data[5] == 0x00U) &&
          (msg->data[6] == 0x00U) && ((msg->data[7] & 0xf0U) == 0x00U);
 }
 

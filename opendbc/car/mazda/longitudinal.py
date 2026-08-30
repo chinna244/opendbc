@@ -108,7 +108,6 @@ class RadarSessionManager:
 
 
 RESUME_UNLATCH_LATCHED_FRAMES = int(CarControllerParams.RESUME_UNLATCH_LATCHED_T / DT_CTRL)
-RESUME_PULSE_DEFER_FRAMES = int(CarControllerParams.RESUME_PULSE_DEFER_T / DT_CTRL)
 LEAD_DEBOUNCE_FRAMES = int(CarControllerParams.LEAD_DEBOUNCE_T / DT_CTRL)
 RELEASE_DEBOUNCE_FRAMES = int(CarControllerParams.RELEASE_DEBOUNCE_T / DT_CTRL)
 BREAKAWAY_FRAMES = int(CarControllerParams.ACCEL_BREAKAWAY_T / DT_CTRL)
@@ -142,13 +141,10 @@ class StandstillHold:
     self.release_frames = 0
     self.latched_release = False
     self.just_released = False
-    self.pulse_deferred_frames = 0
-    self.just_fell_back = False
 
   def update(self, long_engaged: bool, stopping: bool, standstill: bool,
              plan_accel: float, brake_hold: bool, gas_pressed: bool) -> None:
     self.just_released = False
-    self.just_fell_back = False
     if not long_engaged:
       self._reset()
       return
@@ -180,30 +176,14 @@ class StandstillHold:
       # car_has_hold still carries last frame's value here: whether the body owned the brakes
       # going into this release tells us whether there is anything to unlatch at all. A
       # never-latched release has nothing latched, so it emits nothing; a latched release
-      # arms the deferred pulse below and lets the relaxing command try first.
+      # pulses immediately -- the body answers nothing else. Deferring the pulse behind
+      # silence (route 0000011d, 0.3 s) and behind a positive nudge (route 0000012c, 2.0 s,
+      # three stops) both left GEAR.BRAKE_HOLD untouched for the whole window, and the body
+      # then dropped it 2-3 wire frames into the fallback pulse every time.
       self.latched_release = self.car_has_hold
-      self.pulse_deferred_frames = RESUME_PULSE_DEFER_FRAMES if self.latched_release else 0
+      if self.latched_release:
+        self.unlatch_frames = RESUME_UNLATCH_LATCHED_FRAMES
       self.just_released = True
-    elif self.holding:
-      # a re-hold cancels a pending pulse: the body is being asked to hold again, so there is
-      # nothing to unlatch, and firing the bit over a hold-grade command is the exact tuple
-      # the camera latches on (route 00000053)
-      self.pulse_deferred_frames = 0
-
-    if self.pulse_deferred_frames > 0 and not self.just_released:
-      if not brake_hold:
-        # the body let go off the relaxing command alone -- the common case, and the whole
-        # point of deferring: no pulse reaches the wire and the camera has nothing to fault
-        self.pulse_deferred_frames = 0
-      else:
-        self.pulse_deferred_frames -= 1
-        if self.pulse_deferred_frames == 0:
-          # the body ignored the nudge too, so fall back to stock's unlatch pulse: a car that
-          # will not move is worse than the SCBS latch. The nudge is abandoned with it -- the
-          # fallback speaks stock's shape, command pinned at the relaxed hold until the body
-          # lets go, which is what the pulse census says every stock latched release does
-          self.unlatch_frames = RESUME_UNLATCH_LATCHED_FRAMES
-          self.just_fell_back = True
 
     # the body only owns the brakes while we are still asking it to hold
     self.car_has_hold = self.holding and standstill and brake_hold
@@ -217,13 +197,8 @@ class StandstillHold:
     return self.holding and not self.car_has_hold and self.unlatch_frames == 0
 
   @property
-  def deferring_release(self) -> bool:
-    # the window where we ask the body to let go without the unlatch bit
-    return self.pulse_deferred_frames > 0
-
-  @property
   def resume_unlatching(self) -> bool:
-    # only ever set by the deferred fallback above, and only for a latched release
+    # only ever armed at a latched release
     return self.unlatch_frames > 0
 
   @property

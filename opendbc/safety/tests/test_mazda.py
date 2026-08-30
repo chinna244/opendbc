@@ -210,11 +210,11 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
     # perception, not actuation, so it flows with controls_allowed low the way a stock radar
     # reports objects with cruise off.
     lead_frames = [
-      "0a4000001dc00000",  # the fabricated stopped lead at 10.25 m
-      "229000007dc0000e",  # lead at 34.56 m, closing slowly
-      "22d000ff7dc00004",  # lead at 34.81 m, opening slowly
-      "000000001dc00000",  # zero range, zero relv corner
-      "fff000fffdc0000f",  # max range, max relv corner
+      "0a4e00001c000000",  # stopped lead at 10.25 m
+      "229e00007c00000e",  # lead at 34.56 m, closing slowly
+      "22de00ff7c000004",  # lead at 34.81 m, opening slowly
+      "000e00001c000000",  # zero range, zero relv corner (the template itself)
+      "fffe00fffc00000f",  # max range, max relv corner
     ]
     for bus in (0, 2):
       for hexdat in lead_frames:
@@ -226,12 +226,12 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
   def test_malformed_lead_radar_track_blocked(self):
     # each corrupts one template-owned field of a valid lead frame
     bad_frames = [
-      "229100007dc0000e",  # data[1] low nibble not zero
-      "229001007dc0000e",  # data[2] not zero
-      "229000007cc0000e",  # data[4] template bits wrong
-      "229000007dc1000e",  # data[5] wrong
-      "229000007dc0010e",  # data[6] not zero
-      "229000007dc0100e",  # data[7] high nibble not zero
+      "229100007c00000e",  # data[1] low nibble off the template
+      "229e01007c00000e",  # data[2] not zero
+      "229e00007d00000e",  # data[4] template bits wrong
+      "229e00007cc0000e",  # data[5] wrong -- the retired capture's empty-slot signature
+      "229e00007c00010e",  # data[6] not zero
+      "229e00007c00100e",  # data[7] high nibble not zero
     ]
     self.safety.set_controls_allowed(True)
     for bus in (0, 2):

@@ -14,11 +14,16 @@ RADAR_TRACK_MSGS = {
   0x366: bytes.fromhex("fff7fe7ffbff3fc0"),
 }
 LEAD_TRACK_ADDR = 0x364
-# An occupied track slot, captured from a 0x764 radar holding a stopped lead at 10.25 m.
-# create_lead_track only rewrites DIST_OBJ and RELV_OBJ; the rest is the radar's track-valid
-# pattern, which is not understood well enough to synthesize.
-LEAD_TRACK_TEMPLATE = bytes.fromhex("0a4000001dc00000")
-LEAD_TRACK_DIST = 10.25   # m, the range LEAD_TRACK_TEMPLATE was captured at; not a control value
+# An occupied track slot's constant bytes, rebased on stock drive_0b's clean latched hold
+# release -- the one stock release with exactly our bus topology (lead in 0x364 alone, five
+# slots empty). Its status pair byte4/byte5 reads 1c/00 through the whole stop, unlatch and
+# drive-off; the old capture carried 1d/c0, and c0 in byte 5 is the empty-slot signature
+# (fff7fefe1fc00000), so every unlatch pulse went out over a track whose status bits read
+# half-invalid -- unattested in any of the 24 stock at-release occupied slots. The
+# measurement fields are zeroed here because create_lead_track rewrites DIST_OBJ and
+# RELV_OBJ every frame; byte 2 wanders on a live radar but parks at zero in clean stock
+# releases too (drive_0e), so it stays fixed.
+LEAD_TRACK_TEMPLATE = bytes.fromhex("000e00001c000000")
 DIST_OBJ_SCALE = 0.0625   # m per bit, DIST_OBJ and RELV_OBJ share it
 DIST_OBJ_MAX = 255.875    # m, the full-scale DIST_OBJ reading a track can carry
 
