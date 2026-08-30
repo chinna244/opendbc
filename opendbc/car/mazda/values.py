@@ -80,7 +80,12 @@ class CarControllerParams:
   # through 300 ms of that silence and released 40 ms after the pulse finally fired. So the
   # deferral now makes an actual request -- a small positive command, the one release signal
   # we have never tried -- and only falls back to the pulse if the body ignores it too.
-  RESUME_PULSE_DEFER_T = 0.5       # s the nudge gets before we resort to the pulse
+  # The nudge gets a long window on purpose. Every second spent here is a second the camera is
+  # not being shown the one signal that has latched it 8 times out of 8, and the cost of
+  # waiting is only a slower drive-off -- the driver's pedal outranks the hold throughout. The
+  # 0.5 s this started at was sized against the *silent* deferral it replaced (route 0000011d,
+  # where nothing new went on the wire at all), not against a deferral that actually asks.
+  RESUME_PULSE_DEFER_T = 2.0       # s the nudge gets before we resort to the pulse
   ACCEL_DEFER_NUDGE = 0.15         # m/s2, the release request made while the body still holds
 
   CANCEL_CONTEXT_T = 0.5       # a wheel CANCEL keeps availability drops landing this long after release
@@ -122,6 +127,25 @@ class CarControllerParams:
   # between those two edges is what the camera accepts.
   ACCEL_RELEASE_BAND = -0.26  # m/s2, the one-frame relax target at a never-latched release
   ACCEL_RELEASE_RAMP = 1.25   # m/s3, stock's release ramp (+25 raw per 50 Hz frame)
+
+  # The ramp above hands the command back the moment it catches the plan, which assumes the
+  # plan's own value is enough to get the car rolling. It is not always. On the EPS-swapped
+  # CX-9 the plan parked at +0.42..+0.47 behind a lead 2.5 m ahead and the car sat dead still
+  # for the whole 1.5 s the command was held there, until the driver used the pedal (route
+  # 00000009--ad9e22f986 t+452.9); the CX-5 releases in the corpus only ever broke away once
+  # the command had climbed past +1.0 (route_118 t+581.6: the only clean corpus breakaway,
+  # last still frame at +1.17, first rolling frame at +1.07). Whether the gap is a PCM
+  # deadband at zero speed or the grade the car happened to be stopped on does not change the
+  # remedy: keep asking, harder, until the car actually moves. So the ramp keeps climbing past
+  # the plan for as long as the car is still stopped, capped inside stock's own drive-off range
+  # (stock pulls away from a hold at +1.5). LongControl cannot do this itself: Mazda runs the
+  # default ki of 0, so its pid state emits the plan's a_target verbatim with no integrator to
+  # wind up against a car that is not moving.
+  ACCEL_BREAKAWAY_MAX = 1.5  # m/s2, ceiling for the still-stopped release ramp
+  # ...and it gives up after this long, so a car held by something we cannot see -- a kerb, a
+  # steep grade, a foot on the brake -- settles back onto the plan instead of being leaned on
+  # indefinitely.
+  ACCEL_BREAKAWAY_T = 3.0  # s
 
   # Command slew limits, m/s3, on the plan-following command only. Asymmetric on purpose: the
   # windup limit is what keeps the command from dumping the brake in one frame (the driver-felt

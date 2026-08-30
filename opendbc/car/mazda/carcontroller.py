@@ -5,8 +5,8 @@ from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, rate_limit, struc
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.mazda import mazdacan
-from opendbc.car.mazda.longitudinal import (RADAR_ADDR, AdvertisedLead, RadarSessionManager, RadarSessionState,
-                                            StandstillHold, create_radar_session_msg)
+from opendbc.car.mazda.longitudinal import (BREAKAWAY_FRAMES, RADAR_ADDR, AdvertisedLead, RadarSessionManager,
+                                            RadarSessionState, StandstillHold, create_radar_session_msg)
 from opendbc.car.mazda.values import CarControllerParams, Buttons, MazdaFlags
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
@@ -38,6 +38,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.radar_session = RadarSessionManager()
     self.accel_last = 0.
     self.release_ramp = None
+    self.breakaway_frames = 0
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -210,7 +211,18 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     accel = 0.
     if CC.longActive:
       accel = float(np.clip(CC.actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-      if self.release_ramp is not None and self.release_ramp < accel:
+      # A release that has not actually moved the car keeps the ramp alive past the plan: the
+      # plan's creep value is not always enough to break away (see ACCEL_BREAKAWAY_MAX). This
+      # only extends how long the ramp owns the command -- the climb itself still obeys the
+      # latched-hold freeze below, so a body-latched release is never leaned on any harder.
+      if self.release_ramp is None or not CS.out.standstill:
+        self.breakaway_frames = 0
+      else:
+        self.breakaway_frames += 1
+      breakaway = (CS.out.standstill and not sm.deferring_release and
+                   self.breakaway_frames <= BREAKAWAY_FRAMES)
+      ramp_ceiling = max(accel, CarControllerParams.ACCEL_BREAKAWAY_MAX)
+      if self.release_ramp is not None and (self.release_ramp < accel or breakaway):
         # the release owns the command until its ramp catches the plan: stock climbs
         # ~+1.25 m/s3 straight through the blip or pulse and on into the drive-off.
         # A latched release does not start climbing until the body lets go: stock pins
@@ -228,7 +240,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
           self.release_ramp = min(self.release_ramp + CarControllerParams.ACCEL_RELEASE_RAMP * DT_CTRL,
                                   CarControllerParams.ACCEL_DEFER_NUDGE)
         elif not (sm.latched_release and CS.brake_hold):
-          self.release_ramp += CarControllerParams.ACCEL_RELEASE_RAMP * DT_CTRL
+          self.release_ramp = min(self.release_ramp + CarControllerParams.ACCEL_RELEASE_RAMP * DT_CTRL,
+                                  ramp_ceiling)
       else:
         self.release_ramp = None
         # Slew limit the plan-following command. accel_last is tracked through overrides too,
