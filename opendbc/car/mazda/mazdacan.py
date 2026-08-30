@@ -235,18 +235,45 @@ MADS_HUD_SAFE_BASE_PAYLOADS = frozenset({
 # OFF→WHITE is TJA 0→2 only (DBC TJA motorola start 38). XOR this into an allowed
 # base; never replace the whole frame with MADS_HUD_WHITE.
 MADS_HUD_WHITE_TJA_XOR = bytes.fromhex("0000000020000000")
+# FSC fields relayed byte-for-byte into create_alert_command. TJA/TJA_TRANSITION and
+# hands/LDW alerts are intentionally zeroed or overridden on our outgoing HUD frame.
+MADS_HUD_RELAY_FIELDS = (
+  "LINE_VISIBLE", "LINE_NOT_VISIBLE", "LANE_LINES", "BIT1", "BIT2", "BIT3",
+  "NO_ERR_BIT", "ERR_BIT", "S1", "S1_HBEAM",
+)
+MADS_HUD_PACKER_CONTROLLED_FIELDS = (
+  "TJA", "TJA_TRANSITION",
+  "HANDS_ON_STEER_WARN", "HANDS_ON_STEER_WARN_2", "HANDS_WARN_3_BITS",
+  "LDW_WARN_LL", "LDW_WARN_RL",
+)
 
 
-def apply_mads_white_hud(fsc_dat: bytes | None, current_dat: bytes, enabled: bool) -> bytes:
-  """Set TJA=2 on an allowlisted FSC frame only; preserve every other byte."""
-  if not enabled or fsc_dat is None:
-    return current_dat
-  if fsc_dat not in MADS_HUD_SAFE_BASE_PAYLOADS or current_dat not in MADS_HUD_SAFE_BASE_PAYLOADS:
-    return current_dat
-  # Require FSC and packed HUD to agree so we never paint over a diverging alert pack.
-  if fsc_dat != current_dat:
-    return current_dat
-  return bytes(a ^ b for a, b in zip(current_dat, MADS_HUD_WHITE_TJA_XOR, strict=True))
+def _decode_cam_laneinfo(raw: bytes) -> dict[str, int]:
+  from opendbc.can import CANParser
+  cp = CANParser("mazda_2017", [("CAM_LANEINFO", float("nan"))], 0)
+  cp.update([(0, [(0x440, raw, 0)])])
+  fields = MADS_HUD_RELAY_FIELDS + MADS_HUD_PACKER_CONTROLLED_FIELDS
+  return {s: int(cp.vl["CAM_LANEINFO"][s]) for s in fields}
+
+
+def is_white_hud_normalized_base(fsc_raw: bytes | None, packed_dat: bytes) -> bool:
+  """True when packed is allowlisted and raw differs only in fields we do not relay."""
+  if fsc_raw is None or len(fsc_raw) != 8 or len(packed_dat) != 8:
+    return False
+  if packed_dat not in MADS_HUD_SAFE_BASE_PAYLOADS:
+    return False
+  raw_msg = _decode_cam_laneinfo(fsc_raw)
+  packed_msg = _decode_cam_laneinfo(packed_dat)
+  return all(raw_msg[s] == packed_msg[s] for s in MADS_HUD_RELAY_FIELDS)
+
+
+def apply_mads_white_hud(fsc_raw: bytes | None, packed_dat: bytes, enabled: bool) -> bytes:
+  """Set TJA=2 on a normalized allowlisted HUD frame; preserve every other byte."""
+  if not enabled or fsc_raw is None:
+    return packed_dat
+  if not is_white_hud_normalized_base(fsc_raw, packed_dat):
+    return packed_dat
+  return bytes(a ^ b for a, b in zip(packed_dat, MADS_HUD_WHITE_TJA_XOR, strict=True))
 
 
 def is_mads_white_hud(dat: bytes) -> bool:

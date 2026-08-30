@@ -71,6 +71,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.tja_mrcc_raw_off_frames = 0
     self.mads_white_hud_off_frames = 0
     self.mads_white_hud_on_bus = False
+    self.mads_white_hud_norm_base: bytes | None = None
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -347,11 +348,20 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       icbm_set_activity or
       CC.cruiseControl.cancel or CC.cruiseControl.resume
     )
+    ldw = CC.hudControl.visualAlert == VisualAlert.ldw
+    steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
+    # TODO: find a way to silence audible warnings so we can add more hud alerts
+    steer_required = steer_required and CS.lkas_allowed_speed
+    alert = mazdacan.create_alert_command(self.packer, getattr(CS, "cam_laneinfo", {}) or {}, ldw, steer_required)
+    packed_laneinfo = alert[1]
+    fsc_raw = getattr(CS, "cam_laneinfo_raw", None)
+    normalized_base = mazdacan.is_white_hud_normalized_base(fsc_raw, packed_laneinfo)
+
     white_hud_trusted = (
       has_tja_mads(self.CP) and
       bool(getattr(getattr(CC_SP, "mads", None), "active", False)) and
       getattr(CS, "cam_laneinfo_live", False) and
-      getattr(CS, "cam_laneinfo_raw", None) in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS and
+      normalized_base and
       CC.hudControl.visualAlert == VisualAlert.none and
       not self.tja_mrcc_unarm_pending and
       not tja_mrcc_cleanup_tx and
@@ -364,12 +374,16 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       mrcc_off
     )
     if white_hud_off_base_allowed:
+      if self.mads_white_hud_norm_base is not None and self.mads_white_hud_norm_base != packed_laneinfo:
+        self.mads_white_hud_off_frames = 0
+      self.mads_white_hud_norm_base = packed_laneinfo
       self.mads_white_hud_off_frames = min(
         self.mads_white_hud_off_frames + 1,
         MADS_WHITE_HUD_OFF_CONFIRM_FRAMES,
       )
     else:
       self.mads_white_hud_off_frames = 0
+      self.mads_white_hud_norm_base = None
 
     white_hud = (
       white_hud_off_base_allowed and
@@ -380,12 +394,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # Preserve the normal 2 Hz cadence. Exception: immediate OEM withdraw when WHITE
     # becomes unsafe (button / cleanup / ARMED / warning / stale / unknown payload).
     if self.frame % 50 == 0 or withdraw_white_now:
-      ldw = CC.hudControl.visualAlert == VisualAlert.ldw
-      steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
-      # TODO: find a way to silence audible warnings so we can add more hud alerts
-      steer_required = steer_required and CS.lkas_allowed_speed
-      alert = mazdacan.create_alert_command(self.packer, CS.cam_laneinfo, ldw, steer_required)
-      alert = (alert[0], mazdacan.apply_mads_white_hud(getattr(CS, "cam_laneinfo_raw", None), alert[1], white_hud), alert[2])
+      alert = (alert[0], mazdacan.apply_mads_white_hud(fsc_raw, packed_laneinfo, white_hud), alert[2])
       can_sends.append(alert)
       self.mads_white_hud_on_bus = mazdacan.is_mads_white_hud(alert[1])
 

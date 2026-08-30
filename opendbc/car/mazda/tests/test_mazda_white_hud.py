@@ -24,7 +24,8 @@ LANE_AHB_4122 = bytes.fromhex("4122000000001040")
 LANE_AHB_4122_WHITE = bytes.fromhex("4122000020001040")
 COUNTER_4361_0060 = bytes.fromhex("4361000000000060")
 COUNTER_4361_0060_WHITE = bytes.fromhex("4361000020000060")
-UNKNOWN = bytes.fromhex("4201000a00001040")
+UNKNOWN = bytes.fromhex("4201000000011040")  # ERR_BIT=1; normalized packed not allowlisted
+TRANS_4102 = bytes.fromhex("4102000600001040")  # TJA_TRANSITION=1; normalizes to 410200…1040
 WHITE_TJA_XOR = mazdacan.MADS_HUD_WHITE_TJA_XOR
 SAFE_BASES = sorted(mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS)
 _LANEINFO_SIGS = [
@@ -46,24 +47,39 @@ def test_allowlist_payload_only_flips_white_tja_bits(base):
   assert mazdacan.is_mads_white_hud(out)
 
 
-@pytest.mark.parametrize(("fsc_dat", "current_dat", "enabled", "expected"), [
+def test_allowlist_stays_thirteen_stable_bases():
+  assert len(mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS) == 13
+  assert bytes.fromhex("4202000000001040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert bytes.fromhex("4102000600001040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+
+
+@pytest.mark.parametrize(("fsc_raw", "packed_dat", "enabled", "expected"), [
   (OFF, OFF, True, WHITE),
   (OFF, OFF, False, OFF),
-  (UNKNOWN, OFF, True, OFF),
-  (OFF, UNKNOWN, True, UNKNOWN),
+  (UNKNOWN, UNKNOWN, True, UNKNOWN),
   (None, OFF, True, OFF),
-  # FSC/packer disagreement: never paint
-  (OFF, bytes.fromhex("4221000000001040"), True, bytes.fromhex("4221000000001040")),
+  # FSC/packer disagreement on relay fields: never paint
+  (bytes.fromhex("4221000000001040"), OFF, True, OFF),
   # already-WHITE / nonzero TJA form is not an allowlisted base
   (WHITE, WHITE, True, WHITE),
+  # TJA_TRANSITION-only raw difference: paint on normalized packed base
+  (TRANS_4102, LANE_VISIBLE_4102, True, LANE_VISIBLE_4102_WHITE),
 ])
-def test_white_hud_payload_gate(fsc_dat, current_dat, enabled, expected):
-  assert mazdacan.apply_mads_white_hud(fsc_dat, current_dat, enabled) == expected
+def test_white_hud_payload_gate(fsc_raw, packed_dat, enabled, expected):
+  assert mazdacan.apply_mads_white_hud(fsc_raw, packed_dat, enabled) == expected
 
 
 def test_unknown_payload_passthrough_unchanged():
   assert mazdacan.apply_mads_white_hud(UNKNOWN, UNKNOWN, True) == UNKNOWN
   assert not mazdacan.is_mads_white_hud(UNKNOWN)
+  assert not mazdacan.is_white_hud_normalized_base(UNKNOWN, UNKNOWN)
+
+
+def test_transition_raw_normalizes_to_allowlisted_packed_base():
+  assert mazdacan.is_white_hud_normalized_base(TRANS_4102, LANE_VISIBLE_4102)
+  out = mazdacan.apply_mads_white_hud(TRANS_4102, LANE_VISIBLE_4102, True)
+  assert out == LANE_VISIBLE_4102_WHITE
+  assert bytes(a ^ b for a, b in zip(LANE_VISIBLE_4102, out, strict=True)) == WHITE_TJA_XOR
 
 
 def test_nonzero_tja_or_transition_frames_are_not_allowlisted():
@@ -73,6 +89,13 @@ def test_nonzero_tja_or_transition_frames_are_not_allowlisted():
   assert tja_trans not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
   assert mazdacan.apply_mads_white_hud(WHITE, WHITE, True) == WHITE
   assert mazdacan.apply_mads_white_hud(tja_trans, tja_trans, True) == tja_trans
+
+
+def test_unpacked_lane_lines_variant_420200_remains_blocked():
+  rare = bytes.fromhex("4202000000001040")
+  assert rare not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert not mazdacan.is_white_hud_normalized_base(rare, rare)
+  assert mazdacan.apply_mads_white_hud(rare, rare, True) == rare
 
 
 def test_raw_latch_accepts_only_camera_bus_eight_byte_frames():
@@ -204,6 +227,11 @@ class TestWhiteHudController:
   def _hud(sends):
     return next(dat for addr, dat, bus in sends if addr == 0x440 and bus == 0)
 
+  @staticmethod
+  def _packed(raw: bytes) -> bytes:
+    from opendbc.can.packer import CANPacker
+    return mazdacan.create_alert_command(CANPacker("mazda_2017"), _cam_laneinfo_from_raw(raw), False, False)[1]
+
   def _prime_white(self, controller, CC, CC_SP):
     sends = []
     for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 1):
@@ -223,20 +251,24 @@ class TestWhiteHudController:
   def test_each_allowlist_base_becomes_tja_only_white_after_stable_off(self, base):
     CC, CC_SP = self._controls(active=True)
     controller = self._controller()
+    packed = self._packed(base)
     for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 1):
       _, sends = controller.update(CC, CC_SP, self._carstate(raw=base), round(frame * DT_CTRL * 1e9))
     out = self._hud(sends)
-    assert bytes(a ^ b for a, b in zip(base, out, strict=True)) == WHITE_TJA_XOR
+    assert packed in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+    assert bytes(a ^ b for a, b in zip(packed, out, strict=True)) == WHITE_TJA_XOR
     assert mazdacan.is_mads_white_hud(out)
 
   @pytest.mark.parametrize("base", [LANE_VISIBLE_4361, LANE_VISIBLE_4102, COUNTER_1060, LANE_AHB_4122, COUNTER_4361_0060])
   def test_lane_visible_bases_become_tja_only_white_after_stable_off(self, base):
     CC, CC_SP = self._controls(active=True)
     controller = self._controller()
+    packed = self._packed(base)
     for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 1):
       _, sends = controller.update(CC, CC_SP, self._carstate(raw=base), round(frame * DT_CTRL * 1e9))
     out = self._hud(sends)
-    assert bytes(a ^ b for a, b in zip(base, out, strict=True)) == WHITE_TJA_XOR
+    assert packed in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+    assert bytes(a ^ b for a, b in zip(packed, out, strict=True)) == WHITE_TJA_XOR
     assert mazdacan.is_mads_white_hud(out)
 
   def test_armed_never_emits_white(self):
@@ -405,3 +437,26 @@ class TestWhiteHudController:
 
     assert controller.mads_white_hud_off_frames == 1
     assert not controller.mads_white_hud_on_bus
+
+  def test_transition_raw_paints_white_on_normalized_packed_base(self):
+    CC, CC_SP = self._controls(active=True)
+    controller = self._controller()
+    for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 1):
+      _, sends = controller.update(
+        CC, CC_SP, self._carstate(raw=TRANS_4102), round(frame * DT_CTRL * 1e9),
+      )
+    assert self._hud(sends) == LANE_VISIBLE_4102_WHITE
+
+  def test_transition_flicker_does_not_reset_off_confirmation(self):
+    CC, CC_SP = self._controls(active=True)
+    controller = self._controller()
+    for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 1):
+      controller.update(CC, CC_SP, self._carstate(raw=LANE_VISIBLE_4102), round(frame * DT_CTRL * 1e9))
+    assert controller.mads_white_hud_off_frames == MADS_WHITE_HUD_OFF_CONFIRM_FRAMES
+
+    # Alternate TRANS raw with the same normalized packed base; timer must not reset.
+    for i in range(20):
+      raw = TRANS_4102 if i % 2 else LANE_VISIBLE_4102
+      controller.update(CC, CC_SP, self._carstate(raw=raw), round((MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 2 + i) * DT_CTRL * 1e9))
+    assert controller.mads_white_hud_off_frames == MADS_WHITE_HUD_OFF_CONFIRM_FRAMES
+    assert controller.mads_white_hud_norm_base == LANE_VISIBLE_4102
