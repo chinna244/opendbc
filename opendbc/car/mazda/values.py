@@ -134,14 +134,22 @@ class CarControllerParams:
   # for the whole 1.5 s the command was held there, until the driver used the pedal (route
   # 00000009--ad9e22f986 t+452.9); the CX-5 releases in the corpus only ever broke away once
   # the command had climbed past +1.0 (route_118 t+581.6: the only clean corpus breakaway,
-  # last still frame at +1.17, first rolling frame at +1.07). Whether the gap is a PCM
-  # deadband at zero speed or the grade the car happened to be stopped on does not change the
-  # remedy: keep asking, harder, until the car actually moves. So the ramp keeps climbing past
-  # the plan for as long as the car is still stopped, capped inside stock's own drive-off range
-  # (stock pulls away from a hold at +1.5). LongControl cannot do this itself: Mazda runs the
-  # default ki of 0, so its pid state emits the plan's a_target verbatim with no integrator to
-  # wind up against a car that is not moving.
-  ACCEL_BREAKAWAY_MAX = 1.5  # m/s2, ceiling for the still-stopped release ramp
+  # last still frame at +1.17, first rolling frame at +1.07). It was not the grade: the
+  # accelerometer puts that stop at +0.41 deg nose-up, 0.07 m/s2 of gravity, effectively flat
+  # (the three stops the driver gassed out of were on up to +2.4 deg). So the ramp keeps
+  # climbing past the plan for as long as the car is still stopped. LongControl cannot do this
+  # itself: Mazda runs the default ki of 0, so its pid state emits the plan's a_target verbatim
+  # with no integrator to wind up against a car that is not moving.
+  #
+  # The ceiling is deliberately modest. This overrides the plan, so every 0.1 above what the
+  # car needed is comfort the model did not ask for, spent creeping toward a lead that can be
+  # 2.5 m away -- and the ~0.3 s actuator dead time already carries the command ~0.38 past the
+  # value that actually broke the car free before standstill clears. +0.8 is a gentle pull-away
+  # that still clears the +0.47 the CX-9 sat through. It is NOT yet known whether that car
+  # needs more: the qlog cannot show GEAR.BRAKE_HOLD or the stop bits, so a body brake latch
+  # invisible to us is still on the table and would not be cured by asking harder anyway.
+  # Raise this only against an rlog that rules that out.
+  ACCEL_BREAKAWAY_MAX = 0.8  # m/s2, ceiling for the still-stopped release ramp
   # ...and it gives up after this long, so a car held by something we cannot see -- a kerb, a
   # steep grade, a foot on the brake -- settles back onto the plan instead of being leaned on
   # indefinitely.

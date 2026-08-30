@@ -828,8 +828,11 @@ class TestLongitudinalIntegration:
     for _ in range(int(2.0 / 0.01)):
       _step(cc, long_state=long.pid, accel=0.47, standstill=True, **lead)
       peak = max(peak, cc.accel_last)
-    assert peak > 1.0, f"command plateaued at the plan and never asked harder: {peak:.2f}"
+    assert peak > 0.47 + 0.2, f"command plateaued at the plan and never asked harder: {peak:.2f}"
     assert peak <= CarControllerParams.ACCEL_BREAKAWAY_MAX + 1e-6, f"climbed past the cap: {peak:.2f}"
+    # the override is comfort the model did not ask for, spent creeping toward a close lead:
+    # it must stay a gentle pull-away, never a launch
+    assert CarControllerParams.ACCEL_BREAKAWAY_MAX <= 1.0, "breakaway ceiling is lurch territory"
 
     # once it moves, the plan owns the command again
     for _ in range(int(0.5 / 0.01)):
