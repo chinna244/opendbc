@@ -13,7 +13,8 @@ from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.carcontroller import (CarController, TJA_MRCC_FIRST_TX_DELAY_NANOS,
                                              TJA_MRCC_RAW_OFF_CONFIRM_FRAMES, TJA_MRCC_MAX_TX_FRAMES,
                                              TJA_MRCC_RELEASE_WAIT_FRAMES)
-from opendbc.car.mazda.longitudinal import (LEAD_DEBOUNCE_FRAMES, RADAR_SESSION_LIMIT_FRAMES, RELEASE_DEBOUNCE_FRAMES,
+from opendbc.car.mazda.longitudinal import (BREAKAWAY_FRAMES, LEAD_DEBOUNCE_FRAMES, RADAR_SESSION_LIMIT_FRAMES,
+                                            RELEASE_DEBOUNCE_FRAMES,
                                             RESUME_PULSE_DEFER_FRAMES, RESUME_UNLATCH_LATCHED_FRAMES,
                                             AdvertisedLead, RadarSessionManager, RadarSessionState, StandstillHold)
 from opendbc.car.mazda.interface import CarInterface
@@ -57,12 +58,15 @@ class TestCarControllerParams:
     assert np.interp(14.5, bp, vals) == 620
     assert np.interp(35.0, bp, vals) == 620
 
-  def test_steer_delta_up_matches_the_eps_rate_limit_at_this_steer_step(self, cx5_2022_params):
-    # The EPS rate limit is per unit TIME (~1200 units/s), while STEER_DELTA_UP is per frame,
-    # so the two are only matched at STEER_STEP = 1. Changing one without the other silently
-    # rescales the commanded slew rate.
+  def test_steer_delta_matches_the_eps_rate_limit_at_this_steer_step(self, cx5_2022_params):
+    # The EPS rate limit is per unit TIME (~1200 units/s), while STEER_DELTA_UP/DOWN are per
+    # frame, so the two are only matched at STEER_STEP = 1. Changing one without the other
+    # silently rescales the commanded slew rate. Both directions: the measured rail is
+    # symmetric (p99 and p99.9 of the delivered step are 12 either way), and a winddown above
+    # it only lets the command run ahead of the wheel.
     rate_hz = 1.0 / DT_CTRL / CarControllerParams.STEER_STEP
     assert cx5_2022_params.STEER_DELTA_UP * rate_hz == pytest.approx(1200, rel=0.01)
+    assert cx5_2022_params.STEER_DELTA_DOWN * rate_hz == pytest.approx(1200, rel=0.01)
 
   @pytest.fixture
   def pre_2022_params(self):
@@ -89,7 +93,12 @@ class TestCarControllerParams:
 
   def test_cx5_2022_rate_limits(self, cx5_2022_params):
     assert cx5_2022_params.STEER_DELTA_UP == 12
-    assert cx5_2022_params.STEER_DELTA_DOWN == 25
+    assert cx5_2022_params.STEER_DELTA_DOWN == 12
+
+  def test_cx5_2022_winddown_stays_within_the_panda_backstop(self, cx5_2022_params):
+    # opendbc/safety/modes/mazda.h declares max_rate_down = 25 for every Mazda; commanding a
+    # tighter winddown is allowed, commanding a looser one would be blocked frame by frame.
+    assert cx5_2022_params.STEER_DELTA_DOWN <= 25
 
   def test_cx5_eps_driver_multiplier(self, cx5_2022_params):
     # 15 is the CX-5-EPS tune (upstream stock is 1)
@@ -811,6 +820,62 @@ class TestLongitudinalIntegration:
     assert not any(unl for _, unl in rows), "a never-latched release pulsed"
     assert max(cmd for cmd, _ in rows) > 500, "command never ramped up after the release"
 
+  def test_release_keeps_climbing_until_the_car_actually_moves(self, cc):
+    """Route 00000009--ad9e22f986 t+452.9 (EPS-swapped CX-9): the release ran correctly, the
+    ramp caught the plan at +0.47 with a vision lead 2.5 m ahead, handed the command back --
+    and the car sat dead still for 1.5 s until the driver used the pedal. Mazda runs ki=0, so
+    LongControl's pid state emits a_target verbatim and nothing ever escalates. The ramp must
+    keep climbing past the plan while the car has not moved."""
+    long = structs.CarControl.Actuators.LongControlState
+    lead = dict(lead_visible=True, lead_d_rel=2.5, lead_v_rel=0.0)
+    for _ in range(int(0.5 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.024, standstill=False, **lead)
+    for _ in range(int(2.0 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.024, standstill=True, **lead)
+
+    # the plan asks for exactly the creep the CX-9 could not move on, and the car stays stopped
+    peak = -10.
+    for _ in range(int(2.0 / 0.01)):
+      _step(cc, long_state=long.pid, accel=0.47, standstill=True, **lead)
+      peak = max(peak, cc.accel_last)
+    assert peak > 0.47 + 0.2, f"command plateaued at the plan and never asked harder: {peak:.2f}"
+    assert peak <= CarControllerParams.ACCEL_BREAKAWAY_MAX + 1e-6, f"climbed past the cap: {peak:.2f}"
+    # the override sits on top of the plan, so it is bounded by what stock itself commands
+    # pulling away from a stop: over all 31 stock stop->go episodes the breakaway command
+    # spans +0.405..+1.425 (latched median +0.958), so this must not exceed stock's own worst
+    assert CarControllerParams.ACCEL_BREAKAWAY_MAX <= 1.45, "breakaway ceiling past stock's own max"
+
+    # once it moves, the plan owns the command again
+    for _ in range(int(0.5 / 0.01)):
+      _step(cc, long_state=long.pid, accel=0.47, standstill=False, **lead)
+    assert cc.accel_last == pytest.approx(0.47, abs=0.01)
+
+  def test_breakaway_gives_up_so_a_stuck_car_is_not_leaned_on(self, cc):
+    # something we cannot see is holding the car (kerb, grade). Asking forever is worse than
+    # settling back onto the plan, which the driver can then override with the pedal.
+    long = structs.CarControl.Actuators.LongControlState
+    for _ in range(int(2.0 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.024, standstill=True)
+    for _ in range(BREAKAWAY_FRAMES + int(1.0 / 0.01)):
+      _step(cc, long_state=long.pid, accel=0.3, standstill=True)
+    assert cc.accel_last == pytest.approx(0.3, abs=0.01), \
+      f"still leaning on a car that never moved: {cc.accel_last:.2f}"
+
+  def test_breakaway_never_climbs_against_a_latched_body(self, cc):
+    """The freeze that keeps the command pinned while GEAR.BRAKE_HOLD is still set (route
+    00000115 t+381.3, camera faulted 90 ms into the pulse) outranks the breakaway climb: a
+    body-latched hold is asked with the nudge, never leaned on."""
+    long = structs.CarControl.Actuators.LongControlState
+    lead = dict(lead_visible=True, lead_d_rel=4.0, lead_v_rel=0.0)
+    for _ in range(int(2.0 / 0.01)):
+      _step(cc, long_state=long.stopping, accel=-1.3, standstill=True, brake_hold=True, **lead)
+    assert cc.stop_and_go.car_has_hold
+
+    for _ in range(RESUME_PULSE_DEFER_FRAMES + RESUME_UNLATCH_LATCHED_FRAMES + int(1.0 / 0.01)):
+      _step(cc, long_state=long.pid, accel=0.5, standstill=True, brake_hold=True, **lead)
+      assert cc.accel_last <= CarControllerParams.ACCEL_RESUME_PULSE_MAX + 1e-6, \
+        f"breakaway climbed against a still-latched body: {cc.accel_last:.2f}"
+
   def test_never_latched_release_speaks_the_stock_wire_grammar(self, cc):
     """Route 00000053 t+714.8 (second CX-5): slewing off the hold value under a 13-frame pulse
     put hold-grade braking beneath RESUME_UNLATCHING, a (stop, unlatch, cmd) tuple stock never
@@ -861,10 +926,14 @@ class TestLongitudinalIntegration:
       _step(cc, long_state=long.stopping, accel=-1.3, standstill=True, brake_hold=True, **lead)
     assert cc.accel_last == pytest.approx(CarControllerParams.ACCEL_HOLD_LATCHED)
 
-    # the body reacts to the pulse: BRAKE_HOLD drops 1-3 wire frames after it starts (census)
+    # the body reacts to the pulse: BRAKE_HOLD drops 1-3 wire frames after it starts (census).
+    # The window is sized off the constants so extending the nudge's grace cannot silently
+    # move the pulse outside it.
     rows = []
     pulse_started = None
-    for i in range(int(1.5 / 0.01)):
+    window = (RELEASE_DEBOUNCE_FRAMES + RESUME_PULSE_DEFER_FRAMES +
+              RESUME_UNLATCH_LATCHED_FRAMES + int(1.0 / 0.01))
+    for i in range(window):
       body_holds = pulse_started is None or i < pulse_started + 2 * drop_wire_frames
       sends = _step(cc, long_state=long.pid, accel=1.0, standstill=True, brake_hold=body_holds, **lead)
       dat = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
@@ -904,7 +973,7 @@ class TestLongitudinalIntegration:
 
     # body holds on throughout: the nudge plays, then the fallback pulse
     rows = []
-    for _ in range(int(1.2 / 0.01)):
+    for _ in range(RELEASE_DEBOUNCE_FRAMES + RESUME_PULSE_DEFER_FRAMES + int(1.0 / 0.01)):
       sends = _step(cc, long_state=long.pid, accel=1.0, standstill=True, brake_hold=True, **lead)
       dat = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
       if dat is not None:

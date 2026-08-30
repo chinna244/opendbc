@@ -82,7 +82,12 @@ class CarControllerParams:
   # through 300 ms of that silence and released 40 ms after the pulse finally fired. So the
   # deferral now makes an actual request -- a small positive command, the one release signal
   # we have never tried -- and only falls back to the pulse if the body ignores it too.
-  RESUME_PULSE_DEFER_T = 0.5       # s the nudge gets before we resort to the pulse
+  # The nudge gets a long window on purpose. Every second spent here is a second the camera is
+  # not being shown the one signal that has latched it 8 times out of 8, and the cost of
+  # waiting is only a slower drive-off -- the driver's pedal outranks the hold throughout. The
+  # 0.5 s this started at was sized against the *silent* deferral it replaced (route 0000011d,
+  # where nothing new went on the wire at all), not against a deferral that actually asks.
+  RESUME_PULSE_DEFER_T = 2.0       # s the nudge gets before we resort to the pulse
   ACCEL_DEFER_NUDGE = 0.15         # m/s2, the release request made while the body still holds
 
   CANCEL_CONTEXT_T = 0.5       # a wheel CANCEL keeps availability drops landing this long after release
@@ -129,6 +134,43 @@ class CarControllerParams:
   ACCEL_RELEASE_BAND = -0.26  # m/s2, the one-frame relax target at a never-latched release
   ACCEL_RELEASE_RAMP = 1.25   # m/s3, stock's release ramp (+25 raw per 50 Hz frame)
 
+  # The ramp above hands the command back the moment it catches the plan, which assumes the
+  # plan's own value is enough to get the car rolling. It is not always. On the EPS-swapped
+  # CX-9 the plan parked at +0.42..+0.47 behind a lead 2.5 m ahead and the car sat dead still
+  # for the whole 1.5 s the command was held there, until the driver used the pedal (route
+  # 00000009--ad9e22f986 t+452.9); the CX-5 releases in the corpus only ever broke away once
+  # the command had climbed past +1.0 (route_118 t+581.6: the only clean corpus breakaway,
+  # last still frame at +1.17, first rolling frame at +1.07). It was not the grade: the
+  # accelerometer puts that stop at +0.41 deg nose-up, 0.07 m/s2 of gravity, effectively flat
+  # (the three stops the driver gassed out of were on up to +2.4 deg). So the ramp keeps
+  # climbing past the plan for as long as the car is still stopped. LongControl cannot do this
+  # itself: Mazda runs the default ki of 0, so its pid state emits the plan's a_target verbatim
+  # with no integrator to wind up against a car that is not moving.
+  #
+  # The ceiling is stock's own. Over all 31 stock stop->go episodes in the corpus (the whole
+  # population -- stock MRCC is rarely still engaged at a standstill), the command on the last
+  # still frame, i.e. what the car actually broke away at:
+  #   body-latched  (n=21): min +0.405  p25 +0.810  median +0.958  max +1.425
+  #   never-latched (n=10): min -0.001  p25 +0.213  median +0.665  max +1.416
+  # and stock then carries on to a median +1.38 / max +1.94 through the drive-off. So pulling
+  # away from a stop is a firm request on this car, not a creep: a ceiling below ~+1.0 sits
+  # under stock's own median and would leave the CX-9 exactly where it was. +1.45 clears every
+  # breakaway stock has ever needed here, so we never give up earlier than stock would.
+  #
+  # The override still only climbs until the car moves, and stock's own median says most stops
+  # break away far below this -- one never-latched stock release moved at -0.001, pure creep.
+  # The ~0.3 s actuator dead time carries the command ~0.38 past the value that actually broke
+  # the car free before standstill clears, which is why the cap is what bounds the worst case.
+  #
+  # What the corpus does NOT settle is the CX-9 itself: the qlog carries no CAN, so
+  # GEAR.BRAKE_HOLD and the stop bits are unobservable there. A body brake latch invisible to
+  # us is still on the table, and would not be cured by asking harder. An rlog would settle it.
+  ACCEL_BREAKAWAY_MAX = 1.45  # m/s2, ceiling for the still-stopped release ramp
+  # ...and it gives up after this long, so a car held by something we cannot see -- a kerb, a
+  # steep grade, a foot on the brake -- settles back onto the plan instead of being leaned on
+  # indefinitely.
+  ACCEL_BREAKAWAY_T = 3.0  # s
+
   # Command slew limits, m/s3, on the plan-following command only. Asymmetric on purpose: the
   # windup limit is what keeps the command from dumping the brake in one frame (the driver-felt
   # problem), while a tight winddown limit would delay real braking for no measured benefit.
@@ -153,8 +195,16 @@ class CarControllerParams:
       self.STEER_MAX_LOOKUP = ([0., 14.2, 14.5], [1200, 1200, 800])
       # EPS hardware rate limit: 12 units/frame at 100 Hz (4-unit quantization, max 3 steps).
       # Per unit time, not per frame -- see the STEER_STEP note above before changing either.
+      # Symmetric because the hardware is: over 11.7M clean 0x241 frames the delivered step
+      # |dLKAS_EFFECTIVE| has p99 AND p99.9 of 12 at every speed, for the stock camera and for
+      # openpilot alike, and stays there when the request jumps 40-100 units in a frame (mean
+      # delivery 8.2). A winddown above 12 therefore buys no faster release at the wheel -- the
+      # EPS still walks at 12 -- it only lets the command run ahead of where the wheel actually
+      # is (p99 of that gap was 700-800 units below 20 mph, max 1400), so the command can cross
+      # zero while the wheel is still turned and the P term keeps building against a measurement
+      # that has not responded yet. Panda keeps max_rate_down = 25 as the looser backstop.
       self.STEER_DELTA_UP = 12
-      self.STEER_DELTA_DOWN = 25
+      self.STEER_DELTA_DOWN = 12
       self.STEER_DRIVER_MULTIPLIER = 15   # weight driver torque (tuned for the CX-5 EPS; upstream stock is 1)
       # Torque the EPS will actually apply, by speed. Measured over 11,408,748 clean frames
       # (4798 segments, not LKAS_BLOCK / not steeringPressed / vEgo > 2) from 0x241
