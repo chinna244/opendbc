@@ -25,7 +25,7 @@ LANE_AHB_4122_WHITE = bytes.fromhex("4122000020001040")
 COUNTER_4361_0060 = bytes.fromhex("4361000000000060")
 COUNTER_4361_0060_WHITE = bytes.fromhex("4361000020000060")
 UNKNOWN = bytes.fromhex("4201000000011040")  # ERR_BIT=1; normalized packed not allowlisted
-TRANS_4102 = bytes.fromhex("4102000600001040")  # TJA_TRANSITION=1; normalizes to 410200…1040
+TRANS_4102 = bytes.fromhex("4102000400001040")  # TJA_TRANSITION=1 (DBC); normalizes to 410200…1040
 WHITE_TJA_XOR = mazdacan.MADS_HUD_WHITE_TJA_XOR
 SAFE_BASES = sorted(mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS)
 _LANEINFO_SIGS = [
@@ -50,7 +50,7 @@ def test_allowlist_payload_only_flips_white_tja_bits(base):
 def test_allowlist_stays_thirteen_stable_bases():
   assert len(mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS) == 13
   assert bytes.fromhex("4202000000001040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
-  assert bytes.fromhex("4102000600001040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert bytes.fromhex("4102000400001040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
 
 
 @pytest.mark.parametrize(("fsc_raw", "packed_dat", "enabled", "expected"), [
@@ -80,6 +80,96 @@ def test_transition_raw_normalizes_to_allowlisted_packed_base():
   out = mazdacan.apply_mads_white_hud(TRANS_4102, LANE_VISIBLE_4102, True)
   assert out == LANE_VISIBLE_4102_WHITE
   assert bytes(a ^ b for a, b in zip(LANE_VISIBLE_4102, out, strict=True)) == WHITE_TJA_XOR
+
+
+def test_normalize_mask_matches_mazda_2017_dbc():
+  from opendbc.can.dbc import DBC
+  be_bits = [j + i * 8 for i in range(64) for j in range(7, -1, -1)]
+  sigs = DBC("mazda_2017").name_to_msg["CAM_LANEINFO"].sigs
+  field_bits = 0
+  for name in ("TJA", "TJA_TRANSITION"):
+    sig = sigs[name]
+    idx = be_bits.index(sig.start_bit)
+    for bit in be_bits[idx:idx + sig.size]:
+      byte, b = divmod(bit, 8)
+      field_bits |= 1 << (8 * (7 - byte) + b)
+  keep = ((1 << 64) - 1) ^ field_bits
+  assert keep == mazdacan.CAM_LANEINFO_TJA_NORMALIZE_MASK
+  assert (keep >> (8 * (7 - mazdacan._CAM_LANEINFO_TJA_BYTE))) & 0xFF == 0xFF ^ mazdacan._CAM_LANEINFO_TJA_BITS
+  assert (keep >> (8 * (7 - mazdacan._CAM_LANEINFO_TRANS_BYTE))) & 0xFF == 0xFF ^ mazdacan._CAM_LANEINFO_TRANS_BITS
+
+
+@pytest.mark.parametrize("base", SAFE_BASES)
+@pytest.mark.parametrize("trans", (1, 2, 3))
+def test_packer_tja_transition_normalizes_to_same_base(base, trans):
+  from opendbc.can.packer import CANPacker
+  packer = CANPacker("mazda_2017")
+  fields = _cam_laneinfo_from_raw(base)
+  packed = packer.make_can_msg("CAM_LANEINFO", 0, {**fields, "TJA": 0, "TJA_TRANSITION": 0})[1]
+  raw = packer.make_can_msg("CAM_LANEINFO", 0, {**fields, "TJA": 0, "TJA_TRANSITION": trans})[1]
+  assert raw != packed
+  assert packed in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert mazdacan.cam_laneinfo_matches_normalized(raw, packed)
+  assert mazdacan.is_white_hud_normalized_base(raw, packed)
+
+
+def test_non_tja_bit_flip_fail_closes():
+  for i in range(64):
+    raw = bytearray(OFF)
+    raw[i // 8] ^= 1 << (7 - (i % 8))
+    flipped = bytes(raw)
+    tja_or_trans = (
+      (i // 8 == mazdacan._CAM_LANEINFO_TJA_BYTE and (1 << (7 - (i % 8))) & mazdacan._CAM_LANEINFO_TJA_BITS) or
+      (i // 8 == mazdacan._CAM_LANEINFO_TRANS_BYTE and (1 << (7 - (i % 8))) & mazdacan._CAM_LANEINFO_TRANS_BITS)
+    )
+    if tja_or_trans:
+      assert mazdacan.cam_laneinfo_matches_normalized(flipped, OFF)
+    else:
+      assert not mazdacan.cam_laneinfo_matches_normalized(flipped, OFF)
+      # Leave the 13-base allowlist unless this flip lands on another audited payload.
+      if flipped not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS:
+        assert not mazdacan.is_white_hud_normalized_base(flipped, OFF)
+
+
+def test_white_hud_helpers_do_not_construct_canparser(monkeypatch):
+  import inspect
+  import opendbc.can.parser as parser_mod
+
+  src = (
+    inspect.getsource(mazdacan.cam_laneinfo_matches_normalized) +
+    inspect.getsource(mazdacan.white_hud_allowlist_base) +
+    inspect.getsource(mazdacan.is_white_hud_normalized_base) +
+    inspect.getsource(mazdacan.apply_mads_white_hud)
+  )
+  assert "CANParser" not in src
+  assert not hasattr(mazdacan, "_decode_cam_laneinfo")
+
+  def _boom(*_a, **_k):
+    raise AssertionError("CANParser constructed on WHITE HUD path")
+  monkeypatch.setattr(parser_mod, "CANParser", _boom)
+  assert mazdacan.is_white_hud_normalized_base(TRANS_4102, LANE_VISIBLE_4102)
+  assert mazdacan.white_hud_allowlist_base(TRANS_4102) == LANE_VISIBLE_4102
+  assert mazdacan.apply_mads_white_hud(OFF, OFF, True) == WHITE
+
+
+def test_normalized_match_rss_does_not_grow_with_gc_disabled():
+  import gc
+  def rss_mb():
+    with open("/proc/self/status") as f:
+      for line in f:
+        if line.startswith("VmRSS:"):
+          return int(line.split()[1]) / 1024.0
+    return 0.0
+
+  gc.collect()
+  gc.disable()
+  r0 = rss_mb()
+  for _ in range(3_000_000):
+    mazdacan.is_white_hud_normalized_base(TRANS_4102, LANE_VISIBLE_4102)
+  r1 = rss_mb()
+  gc.enable()
+  gc.collect()
+  assert r1 - r0 < 2.0, f"RSS grew {r1 - r0:.1f} MB over 3e6 calls"
 
 
 def test_nonzero_tja_or_transition_frames_are_not_allowlisted():
@@ -256,7 +346,7 @@ class TestWhiteHudController:
       _, sends = controller.update(CC, CC_SP, self._carstate(raw=base), round(frame * DT_CTRL * 1e9))
     out = self._hud(sends)
     assert packed in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
-    assert bytes(a ^ b for a, b in zip(packed, out, strict=True)) == WHITE_TJA_XOR
+    assert bytes(a ^ b for a, b in zip(base, out, strict=True)) == WHITE_TJA_XOR
     assert mazdacan.is_mads_white_hud(out)
 
   @pytest.mark.parametrize("base", [LANE_VISIBLE_4361, LANE_VISIBLE_4102, COUNTER_1060, LANE_AHB_4122, COUNTER_4361_0060])
@@ -268,7 +358,7 @@ class TestWhiteHudController:
       _, sends = controller.update(CC, CC_SP, self._carstate(raw=base), round(frame * DT_CTRL * 1e9))
     out = self._hud(sends)
     assert packed in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
-    assert bytes(a ^ b for a, b in zip(packed, out, strict=True)) == WHITE_TJA_XOR
+    assert bytes(a ^ b for a, b in zip(base, out, strict=True)) == WHITE_TJA_XOR
     assert mazdacan.is_mads_white_hud(out)
 
   def test_armed_never_emits_white(self):

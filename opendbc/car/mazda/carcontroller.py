@@ -356,7 +356,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     alert = mazdacan.create_alert_command(self.packer, getattr(CS, "cam_laneinfo", {}) or {}, ldw, steer_required)
     packed_laneinfo = alert[1]
     fsc_raw = getattr(CS, "cam_laneinfo_raw", None)
-    normalized_base = mazdacan.is_white_hud_normalized_base(fsc_raw, packed_laneinfo)
+    hud_base = mazdacan.white_hud_allowlist_base(fsc_raw)
+    normalized_base = hud_base is not None
 
     white_hud_trusted = (
       has_tja_mads(self.CP) and
@@ -375,9 +376,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       mrcc_off
     )
     if white_hud_off_base_allowed:
-      if self.mads_white_hud_norm_base is not None and self.mads_white_hud_norm_base != packed_laneinfo:
+      if self.mads_white_hud_norm_base is not None and self.mads_white_hud_norm_base != hud_base:
         self.mads_white_hud_off_frames = 0
-      self.mads_white_hud_norm_base = packed_laneinfo
+      self.mads_white_hud_norm_base = hud_base
       self.mads_white_hud_off_frames = min(
         self.mads_white_hud_off_frames + 1,
         MADS_WHITE_HUD_OFF_CONFIRM_FRAMES,
@@ -395,7 +396,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # Preserve the normal 2 Hz cadence. Exception: immediate OEM withdraw when WHITE
     # becomes unsafe (button / cleanup / ARMED / warning / stale / unknown payload).
     if self.frame % 50 == 0 or withdraw_white_now:
-      alert = (alert[0], mazdacan.apply_mads_white_hud(fsc_raw, packed_laneinfo, white_hud), alert[2])
+      payload = hud_base if white_hud and hud_base is not None else packed_laneinfo
+      alert = (alert[0], mazdacan.apply_mads_white_hud(fsc_raw, payload, white_hud), alert[2])
       can_sends.append(alert)
       self.mads_white_hud_on_bus = mazdacan.is_mads_white_hud(alert[1])
 
