@@ -37,7 +37,6 @@ class TestSteerMaxSchedule:
   def test_schedule_attached_to_active_entry(self):
     cfg = get_speed_dep_config_for_car(_cx5_cp())
     assert cfg['steer_max_schedule'] == ([0.0, 14.2, 14.5], [1200.0, 1200.0, 800.0])
-    # the schedule's step must sit inside a bin span, or per-count interp cannot place it
     assert cfg['speed_bp'][2] < 14.2 < 14.5 < cfg['speed_bp'][3]
 
   def test_inactive_entry_stays_empty(self):
@@ -58,7 +57,6 @@ class TestSteerRailSchedule:
     from opendbc.sunnypilot.car.interfaces import get_steer_rail_schedule
     bp, rail = get_steer_rail_schedule(_cx5_cp())
     assert all(0.0 < r <= 1.0 for r in rail)
-    # the rail bottoms out just below the cliff (648/1200) and recovers above it (620/800)
     assert rail[bp.index(14.2)] == min(rail)
     assert rail[bp.index(14.2)] == pytest.approx(0.54, abs=0.01)
     assert rail[bp.index(14.5)] == pytest.approx(620.0 / 800.0, abs=1e-6)

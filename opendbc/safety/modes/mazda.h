@@ -26,25 +26,14 @@
 
 #define MAZDA_PARAM_LONGITUDINAL 1U
 
-// CRZ_BTNS frames (10 Hz) an engage press stays fresh. Every logged engagement shows the
-// press 30-70 ms before PEDALS.ACC_ACTIVE rises (104-engagement census, zero genuine
-// button-less engagements), so 1 s is generous.
+// Accept engagement only when ACC_ACTIVE follows a SET/RES press within 1 s.
 #define MAZDA_ENGAGE_BTN_WINDOW 10U
 
 static bool mazda_longitudinal = false;
 static uint32_t mazda_engage_btn_frames = 0U;
 
-// Radar-mastery latch mirrored from carstate: the software gates cruise availability on the
-// stock radar having been silent for 1 s (STOCK_RADAR_GUARD_T), and MADS keys lateral off
-// acc_main_on's rising edge. Without the same latch here the panda's edge fires at boot
-// (MRCC main persists over ignition), is consumed and exited long before the software
-// engages, and the software's whole MADS window then transmits into rejections -- starving
-// the EPS of 0x243 while the camera's own copy is relay-blocked, which latches the dash
-// LKAS error (routes 00000116/00000117, 2026-08-27). The rx hook never sees the stock
-// CRZ_INFO (it is deliberately not an rx check: it goes stale at the teardown), so the
-// observable stand-in is our own first synthetic CRZ_INFO tx -- the controller starts
-// emitting it the moment the UDS teardown lands, the same moment the stock radar goes
-// quiet, and the software's silence guard runs 1 s from there. PEDALS is the 50 Hz clock.
+// Delay the MADS arming edge until the stock radar has been silent for 1 s. The first
+// synthetic CRZ_INFO marks teardown completion; PEDALS provides the 50 Hz clock.
 #define MAZDA_RADAR_SILENT_FRAMES 50U
 static bool mazda_radar_mastered = false;
 static uint32_t mazda_mastered_pedals_frames = 0U;
@@ -90,11 +79,7 @@ static bool mazda_empty_radar_track_msg_valid(const CANPacket_t *msg) {
 }
 
 static bool mazda_synthetic_lead_radar_track_msg_valid(const CANPacket_t *msg) {
-  // The controller writes the lead it is following into the occupied-slot capture:
-  // DIST_OBJ fills data[0] and the high nibble of data[1], RELV_OBJ fills data[3] and the
-  // high 3 bits of data[4]. Those fields are free; every bit the template owns must still
-  // match it exactly. A byte-exact check here silently dropped every real-lead frame and
-  // starved the camera of the track (route 6bb2dc61c4: 982 asked, 0 transmitted).
+  // Permit only DIST_OBJ and RELV_OBJ to differ from the captured occupied-slot template.
   return (msg->addr == MAZDA_RADAR_TRACK_4) &&
          ((msg->data[1] & 0x0fU) == 0x00U) && (msg->data[2] == 0x00U) &&
          ((msg->data[4] & 0x1fU) == 0x1dU) && (msg->data[5] == 0xc0U) &&
@@ -102,10 +87,7 @@ static bool mazda_synthetic_lead_radar_track_msg_valid(const CANPacket_t *msg) {
 }
 
 static bool mazda_radar_track_msg_valid(const CANPacket_t *msg) {
-  // The occupied slot is perception data, not actuation: a stock radar reports its objects
-  // ignition to ignition, engaged or not, and the controller mirrors that. Gating it on
-  // controls_allowed silently killed 0x364 at every disengagement while CRZ_CTRL still said
-  // has_lead=1, the exact track/ctrl disagreement the camera faults on.
+  // Radar tracks remain valid while disengaged and must agree with CRZ_CTRL.
   return mazda_empty_radar_track_msg_valid(msg) ||
          mazda_synthetic_lead_radar_track_msg_valid(msg);
 }
@@ -153,30 +135,22 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
     if (msg->addr == MAZDA_PEDALS) {
       bool brake = (msg->data[0] & 0x10U);
       if (mazda_longitudinal) {
-        // PEDALS clocks the silence guard from the mastery point: sticky once set, like
-        // carstate's radar_was_silenced (a returning radar is carstate's accFaulted, not a
-        // MADS exit)
+        // Keep mastery latched; carstate handles a radar that later returns.
         if (mazda_radar_mastered && (mazda_mastered_pedals_frames < MAZDA_RADAR_SILENT_FRAMES)) {
           mazda_mastered_pedals_frames += 1U;
         }
         mazda_radar_was_silenced = mazda_radar_was_silenced ||
                                    (mazda_mastered_pedals_frames >= MAZDA_RADAR_SILENT_FRAMES);
 
-        // The radar teardown removes the stock CRZ_CTRL frame, so derive cruise state from
-        // PEDALS: ACC_OFF (bit 2) means MRCC is armed but idle, ACC_ACTIVE (bit 3) means
-        // engaged. Brake-only samples can arrive with both bits low mid-press; skip those
-        // so they are not mistaken for an ACC-off edge.
+        // Derive cruise state from PEDALS after teardown removes stock CRZ_CTRL. Ignore
+        // transient samples with neither ACC_OFF nor ACC_ACTIVE set.
         bool cruise_engaged = GET_BIT(msg, 3U);
         bool acc_armed = GET_BIT(msg, 2U) || cruise_engaged;
 
         if (acc_armed || cruise_engaged_prev || (!brake && !brake_pressed_prev)) {
-          // gated on the latch so the MADS arming edge lands on the same frame as the
-          // software's cruiseState.available, and both machines arm together
+          // Align the panda arming edge with cruiseState.available.
           acc_main_on = acc_armed && mazda_radar_was_silenced;
-          // Arm only on an engaged rising edge backed by a recent SET/RES press, the
-          // hyundai_common form: ACC_ACTIVE alone is the body answering frames we fabricate.
-          // The tx hooks already drop engaged-claiming frames while controls are not
-          // allowed, so this is defense in depth, not the only gate.
+          // ACC_ACTIVE can acknowledge synthetic frames, so require recent driver intent.
           if (cruise_engaged && !cruise_engaged_prev && (mazda_engage_btn_frames > 0U)) {
             controls_allowed = true;
           }
@@ -192,11 +166,8 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
 }
 
 static bool mazda_tx_hook(const CANPacket_t *msg) {
-  // Envelope sized for the CX-5 2022+ EPS, which the controller commands up to (max_torque 1200,
-  // driver_torque_multiplier 15 vs upstream stock 800/1). SafetyModel.mazda is per-brand and can't
-  // see the fingerprint/EPS, so these limits apply to every Mazda. Non-CX-5-EPS Mazdas self-cap
-  // lower in the controller (values.py gates the tune on minSteerSpeed == 0), so this is only a
-  // looser backstop for them — not a behavior change. Per-car gating would need a safety param.
+  // Mazda safety is brand-wide, so use the CX-5 2022+ EPS envelope. Other EPS variants
+  // enforce lower limits in the controller; per-EPS safety limits require a safety param.
   const TorqueSteeringLimits MAZDA_STEERING_LIMITS = {
     .max_torque = 1200,
     .max_rate_up = 12,
@@ -229,11 +200,7 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   }
 
   if (mazda_longitudinal && long_replacement_bus && (msg->addr == MAZDA_CRZ_INFO)) {
-    // the stock patterns for a radar that is not controlling peg the command field high:
-    // main-off standby (data[4]=0xc0, data[5]=0x00) and armed-idle (bit 47 set, and
-    // ACC_SET_ALLOWED mirroring the brake) both carry raw 8190. Allow them byte-exactly
-    // (checksum included) instead of decoding them as a huge accel command; ACC_ACTIVE
-    // (data[4] bit 1) stays required-low here, so no engaged frame can ride this allowance
+    // Permit byte-exact stock standby frames, whose inactive ACCEL_CMD is raw 8190.
     bool stock_standby = (msg->data[0] == 0x01U) && (msg->data[1] == 0xffU) &&
                          (msg->data[2] == 0xe3U) && (msg->data[3] == 0xffU) &&
                          ((msg->data[4] & 0xfbU) == 0xc0U) &&
@@ -248,10 +215,7 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
       tx = false;
     }
 
-    // ACC_ACTIVE (bit 33) mirrors CRZ_CTRL's CRZ_ACTIVE gate: an engaged-claiming accel
-    // frame must not flow while controls are not allowed. No deadlock: the body raises
-    // PEDALS.ACC_ACTIVE off the SET press 10-20 ms before the first ACC_ACTIVE=1 frame
-    // in every logged engagement, so controls_allowed leads this bit, not the reverse.
+    // Engaged CRZ_INFO frames require controls_allowed. PEDALS.ACC_ACTIVE precedes them.
     bool acc_active = GET_BIT(msg, 33U);
     if (!controls_allowed && acc_active) {
       tx = false;
@@ -318,12 +282,8 @@ static safety_config mazda_init(uint16_t param) {
     {MAZDA_LKAS_HUD, 0, 8, .check_relay = true},
   };
 
-  // The replaced-radar addresses stay check_relay = false on purpose: that mechanism is for
-  // harness-blocked ECUs that are silent from ignition on, and any RX after 1 s latches a
-  // permanent relay_malfunction. This radar is software-silenced mid-session -- alive for the
-  // first ~10 s by design, and deliberately overlapped during the ordered hand-back -- so the
-  // relay check would fault every boot. The two-master guard lives in carstate instead
-  // (accFaulted on radar-came-back) plus the session manager's bounded re-silence.
+  // Do not relay-check a radar that is intentionally active before teardown and during
+  // hand-back. Carstate and the session manager detect and recover from an unexpected return.
   static const CanMsg MAZDA_LONG_TX_MSGS[] = {
     {MAZDA_LKAS, 0, 8, .check_relay = true},
     {MAZDA_CRZ_BTNS, 0, 8, .check_relay = false},

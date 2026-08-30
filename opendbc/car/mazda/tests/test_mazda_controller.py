@@ -30,15 +30,12 @@ class TestCarControllerParams:
 
   @pytest.fixture
   def eps_swap_params(self):
-    # A CX-5 2022+ EPS swapped into (or shared by) another Mazda: different model, same EPS.
     class FakeCP:
       carFingerprint = CAR.MAZDA_CX9_2021
       minSteerSpeed = 0.0
     return CarControllerParams(FakeCP())
 
   def test_eps_ceiling_never_exceeds_steer_max_scale(self, cx5_2022_params):
-    # The ceiling is a clamp on delivered-torque counts; the scale is STEER_MAX. The clamp is
-    # only meaningful if it sits at or below the scale at every speed.
     bp, vals = cx5_2022_params.EPS_CEILING_LOOKUP
     for v in np.arange(0.0, 40.0, 0.25):
       ceiling = np.interp(v, bp, vals)
@@ -47,9 +44,6 @@ class TestCarControllerParams:
       assert 0 < ceiling <= steer_max, f"ceiling {ceiling} vs steer_max {steer_max} at {v} m/s"
 
   def test_eps_ceiling_is_monotone_and_matches_the_measured_rails(self, cx5_2022_params):
-    # Measured over 11.4M clean frames: 1148 below 18 mph, a monotone rolloff, hard 620 from
-    # 32.5 mph up (docs/mazda-lkas-camera-tx-census.md). Nothing above 620 was ever delivered
-    # above 32.5 mph in 7.5M frames, so the high-speed leg must not drift back up.
     bp, vals = cx5_2022_params.EPS_CEILING_LOOKUP
     assert list(vals) == sorted(vals, reverse=True), "ceiling must fall monotonically with speed"
     assert np.interp(5.0, bp, vals) == 1148
@@ -57,11 +51,6 @@ class TestCarControllerParams:
     assert np.interp(35.0, bp, vals) == 620
 
   def test_steer_delta_matches_the_eps_rate_limit_at_this_steer_step(self, cx5_2022_params):
-    # The EPS rate limit is per unit TIME (~1200 units/s), while STEER_DELTA_UP/DOWN are per
-    # frame, so the two are only matched at STEER_STEP = 1. Changing one without the other
-    # silently rescales the commanded slew rate. Both directions: the measured rail is
-    # symmetric (p99 and p99.9 of the delivered step are 12 either way), and a winddown above
-    # it only lets the command run ahead of the wheel.
     rate_hz = 1.0 / DT_CTRL / CarControllerParams.STEER_STEP
     assert cx5_2022_params.STEER_DELTA_UP * rate_hz == pytest.approx(1200, rel=0.01)
     assert cx5_2022_params.STEER_DELTA_DOWN * rate_hz == pytest.approx(1200, rel=0.01)
@@ -99,11 +88,9 @@ class TestCarControllerParams:
     assert cx5_2022_params.STEER_DELTA_DOWN <= 25
 
   def test_cx5_eps_driver_multiplier(self, cx5_2022_params):
-    # 15 is the CX-5-EPS tune (upstream stock is 1)
     assert cx5_2022_params.STEER_DRIVER_MULTIPLIER == 15
 
   def test_eps_swap_gets_cx5_tune(self, eps_swap_params):
-    # EPS present (minSteerSpeed == 0) on a non-CX-5 model still gets the higher-authority tune
     assert eps_swap_params.STEER_MAX == 1200
     assert eps_swap_params.STEER_DRIVER_MULTIPLIER == 15
     assert hasattr(eps_swap_params, 'STEER_MAX_LOOKUP')
@@ -115,8 +102,6 @@ class TestCarControllerParams:
 
 
 def crz_info_reference_checksum(dat):
-  # independent reimplementation of the CRZ_INFO checksum, validated against 1.94M stock
-  # frames including all 10,350 stop-bit frames
   return (0xFF - ((sum(dat[:7]) - (dat[5] & 0x04)) & 0xFF)) & 0xFF
 
 
@@ -133,9 +118,6 @@ class TestMazdaLongitudinalMessages:
     return CANPacker("mazda_2017")
 
   def test_alert_command_relays_state_but_not_the_tja_churn(self, packer):
-    # camera error and line state pass through to the dash; the camera's own TJA/CTS state
-    # machine churns against steering it did not command (442 TJA_TRANSITION toggles in 22
-    # min, route 0000010b) and relaying it flapped the dash, so those two fields stay zeroed
     cam_msg = {"LINE_VISIBLE": 1, "LINE_NOT_VISIBLE": 0, "LANE_LINES": 2, "BIT1": 1,
                "BIT2": 0, "BIT3": 0, "NO_ERR_BIT": 0, "ERR_BIT": 1,
                "TJA": 4, "TJA_TRANSITION": 3, "S1": 1, "S1_HBEAM": 0}
@@ -154,9 +136,6 @@ class TestMazdaLongitudinalMessages:
       assert dat.hex() == expected
 
   def test_crz_info_armed_idle_matches_stock(self, packer):
-    # armed-idle pegs the command like standby (47,752/47,752 stock armed-idle frames carry
-    # raw 8190) and follows the brake on ACC_SET_ALLOWED; the zero-command armed-idle this
-    # used to emit exists nowhere in the stock corpus
     for brake_pressed, byte4, base in ((False, 0xc4, 0xd9), (True, 0xc0, 0xdd)):
       for counter in range(16):
         checksum = (base - counter) & 0xff
@@ -179,8 +158,6 @@ class TestMazdaLongitudinalMessages:
     assert dat.hex() == expected
 
   def test_crz_info_accel_encoding_and_checksum(self, packer):
-    # the packed command must round-trip at the 0.001 factor and carry a valid masked-bit
-    # checksum over the whole command window, stop bits set or not
     for raw in range(-3500, 2001, 137):
       for stopping in (False, True):
         dat = mazdacan.create_acc_command(packer, 0, raw % 16, raw / 1000.0, long_active=True, acc_available=False,
@@ -220,7 +197,6 @@ class TestMazdaLongitudinalMessages:
   def test_radar_frames_counter_and_lead_track(self):
     frames = mazdacan.create_radar_frames(2, 15, (mazdacan.LEAD_TRACK_DIST, 0.))
     assert all(f.src == 2 for f in frames)
-    # counter stamps the low nibble of the last byte on every track
     assert [f.dat[7] & 0x0f for f in frames[1:]] == [15] * 6
     tracks = {f.address: f.dat.hex() for f in frames}
     assert tracks[0x364] == "0a4000001dc0000f"
@@ -238,7 +214,6 @@ class TestMazdaLongitudinalMessages:
     vl = cp.vl["RADAR_TRACK_364"]
     assert vl["DIST_OBJ"] == pytest.approx(min(max(d_rel, 0.), 255.875), abs=0.0625)
     assert vl["RELV_OBJ"] == pytest.approx(min(max(v_rel, -64.), 63.9375), abs=0.0625)
-    # the bits outside the two fields we drive stay exactly as captured
     assert dat[1] & 0x0f == mazdacan.LEAD_TRACK_TEMPLATE[1] & 0x0f
     assert dat[2] == mazdacan.LEAD_TRACK_TEMPLATE[2]
     assert dat[4] & 0x1f == mazdacan.LEAD_TRACK_TEMPLATE[4] & 0x1f
@@ -265,13 +240,10 @@ class TestStandstillHold:
     assert not sm.holding
     self.run(sm, 1, stopping=True)
     assert sm.holding and sm.stop_bits and sm.acc_active_2
-    # arriving at a standstill changes nothing: the plan is still asking for the brakes
     self.run(sm, 500, stopping=True, standstill=True)
     assert sm.holding and sm.stop_bits
 
   def test_hold_never_relaxes_on_its_own(self, sm):
-    # the creep-into-the-lead regression: without the car taking the hold over, the command
-    # must stay on the plan's brake no matter how long the stop lasts
     self.run(sm, 1, stopping=True)
     self.run(sm, int(30.0 / DT_CTRL), stopping=True, standstill=True)
     assert sm.holding and sm.stop_bits and sm.acc_active_2
@@ -282,9 +254,7 @@ class TestStandstillHold:
     self.run(sm, 10, stopping=True, standstill=True)
     assert not sm.car_has_hold
     self.run(sm, 1, stopping=True, standstill=True, brake_hold=True)
-    # stop bits and ACC_ACTIVE_2 drop with the command, together, exactly as stock does
     assert sm.car_has_hold and not sm.stop_bits and not sm.acc_active_2
-    # and it is not a latch: if the car lets go, we brake again
     self.run(sm, 1, stopping=True, standstill=True, brake_hold=False)
     assert not sm.car_has_hold and sm.stop_bits and sm.acc_active_2
 
@@ -292,19 +262,14 @@ class TestStandstillHold:
     self.run(sm, 1, stopping=True)
     self.run(sm, 500, stopping=True, standstill=True, brake_hold=True)
     assert sm.holding
-    # the release is debounced: a plan asking to move for less than the window changes nothing
-    # (the body keeps its own latch until the pulse plays, so brake_hold stays up here)
     self.run(sm, RELEASE_DEBOUNCE_FRAMES - 1, standstill=True, brake_hold=True, plan_accel=0.1)
     assert sm.holding and not sm.resume_unlatching
     self.run(sm, 1, standstill=True, brake_hold=True, plan_accel=0.1)
     assert not sm.holding and not sm.car_has_hold
-    # the body owned the brakes, so this is the latched family -- but the pulse is deferred:
-    # the command relaxes first and the body gets RESUME_PULSE_DEFER_T to let go by itself
     assert sm.latched_release and not sm.resume_unlatching
     assert sm.pulse_deferred_frames > 0
 
   def test_release_holds_for_as_long_as_the_plan_wants_to_move(self, sm):
-    # the failed-resume regression: no release window to run out from under the plan
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True)
     self.run(sm, int(5.0 / DT_CTRL), standstill=True, plan_accel=0.4)
@@ -315,7 +280,6 @@ class TestStandstillHold:
     self.run(sm, 100, stopping=True, standstill=True)
     self.run(sm, RELEASE_DEBOUNCE_FRAMES, standstill=True, plan_accel=0.2)
     assert not sm.holding
-    # nothing was latched, so this release emits no unlatch bit at all, deferred or otherwise
     assert sm.unlatch_frames == 0 and not sm.resume_unlatching
     self.run(sm, 1, stopping=True, standstill=True, plan_accel=-1.0)
     assert sm.holding
@@ -323,9 +287,6 @@ class TestStandstillHold:
     assert sm.stop_bits
 
   def test_never_latched_release_emits_no_pulse(self, sm):
-    # a never-latched release has nothing latched to unlatch, so it puts no RESUME_UNLATCHING
-    # on the wire at all. Stock blips here, but every pulse this port has emitted latched the
-    # camera's SCBS fault (4/4), and mimicking a blip that unlatches nothing is not worth one
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True)
     assert not sm.resume_unlatching
@@ -335,21 +296,16 @@ class TestStandstillHold:
     assert not sm.resume_unlatching and sm.unlatch_frames == 0
 
   def test_latched_release_skips_the_pulse_when_the_body_lets_go(self, sm):
-    # the common case the deferral exists for: the body drops GEAR.BRAKE_HOLD off the
-    # relaxing command, so no unlatch bit ever reaches the camera
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True, brake_hold=True)
     self.run(sm, RELEASE_DEBOUNCE_FRAMES, standstill=True, brake_hold=True, plan_accel=0.1)
     assert sm.latched_release and not sm.resume_unlatching
-    # body lets go a few frames in, well inside the grace period
     self.run(sm, 5, standstill=True, brake_hold=False, plan_accel=0.1)
     assert sm.pulse_deferred_frames == 0
     self.run(sm, int(1.0 / DT_CTRL), standstill=True, brake_hold=False, plan_accel=0.1)
     assert not sm.resume_unlatching, "pulse fired even though the body had already released"
 
   def test_latched_release_falls_back_to_the_pulse_if_the_body_holds_on(self, sm):
-    # the safety net: a body that will not let go still gets stock's pulse, because a car
-    # that will not move is worse than the SCBS latch
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True, brake_hold=True)
     self.run(sm, RELEASE_DEBOUNCE_FRAMES, standstill=True, brake_hold=True, plan_accel=0.1)
@@ -368,9 +324,6 @@ class TestStandstillHold:
     assert not sm.holding and not sm.car_has_hold and not sm.stop_bits
 
   def test_gas_override_drive_off_releases_the_hold(self, sm):
-    # a driver-gas drive-off under an override zeroes the plan's command, so the plan never
-    # asks to move but the car does; the stop bits must not follow it up to speed. Stock keeps
-    # STOPPING strictly to the final creep, below 0.55 m/s across all rolling frames.
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True)
     assert sm.holding
@@ -380,30 +333,21 @@ class TestStandstillHold:
   def test_stop_abort_releases(self, sm):
     self.run(sm, 1, stopping=True)
     assert sm.holding
-    # lead speeds up again before the car reaches standstill
     self.run(sm, 1, stopping=False, plan_accel=0.3)
     assert not sm.holding
 
   def test_driver_gas_releases_the_hold_without_a_pulse(self, sm):
-    # the driver's pedal outranks the hold, the way Toyota's PCM lets the pedal outrank its
-    # standstill request -- but the pulse is the ACC's resume protocol, not the driver's:
-    # stock's captured gas-ended hold drops the stop bits with no RESUME_UNLATCHING at all,
-    # and pulsing there latched an SCBS fault (route 00000103 t+163.8)
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True)
     assert sm.holding
     self.run(sm, 1, stopping=True, standstill=True, gas_pressed=True)
     assert not sm.holding and not sm.resume_unlatching, "gas release must not fire the ACC resume pulse"
-    # no re-hold while the pedal is down, and a fresh hold once it lifts with the car stopped
     self.run(sm, RESUME_UNLATCH_LATCHED_FRAMES + 5, stopping=True, standstill=True, gas_pressed=True)
     assert not sm.holding and not sm.resume_unlatching
     self.run(sm, 1, stopping=True, standstill=True)
     assert sm.holding
 
   def test_plan_flap_below_the_debounce_never_releases(self, sm):
-    # the SCBS-axis contamination shape: at a held standstill the lead inches forward and
-    # stops, the plan flapping across zero. Sub-debounce flaps must not release at all, and
-    # no frame may ever carry the stop bits and the release pulse together
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True)
     for i in range(600):
@@ -416,10 +360,6 @@ class TestStandstillHold:
 
   @pytest.mark.parametrize("brake_hold", [False, True])
   def test_slow_flap_never_mixes_stop_bits_with_the_pulse(self, sm, brake_hold):
-    # swings long enough to release each time. Nothing latched (brake_hold False) must never
-    # put an unlatch bit on the wire; a body that holds on through every swing falls back to
-    # at most one pulse per release, and a re-hold mid-pulse waits it out before re-asserting
-    # the stop bits
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True, brake_hold=brake_hold)
     pulses = 0
@@ -439,10 +379,6 @@ class TestStandstillHold:
       assert pulses == 0, "a never-latched release put an unlatch bit on the wire"
 
   def test_latched_pulse_runs_to_completion_through_a_re_hold(self, sm):
-    # a latched pulse spans the body's actual unlatch, so a re-hold mid-pulse waits it out
-    # (stop bits blocked, stock never emits STOPPING with RESUME_UNLATCHING) instead of
-    # cancelling it; a second release cannot fire a fresh pulse before the first ends because
-    # the release debounce is at least as long as any pulse window
     assert RELEASE_DEBOUNCE_FRAMES >= RESUME_UNLATCH_LATCHED_FRAMES
     self.run(sm, 1, stopping=True)
     self.run(sm, 100, stopping=True, standstill=True, brake_hold=True)
@@ -474,29 +410,21 @@ class TestAdvertisedLead:
     return al
 
   def test_lead_follows_only_a_steady_state(self, al):
-    # a lead is adopted once leadVisible has held for the debounce window, not before
     self.run(al, LEAD_DEBOUNCE_FRAMES - 1)
     assert not al.has_lead and al.ctrl_phase == 0
     self.run(al, 1)
     assert al.has_lead and al.lead == (40.0, 0.0) and al.ctrl_phase == 2
-    # and dropped the same way
     self.run(al, LEAD_DEBOUNCE_FRAMES - 1, lead_visible=False, d_rel=0.)
     assert al.has_lead
     self.run(al, 1, lead_visible=False, d_rel=0.)
     assert not al.has_lead and al.ctrl_phase == 0
 
   def test_lead_flicker_never_reaches_the_bus(self, al):
-    # the measured failure: a marginal 120 m vision lead toggled leadVisible 6 times in 1.4 s
-    # (route 6bb2dc61c4 t+400); none of it may reach RADAR_HAS_LEAD or the track slot
     for frames, visible in ((15, True), (5, False), (7, True), (13, False), (10, True)):
       self.run(al, frames, lead_visible=visible)
       assert not al.has_lead, "a flickering lead leaked through the debounce"
 
   def test_measurement_is_coasted_across_a_dropout(self, al):
-    # leadOne goes to zero the instant vision drops the lead, well before the debounce expires.
-    # Advertising a fabricated stand-in there put a stationary object 10.25 m dead ahead on the
-    # bus at 22 m/s; the last real measurement carries the gap instead -- propagated by its own
-    # range rate, never repeated frozen (a frozen range is the camera's proven SCBS trigger)
     self.run(al, 2 * LEAD_DEBOUNCE_FRAMES, d_rel=120.0, v_rel=0.5)
     assert al.lead == (120.0, 0.5)
     coast_frames = LEAD_DEBOUNCE_FRAMES - 1
@@ -518,10 +446,6 @@ def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas
              stock_radar_alive=False, fsc_settled=True, handback=False, cruise_engaged=False,
              enabled=None, lead_d_rel=12.0, lead_v_rel=0.0, brake_hold=False, brake_pressed=False,
              radar_was_silenced=False):
-  # openpilot is enabled whenever it is longitudinally active; a gas override is the case
-  # where it stays enabled with longActive low. The mock carries everything the full
-  # CarController.update() path reads, so tests can drive update() as well as
-  # update_longitudinal() from the one builder.
   enabled = long_active if enabled is None else enabled
   out = SimpleNamespace(standstill=standstill, gasPressed=gas, brakePressed=brake_pressed,
                         vEgoRaw=0., steeringTorque=0.,
@@ -573,7 +497,6 @@ def _long_frames(sends):
 
 CRZ_BTNS = 0x9d
 
-# create_radar_frames stamps the counter into the last byte, so an empty slot is the first seven
 _EMPTY_TRACK = mazdacan.RADAR_TRACK_MSGS[0x364][:7]
 
 
@@ -633,12 +556,10 @@ class TestLongitudinalIntegration:
       crz_ctrl += addrs.count(0x21c)
       radar_static += addrs.count(0x499)
       tester += sum(1 for a, _, _ in sends if a == 0x764)
-      # CRZ_INFO/CRZ_CTRL, when emitted, always go to both bus 0 and bus 2
       if 0x21b in buses:
         assert sorted(buses[0x21b]) == [0, 2]
         assert sorted(buses[0x21c]) == [0, 2]
 
-    # 100 Hz loop: long msgs at 50 Hz (x2 buses), radar at 10 Hz (x2), tester at 2 Hz
     assert crz_info == crz_ctrl == 100    # 50 frames x 2 buses
     assert radar_static == 20             # 10 frames x 2 buses
     assert tester == 2                    # 2 Hz, single bus
@@ -660,11 +581,8 @@ class TestLongitudinalIntegration:
       dat = next((d for a, d, b in sends if a == 0x21b and b == 0), None)
       return None if dat is None else decode_accel_cmd_raw(dat)
 
-    # approach the stop
     for _ in range(int(0.5 / 0.01)):
       _step(cc, long_state=long.stopping, accel=-1.5, standstill=False)
-    # hold at a standstill: the command is the plan's own and must not relax on its own, no
-    # matter how long the stop lasts (the creep-into-the-lead regression)
     cmds = []
     for _ in range(int(30.0 / 0.01)):
       cmd = accel_cmd(_step(cc, long_state=long.stopping, accel=-1.024, standstill=True))
@@ -673,7 +591,6 @@ class TestLongitudinalIntegration:
     settled = cmds[len(cmds) // 2:]
     assert settled and set(settled) == {-1024}, f"hold command drifted off the plan: {sorted(set(settled))}"
 
-    # once the body ECU takes the hold over, stock stops asking for the brakes and so do we
     relaxed = []
     for _ in range(int(1.0 / 0.01)):
       cmd = accel_cmd(_step(cc, long_state=long.stopping, accel=-1.024, standstill=True,
@@ -688,7 +605,6 @@ class TestLongitudinalIntegration:
     Clearing them mid-decel takes the PCM out of ACC mode (docs/mazda-gas-override.md)."""
     long = structs.CarControl.Actuators.LongControlState
 
-    # braking hard, then the driver taps the gas
     for _ in range(200):
       _step(cc, long_state=long.pid, accel=-2.0, cruise_engaged=True)
     assert cc.accel_last == pytest.approx(-2.0)
@@ -714,14 +630,12 @@ class TestLongitudinalIntegration:
       _step(cc, long_state=long.pid, accel=-2.0, cruise_engaged=True)
     assert cc.accel_last == pytest.approx(-2.0)
 
-    # plan jumps straight to +1.0: the command must ramp, not step
     prev = cc.accel_last
     for _ in range(5):
       _step(cc, long_state=long.pid, accel=1.0, cruise_engaged=True)
       assert cc.accel_last - prev == pytest.approx(CarControllerParams.ACCEL_WINDUP_LIMIT, abs=1e-6)
       prev = cc.accel_last
 
-    # and the other way, at the looser winddown limit
     for _ in range(200):
       _step(cc, long_state=long.pid, accel=1.0, cruise_engaged=True)
     prev = cc.accel_last
@@ -731,11 +645,8 @@ class TestLongitudinalIntegration:
       prev = cc.accel_last
 
   def test_accel_last_tracks_the_wire_not_the_plan(self, cc):
-    # update() reports accel_last as actuatorsOutput.accel, the way Toyota, Ford and Honda
-    # report the value they sent. It must be the wire value, clip and hold included.
     long = structs.CarControl.Actuators.LongControlState
 
-    # a plan beyond the envelope is reported clipped, not as asked
     for _ in range(400):
       sends = _step(cc, long_state=long.pid, accel=-9.0, cruise_engaged=True)
     assert cc.accel_last == pytest.approx(CarControllerParams.ACCEL_MIN)
@@ -743,20 +654,16 @@ class TestLongitudinalIntegration:
     if frame is not None:
       assert frame[0] == round(cc.accel_last * 1000)
 
-    # the standstill hold is the plan's own command, and that is what gets reported
     for _ in range(int(0.5 / 0.01)):
       _step(cc, long_state=long.stopping, accel=-1.5, standstill=True, cruise_engaged=True)
     assert cc.accel_last == pytest.approx(-1.5)
 
-    # through a gas override we report the zero we actually send
     for _ in range(10):
       _step(cc, long_active=False, enabled=True, long_state=long.off, accel=0., gas=True,
             cruise_engaged=True)
     assert cc.accel_last == 0.
 
   def test_gas_from_standstill_hold_releases_the_brake(self, cc):
-    # gas out of a hold is a resume, not a slow release: the hold command must go straight to
-    # zero rather than ramping off at the cruising override rate
     long = structs.CarControl.Actuators.LongControlState
     for _ in range(int(3.0 / 0.01)):
       _step(cc, long_state=long.stopping, accel=-1.5, standstill=True, cruise_engaged=True)
@@ -793,14 +700,10 @@ class TestLongitudinalIntegration:
     assert all(cmd == -1300 for cmd, _, _ in debounce), \
       f"command moved off the hold while STOPPING was asserted: {sorted({c for c, _, _ in debounce})}"
 
-    # nothing was latched, so no unlatch bit goes out at all
     assert not any(unl for _, _, unl in rows), "a never-latched release pulsed"
     assert max(cmd for cmd, _, _ in rows) > 500, "command never ramped up after the release"
 
   def test_near_zero_hold_release_emits_no_pulse(self, cc):
-    # a no-lead hold relaxes the plan to ~0, so the release ramp would cross zero in the first
-    # pulse frame -- the shape behind the routes 000000fe t+44.54 / 00000100 t+353.18 latches.
-    # Nothing is latched here, so the release now carries no unlatch bit for it to land in.
     long = structs.CarControl.Actuators.LongControlState
     for _ in range(int(0.5 / 0.01)):
       _step(cc, long_state=long.stopping, accel=-0.5, standstill=False)
@@ -831,26 +734,19 @@ class TestLongitudinalIntegration:
     for _ in range(int(2.0 / 0.01)):
       _step(cc, long_state=long.stopping, accel=-1.024, standstill=True, **lead)
 
-    # the plan asks for exactly the creep the CX-9 could not move on, and the car stays stopped
     peak = -10.
     for _ in range(int(2.0 / 0.01)):
       _step(cc, long_state=long.pid, accel=0.47, standstill=True, **lead)
       peak = max(peak, cc.accel_last)
     assert peak > 0.47 + 0.2, f"command plateaued at the plan and never asked harder: {peak:.2f}"
     assert peak <= CarControllerParams.ACCEL_BREAKAWAY_MAX + 1e-6, f"climbed past the cap: {peak:.2f}"
-    # the override sits on top of the plan, so it is bounded by what stock itself commands
-    # pulling away from a stop: over all 31 stock stop->go episodes the breakaway command
-    # spans +0.405..+1.425 (latched median +0.958), so this must not exceed stock's own worst
     assert CarControllerParams.ACCEL_BREAKAWAY_MAX <= 1.45, "breakaway ceiling past stock's own max"
 
-    # once it moves, the plan owns the command again
     for _ in range(int(0.5 / 0.01)):
       _step(cc, long_state=long.pid, accel=0.47, standstill=False, **lead)
     assert cc.accel_last == pytest.approx(0.47, abs=0.01)
 
   def test_breakaway_gives_up_so_a_stuck_car_is_not_leaned_on(self, cc):
-    # something we cannot see is holding the car (kerb, grade). Asking forever is worse than
-    # settling back onto the plan, which the driver can then override with the pedal.
     long = structs.CarControl.Actuators.LongControlState
     for _ in range(int(2.0 / 0.01)):
       _step(cc, long_state=long.stopping, accel=-1.024, standstill=True)
@@ -900,22 +796,14 @@ class TestLongitudinalIntegration:
     assert not any(stop and unl for _, stop, unl in rows), "stop bits and pulse on one frame"
     drop = next(i for i, (_, stop, _) in enumerate(rows) if not stop)
     post = rows[drop:]
-    # the relax jump: no post-drop frame ever carries hold-grade braking again
     assert all(cmd >= -280 for cmd, _, _ in post), f"command stayed at hold depth after the drop: {min(c for c, _, _ in post)}"
     assert post[0][0] <= -180, f"release did not start inside the stock band: {post[0][0]}"
     assert not any(unl for _, _, unl in rows), "a never-latched release pulsed"
-    # the ramp: stock's +25 raw per wire frame, straight through the drive-off
     ramping = [c for c, _, _ in post][:20]
     assert all(20 <= b - a <= 30 for a, b in zip(ramping, ramping[1:], strict=False)), f"off the stock ramp: {ramping}"
 
   @pytest.mark.parametrize("drop_wire_frames", [1, 2, 3])
   def test_latched_release_speaks_the_stock_pulse_shape(self, cc, drop_wire_frames):
-    # a body-latched hold releases with a 9-wire-frame pulse: the command sits pinned at the
-    # relaxed -1 raw for as long as the body still reports GEAR.BRAKE_HOLD (as in every latched
-    # release of the census -- climbing before the drop faulted the camera 90 ms in, route
-    # 00000115 t+381.3), then climbs stock's ~+25 raw per frame ramp, peaking inside stock's
-    # family and never past the +0.25 ceiling (census: 6-11 frames, hold drop 1-3 frames in,
-    # cmd -1 climbing to +24..+342)
     long = structs.CarControl.Actuators.LongControlState
     lead = dict(lead_visible=True, lead_d_rel=4.0, lead_v_rel=0.0)
     for _ in range(int(0.5 / 0.01)):
@@ -924,9 +812,6 @@ class TestLongitudinalIntegration:
       _step(cc, long_state=long.stopping, accel=-1.3, standstill=True, brake_hold=True, **lead)
     assert cc.accel_last == pytest.approx(CarControllerParams.ACCEL_HOLD_LATCHED)
 
-    # the body reacts to the pulse: BRAKE_HOLD drops 1-3 wire frames after it starts (census).
-    # The window is sized off the constants so extending the nudge's grace cannot silently
-    # move the pulse outside it.
     rows = []
     pulse_started = None
     window = (RELEASE_DEBOUNCE_FRAMES + RESUME_PULSE_DEFER_FRAMES +
@@ -944,12 +829,9 @@ class TestLongitudinalIntegration:
     pulse = [(cmd, held) for cmd, unl, held in rows if unl]
     cap = round(CarControllerParams.ACCEL_RESUME_PULSE_MAX * 1000)
     assert len(pulse) == RESUME_UNLATCH_LATCHED_FRAMES // 2, f"pulse ran {len(pulse)} wire frames"
-    # the contract the route 115 fault turned on: no pulse frame moves off the relaxed hold
-    # while the body still reports its latch
     pinned = [cmd for cmd, held in pulse if held]
     assert len(pinned) == drop_wire_frames and all(cmd == -1 for cmd in pinned), \
       f"command moved under the latched hold: {pinned}"
-    # then the ramp: stock's +25 raw per wire frame from the relaxed hold
     ramp = [cmd for cmd, held in pulse if not held]
     assert -1 <= ramp[0] <= 15, f"ramp must start off the relaxed hold: {ramp[0]}"
     assert all(20 <= b - a <= 30 for a, b in zip(ramp, ramp[1:], strict=False)), f"off the stock ramp: {ramp}"
@@ -969,7 +851,6 @@ class TestLongitudinalIntegration:
     for _ in range(int(2.0 / 0.01)):
       _step(cc, long_state=long.stopping, accel=-1.3, standstill=True, brake_hold=True, **lead)
 
-    # body holds on throughout: the nudge plays, then the fallback pulse
     rows = []
     for _ in range(RELEASE_DEBOUNCE_FRAMES + RESUME_PULSE_DEFER_FRAMES + int(1.0 / 0.01)):
       sends = _step(cc, long_state=long.pid, accel=1.0, standstill=True, brake_hold=True, **lead)
@@ -981,14 +862,11 @@ class TestLongitudinalIntegration:
     cap = round(CarControllerParams.ACCEL_DEFER_NUDGE * 1000)
     assert max(nudge) > 0, "the deferral never asked the body for anything"
     assert max(nudge) <= cap + 1, f"nudge climbed past its cap: {max(nudge)}"
-    # and when the body ignores it, the fallback still speaks stock's pinned shape
     pulse = [cmd for cmd, unl in rows if unl]
     assert pulse, "body never released and the fallback pulse never fired"
     assert pulse[0] == -1, f"fallback pulse did not snap back to the relaxed hold: {pulse[0]}"
 
   def test_body_releasing_on_the_nudge_never_pulses(self, cc):
-    # the outcome we are actually after: the body honours the request and no unlatch bit
-    # ever reaches the camera
     long = structs.CarControl.Actuators.LongControlState
     lead = dict(lead_visible=True, lead_d_rel=4.0, lead_v_rel=0.0)
     for _ in range(int(0.5 / 0.01)):
@@ -1007,10 +885,7 @@ class TestLongitudinalIntegration:
     assert max(cmd for cmd, _ in rows) > 500, "never ramped away after the release"
 
   def test_lead_track_follows_the_measured_lead(self, cc):
-    # a frozen track is what latches the camera's SCBS fault, so the range we advertise has to
-    # move with the lead we are actually following
     long = structs.CarControl.Actuators.LongControlState
-    # let the lead debounce adopt the visible lead before sampling the track
     for _ in range(LEAD_DEBOUNCE_FRAMES):
       _step(cc, long_state=long.pid, accel=0.5, lead_visible=True, lead_d_rel=20.0, lead_v_rel=-1.5)
     seen = []
@@ -1026,10 +901,6 @@ class TestLongitudinalIntegration:
     assert all(v == pytest.approx(-1.5, abs=0.0625) for _, v in seen)
 
   def test_hold_with_nothing_ahead_advertises_nothing(self, cc):
-    # No fabricated object. The body does not decide the latch on the advertisement: across 32
-    # stock engaged standstills the radar said has_lead=1 in every one, yet 23 latched
-    # GEAR.BRAKE_HOLD and 9 did not (one held 104 s), and 89 of 115 stock latches happened at
-    # has_lead=0 / phase=0. A phantom the camera can refute is the SCBS trigger.
     long = structs.CarControl.Actuators.LongControlState
     held, ctrls = [], []
     for _ in range(400):
@@ -1040,13 +911,9 @@ class TestLongitudinalIntegration:
     assert held and ctrls
     assert not any(map(_track_occupied, held)), "fabricated a lead for a hold with nothing ahead"
     assert all(_crz_ctrl(d) == (0, 0) for d in ctrls), "advertised a lead with nothing in view"
-    # and the hold itself is untouched: the plan's brake and the stop bits still go out
     assert cc.stop_and_go.holding and cc.stop_and_go.stop_bits
 
   def test_vision_lead_dropout_does_not_fabricate_a_lead_at_speed(self, cc):
-    # leadOne goes to zero the instant the vision lead drops while sm.lead_visible is still
-    # latched. Falling through to the hold fallback there put a stationary object 10.25 m dead
-    # ahead on the bus at 22 m/s, 20 times across the two 2026-08-25 drives.
     long = structs.CarControl.Actuators.LongControlState
     for _ in range(200):  # settle a real lead at 120 m while cruising
       _step(cc, long_state=long.pid, accel=0.5, lead_visible=True, lead_d_rel=120.0,
@@ -1062,9 +929,6 @@ class TestLongitudinalIntegration:
       assert dist == pytest.approx(120.0, abs=1.0), f"track teleported to {dist} m"
 
   def test_has_lead_phase_and_track_never_disagree(self, cc):
-    # stock pairs all three absolutely: has_lead=0 <=> phase=0, and RADAR_HAS_LEAD=1 with all six
-    # slots empty appears 8 times in 1,095,826 stock samples. We shipped has_lead=0 with phase=1
-    # for 22-84% of every engaged drive before this was derived from one decision.
     long = structs.CarControl.Actuators.LongControlState
     cases = [
       dict(long_state=long.pid, accel=0.5, lead_visible=True, lead_d_rel=40.0),
@@ -1084,10 +948,6 @@ class TestLongitudinalIntegration:
         assert (phase == 0) == (has_lead == 0), f"has_lead/phase disagree for {kw}"
 
   def test_lead_survives_disengagement(self, cc):
-    # perception is engagement-independent: stock advertises RADAR_HAS_LEAD=1 with cruise off in
-    # 19.5% of all frames. Dropping the advertisement at disengage made a real car 4.5 m ahead
-    # vanish from the bus in one frame while the driver braked toward it, and the camera ran its
-    # SCBS display six seconds (route 0000004d t+212)
     long = structs.CarControl.Actuators.LongControlState
     for _ in range(120):
       _step(cc, cruise_engaged=True, lead_d_rel=4.8, accel=-0.5)
@@ -1103,16 +963,12 @@ class TestLongitudinalIntegration:
         assert _lead_track(trk)[0] == pytest.approx(4.8, abs=0.1)
 
   def test_no_resume_button_while_openpilot_owns_longitudinal(self, cc):
-    # We are the ACC here, so the hold is released in-protocol. The car's own MRCC never presses
-    # RES either: 0 of 23 stock body-latched-hold releases put one on the bus. A press would also
-    # put a second writer on CRZ_BTNS, which ICBM owns.
     for accel in (0.3, -1.024):
       for standstill in (True, False):
         control, _, _ = _mock_cc(standstill=standstill, accel=accel, resume=True)
         assert not cc.resume_requested(control)
 
   def test_resume_button_still_sent_with_stock_longitudinal(self, stock_cc):
-    # stock ACC owns the hold there, and the button is the only lever openpilot has on it
     control, _, _ = _mock_cc(standstill=True, accel=0.3, resume=True)
     assert stock_cc.resume_requested(control)
 
@@ -1120,9 +976,6 @@ class TestLongitudinalIntegration:
     assert not stock_cc.resume_requested(control)
 
   def test_body_latched_hold_releases_in_protocol(self, cc):
-    # the release the button used to stand in for: stop bits already relaxed to the body, then
-    # the plan asks to move. The unlatch pulse is deferred -- the relaxed command is given
-    # RESUME_PULSE_DEFER_T to get the body to let go on its own before we resort to it.
     long = structs.CarControl.Actuators.LongControlState
     for _ in range(200):
       _step(cc, long_state=long.stopping, accel=-1.024, standstill=True,
@@ -1142,7 +995,6 @@ class TestLongitudinalIntegration:
     assert cc.stop_and_go.resume_unlatching, "body never let go, so the fallback must pulse"
 
   def test_gas_pedal_without_cruise_stays_disengaged(self, cc):
-    # gas pressed while openpilot is not enabled must not advertise an engaged ACC
     off = structs.CarControl.Actuators.LongControlState.off
     cc.frame = 0
     sends = _step(cc, long_active=False, enabled=False, long_state=off, gas=True, available=True)
@@ -1151,13 +1003,10 @@ class TestLongitudinalIntegration:
 
   def test_disengaged_emits_stock_patterns(self, cc):
     off = structs.CarControl.Actuators.LongControlState.off
-    # main off, not available: the exact standby pattern the panda allowlists byte-for-byte
     cc.frame = 0
     sends = _step(cc, long_active=False, long_state=off, available=False)
     info = next(dat for a, dat, b in sends if a == 0x21b and b == 0)
     assert info.hex().startswith("01ffe3ffc000")
-    # MRCC armed but not engaged: the command stays pegged and ACC_SET_ALLOWED follows the
-    # brake, exactly the two patterns stock alternates between at an armed idle
     cc.frame = 0
     sends = _step(cc, long_active=False, long_state=off, available=True)
     info = next(dat for a, dat, b in sends if a == 0x21b and b == 0)
@@ -1186,13 +1035,10 @@ class TestCancelCarveOut:
     return [a for a, _, _ in sends]
 
   def test_no_cancel_while_the_radar_is_stock(self, cc):
-    # pre-teardown settle window, and equally the silencing-failed drive: a driver SET is
-    # their own stock MRCC and must be left alone
     addrs = self._full_update(cc, cancel=True, radar_was_silenced=False, stock_radar_alive=True)
     assert CRZ_BTNS not in addrs, "CANCELed the driver's own stock MRCC"
 
   def test_cancel_still_sent_after_the_teardown(self, cc):
-    # post-teardown a stock engagement is impossible: cancel keeps handling state desync
     addrs = self._full_update(cc, cancel=True, radar_was_silenced=True, stock_radar_alive=False)
     assert CRZ_BTNS in addrs
 
@@ -1215,13 +1061,10 @@ class TestRadarSessionBounds:
     for _ in range(RADAR_SESSION_LIMIT_FRAMES + 2):
       state = m.update(True, True, False, standstill=True, session_refused=False)
     assert state == RadarSessionState.STOCK and m.silencing_failed
-    # and stays given up for the drive: stock keeps the bus
     for _ in range(10):
       assert m.update(True, True, False, standstill=True, session_refused=False) == RadarSessionState.STOCK
 
   def test_negative_response_gives_up_immediately(self):
-    # route 000000fe t+15.0 shows the radar answers a session request within 10 ms, so a
-    # negative response is definitive: no reason to burn the silence budget
     m = RadarSessionManager()
     m.update(True, True, False, standstill=True, session_refused=False)
     assert m.state == RadarSessionState.SILENCING
@@ -1237,10 +1080,6 @@ class TestRadarSessionBounds:
     assert state == RadarSessionState.STOCK
 
   def test_completed_handback_never_resilences(self):
-    # the parked toggle-off regression: the monitor's CC_SP assert used to drop after its done
-    # latch, the manager read that as a withdrawal, fell to STOCK, and re-entered SILENCING on
-    # the same call (parked, gate still passed) -- re-silencing the radar it had just handed
-    # back, right before shutdown, leaving it to a degraded unattended S3 recovery
     m = RadarSessionManager()
     m.update(True, False, False, standstill=True, session_refused=False)
     assert m.state == RadarSessionState.SILENCED
@@ -1253,8 +1092,6 @@ class TestRadarSessionBounds:
           assert m.update(True, alive, handback, standstill=True, session_refused=False) == RadarSessionState.STOCK
 
   def test_withdrawn_handback_allows_retakeover(self):
-    # only a hand-back that ran to completion latches: a genuine toggle-flip-back
-    # mid-hand-back gets the normal takeover again
     m = RadarSessionManager()
     m.update(True, False, False, standstill=True, session_refused=False)
     m.update(True, False, True, standstill=True, session_refused=False)
@@ -1263,8 +1100,6 @@ class TestRadarSessionBounds:
     assert state == RadarSessionState.SILENCED and not m.handback_completed
 
   def test_silencing_waits_for_standstill_but_adoption_does_not(self):
-    # actively silencing disables AEB, so it only starts pre-motion like disable_ecu;
-    # adopting an already-quiet radar disables nothing and proceeds anywhere
     m = RadarSessionManager()
     for _ in range(10):
       assert m.update(True, True, False, standstill=False, session_refused=False) == RadarSessionState.STOCK
@@ -1274,9 +1109,6 @@ class TestRadarSessionBounds:
 
 
 def test_non_gen1_platform_refused_at_admission():
-  # one init-time check instead of per-frame guards in the message builders, which every
-  # frame layout in mazdacan assumes; the fall-throughs used to emit an all-zero CAM_LKAS
-  # and return None from the button builder, straight into can_sends
   CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], alpha_long=False,
                                is_release=False, docs=False)
   CP_SP = CarInterface.get_params_sp(CP, CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], False, False, False)
@@ -1290,7 +1122,6 @@ class TestRadarSessionSequencing:
   radar session state, driven through the real CarController.update_longitudinal."""
 
   def _step(self, cc, stock_radar_alive, fsc_settled, handback=False, cruise_engaged=False, standstill=True):
-    # standstill=True models the parked boot; actively silencing a live radar is gated on it
     off = structs.CarControl.Actuators.LongControlState.off
     return _step(cc, long_active=False, accel=0., long_state=off, lead_visible=False, available=False,
                  stock_radar_alive=stock_radar_alive, fsc_settled=fsc_settled,
@@ -1305,14 +1136,11 @@ class TestRadarSessionSequencing:
     return [a for a, _, _ in sends if a in (0x21b, 0x21c, 0x499)]
 
   def test_stock_state_is_silent(self, cc):
-    # radar alive, gate not yet passed: nothing at all goes on the bus
     for _ in range(200):
       sends = self._step(cc, stock_radar_alive=True, fsc_settled=False)
       assert sends == []
 
   def test_boot_teardown_sequence(self, cc):
-    # gate passes with the stock radar alive: programming-session requests at 2 Hz,
-    # still no synthetic frames and no tester present
     for i in range(100):
       sends = self._step(cc, stock_radar_alive=True, fsc_settled=True)
       if i % CarControllerParams.RADAR_UDS_STEP == 0:
@@ -1320,7 +1148,6 @@ class TestRadarSessionSequencing:
       else:
         assert self._uds(sends) == []
       assert self._synthetic(sends) == []
-    # radar goes quiet: synthetic frames + tester present take over, session requests stop
     saw_tester = False
     for _ in range(100):
       frame = cc.frame
@@ -1332,10 +1159,7 @@ class TestRadarSessionSequencing:
     assert saw_tester
 
   def test_handback_sequence(self, cc):
-    # reach SILENCED
     self._step(cc, stock_radar_alive=False, fsc_settled=True)
-    # hand-back requested: default-session requests at 2 Hz, tester present stops,
-    # synthetic frames continue while the radar is still quiet
     saw_default = False
     for _ in range(100):
       frame = cc.frame
@@ -1345,33 +1169,25 @@ class TestRadarSessionSequencing:
       if frame % CarControllerParams.LONG_STEP == 0:
         assert len(self._synthetic(sends)) > 0
     assert saw_default
-    # stock radar returns: everything stops
     for _ in range(200):
       sends = self._step(cc, stock_radar_alive=True, fsc_settled=True, handback=True)
       assert sends == []
 
   def test_handback_before_teardown_stops_everything(self, cc):
-    # toggle-off while still waiting on the gate: no session ever entered, so no
-    # hand-back traffic either
     self._step(cc, stock_radar_alive=True, fsc_settled=False)
     for _ in range(120):
       sends = self._step(cc, stock_radar_alive=True, fsc_settled=False, handback=True)
       assert sends == []
 
   def test_teardown_waits_for_stock_cruise_disengage(self, cc):
-    # driver engaged stock MRCC before the gate passed (warm boot): hold the teardown
     for _ in range(120):
       sends = self._step(cc, stock_radar_alive=True, fsc_settled=True, cruise_engaged=True)
       assert sends == []
-    # driver disengages: teardown proceeds
     cc.frame = 0
     sends = self._step(cc, stock_radar_alive=True, fsc_settled=True, cruise_engaged=False)
     assert SESSION_PROG_DAT in self._uds(sends)
 
   def test_completed_handback_stays_stock_after_the_assert_drops(self, cc):
-    # CC_SP is rebuilt every frame, so once the toggle monitor's done latch stops asserting
-    # the hand-back the manager sees handback=False; a completed hand-back must not turn
-    # into a fresh takeover on the very next frame (parked => standstill, gate still passed)
     self._step(cc, stock_radar_alive=False, fsc_settled=True)
     self._step(cc, stock_radar_alive=False, fsc_settled=True, handback=True)
     self._step(cc, stock_radar_alive=True, fsc_settled=True, handback=True)
@@ -1380,11 +1196,9 @@ class TestRadarSessionSequencing:
       assert sends == []
 
   def test_s3_recovery_resilences(self, cc):
-    # radar reappears mid-drive (dropped tester present, S3 timeout): re-request the session
     self._step(cc, stock_radar_alive=False, fsc_settled=True)
     cc.frame = CarControllerParams.RADAR_UDS_STEP  # align to a session-request frame
     sends = self._step(cc, stock_radar_alive=True, fsc_settled=True)
     assert SESSION_PROG_DAT in self._uds(sends)
-    # and settles back to silenced once quiet again
     sends = self._step(cc, stock_radar_alive=False, fsc_settled=True)
     assert SESSION_PROG_DAT not in self._uds(sends)

@@ -10,34 +10,26 @@ Ecu = structs.CarParams.Ecu
 
 
 def make_vin(wmi: str, chassis_code: str, year_code: str) -> str:
-  # positions 6-9, 11-17 are arbitrary: the decoder reads the WMI, the model
-  # line (positions 4-5) and the model year code (position 10)
   return wmi + chassis_code + '2L50' + year_code + '0' + '000042'
 
 
 class TestMazdaVinMatch:
-  # Real VINs from public listings, one per model year code, with the trim from the listing.
-  # None marks a model line with no supported platform.
   REAL_VINS = [
-    # KF 2017-21 -> MAZDA_CX5
     ('JM3KFBDL8H0189068', CAR.MAZDA_CX5),        # 2017 Grand Touring
     ('JM3KFBCM8J0391425', CAR.MAZDA_CX5),        # 2018 Touring
     ('JM3KFBDY8K0524140', CAR.MAZDA_CX5),        # 2019 Grand Touring Reserve
     ('JM3KFBBMXL0721103', CAR.MAZDA_CX5),        # 2020 Sport
     ('JM3KFBEY9M0334140', CAR.MAZDA_CX5),        # 2021 Signature
-    # KF 2022-25 -> MAZDA_CX5_2022
     ('JM3KFBEM7N0646584', CAR.MAZDA_CX5_2022),   # 2022 Premium Plus
     ('JM3KFBXY2P0142737', CAR.MAZDA_CX5_2022),   # 2023 2.5 Turbo Signature
     ('JM3KFBCL4R0506329', CAR.MAZDA_CX5_2022),   # 2024 Preferred
     ('JM3KFBAY8S0594547', CAR.MAZDA_CX5_2022),   # 2025 Carbon Turbo
-    # TC 2016-20 -> MAZDA_CX9, 2021-23 -> MAZDA_CX9_2021
     ('JM3TCBDY1G0107351', CAR.MAZDA_CX9),        # 2016 Grand Touring
     ('JM3TCBDY2K0314968', CAR.MAZDA_CX9),        # 2019 Grand Touring
     ('JM3TCBBY1L0416377', CAR.MAZDA_CX9),        # 2020 Sport
     ('JM3TCBEYXM0534974', CAR.MAZDA_CX9_2021),   # 2021 Signature
     ('JM3TCBAY3N0628864', CAR.MAZDA_CX9_2021),   # 2022 Touring Plus
     ('JM3TCBDY4P0655571', CAR.MAZDA_CX9_2021),   # 2023 Carbon Edition
-    # GL 2017-21 -> MAZDA_6, BN 2017-18 -> MAZDA_3 (Salamanca builds use 3MZ)
     ('JM1GL1U58H1108261', CAR.MAZDA_6),          # 2017 Sport
     ('JM1GL1VM0J1336606', CAR.MAZDA_6),          # 2018 Touring
     ('JM1GL1TYXK1503013', CAR.MAZDA_6),          # 2019 Grand Touring
@@ -45,7 +37,6 @@ class TestMazdaVinMatch:
     ('JM1GL1VM4M1613049', CAR.MAZDA_6),          # 2021 Touring
     ('3MZBN1K71HM135634', CAR.MAZDA_3),          # 2017 Sport
     ('3MZBN1V34JM170702', CAR.MAZDA_3),          # 2018 Touring
-    # Unsupported model lines stay unmatched on real VINs too
     ('JM1BPALL3N1522302', None),                 # 2022 Mazda 3 (BP)
     ('3MVDMBEM0LM104467', None),                 # 2020 CX-30 (DM)
   ]
@@ -59,8 +50,6 @@ class TestMazdaVinMatch:
     assert match_fw_to_car_fuzzy({}, make_vin('JM6', 'TC', 'M'), FW_VERSIONS) == set()
 
   def test_unsupported_models_do_not_match(self):
-    # BP (Mazda 3 2019+), DM (CX-30), KE (pre-2017 CX-5), VA (CX-50), and a CX-9
-    # past the last supported model year
     for wmi, chassis_code, year_code in (('JM1', 'BP', 'K'), ('JM3', 'DM', 'N'),
                                          ('JM3', 'KE', 'H'), ('7MM', 'VA', 'P'),
                                          ('JM3', 'TC', 'T')):
@@ -71,19 +60,14 @@ class TestMazdaVinMatch:
     assert match_fw_to_car_fuzzy({}, 'JM3KF', FW_VERSIONS) == set()  # too short
 
   def test_vin_unknown_does_not_match(self):
-    # all zeros passes the charset; '00' matches no model line
     assert match_fw_to_car_fuzzy({}, VIN_UNKNOWN, FW_VERSIONS) == set()
 
   def test_engine_firmware_is_unique_per_platform(self):
-    # the engine is the chassis oracle for VIN-less cars; a version recorded
-    # under two platforms would let it name the wrong one
     engine_lists = [set(fw[(Ecu.engine, 0x7e0, None)]) for fw in FW_VERSIONS.values()]
     for a, b in combinations(engine_lists, 2):
       assert a.isdisjoint(b), a & b
 
   def test_engine_firmware_names_the_chassis_without_a_decodable_vin(self):
-    # an Oceania export VIN (real report): no model year, no known WMI; the
-    # engine is the only responding firmware in the database
     engine = FW_VERSIONS[CAR.MAZDA_CX9_2021][(Ecu.engine, 0x7e0, None)][0]
     live = {
       (0x7e0, None): {engine},
@@ -107,16 +91,11 @@ class TestMazdaVinMatch:
     assert match_fw_to_car_fuzzy({(0x7e0, None): {engine}}, make_vin('JM3', 'TC', 'M'), FW_VERSIONS) == {str(CAR.MAZDA_CX9_2021)}
 
   def test_unsupported_chassis_vin_suppresses_the_engine(self):
-    # a BP car whose PCM carried over a BN-era calibration must not silently
-    # become MAZDA_3: the VIN positively identified an unsupported model
     engine = FW_VERSIONS[CAR.MAZDA_3][(Ecu.engine, 0x7e0, None)][0]
     live = {(0x7e0, None): {engine}, (0x760, None): {UNKNOWN_ABS_FW}}
     assert match_fw_to_car_fuzzy(live, make_vin('JM1', 'BP', 'K'), FW_VERSIONS) == set()
 
   def test_unknown_wmi_keeps_the_engine_fallback(self):
-    # 7MM (CX-50) is a real WMI outside the allowlist: the engine fallback still
-    # fires for it today, so the same collision would mis-name the car. Pinned
-    # intentionally so extending the WMI table is a conscious decision.
     engine = FW_VERSIONS[CAR.MAZDA_3][(Ecu.engine, 0x7e0, None)][0]
     live = {(0x7e0, None): {engine}, (0x760, None): {UNKNOWN_ABS_FW}}
     assert match_fw_to_car_fuzzy(live, make_vin('7MM', 'VA', 'P'), FW_VERSIONS) == {str(CAR.MAZDA_3)}
@@ -133,7 +112,6 @@ def _car_fw(ecu, address, version: bytes) -> structs.CarParams.CarFw:
   return fw
 
 
-# Versions that exist in no database, standing in for dealer-updated ECUs
 UNKNOWN_ENGINE_FW = b'ZZ99-9999X-Z-99' + b'\x00' * 9
 UNKNOWN_ABS_FW = b'ZZ99-8888X-Z-99' + b'\x00' * 9
 UNKNOWN_TRANS_FW = b'ZZ99-7777X-Z-99' + b'\x00' * 9
@@ -174,8 +152,6 @@ class TestMatchFwToCarVinFallback:
     assert matches == {str(CAR.MAZDA_CX9_2021)}
 
   def test_oceania_eps_swap_matches_by_engine_firmware(self):
-    # the reported car: Oceania VIN (never decodes), donor EPS, and chassis ECUs
-    # unknown to the North American database
     engine = FW_VERSIONS[CAR.MAZDA_CX9_2021][(Ecu.engine, 0x7e0, None)][0]
     donor_eps = FW_VERSIONS[CAR.MAZDA_CX5_2022][(Ecu.eps, 0x730, None)][0]
     car_fw = [
