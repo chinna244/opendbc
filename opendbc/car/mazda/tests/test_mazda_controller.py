@@ -56,12 +56,15 @@ class TestCarControllerParams:
     assert np.interp(14.5, bp, vals) == 620
     assert np.interp(35.0, bp, vals) == 620
 
-  def test_steer_delta_up_matches_the_eps_rate_limit_at_this_steer_step(self, cx5_2022_params):
-    # The EPS rate limit is per unit TIME (~1200 units/s), while STEER_DELTA_UP is per frame,
-    # so the two are only matched at STEER_STEP = 1. Changing one without the other silently
-    # rescales the commanded slew rate.
+  def test_steer_delta_matches_the_eps_rate_limit_at_this_steer_step(self, cx5_2022_params):
+    # The EPS rate limit is per unit TIME (~1200 units/s), while STEER_DELTA_UP/DOWN are per
+    # frame, so the two are only matched at STEER_STEP = 1. Changing one without the other
+    # silently rescales the commanded slew rate. Both directions: the measured rail is
+    # symmetric (p99 and p99.9 of the delivered step are 12 either way), and a winddown above
+    # it only lets the command run ahead of the wheel.
     rate_hz = 1.0 / DT_CTRL / CarControllerParams.STEER_STEP
     assert cx5_2022_params.STEER_DELTA_UP * rate_hz == pytest.approx(1200, rel=0.01)
+    assert cx5_2022_params.STEER_DELTA_DOWN * rate_hz == pytest.approx(1200, rel=0.01)
 
   @pytest.fixture
   def pre_2022_params(self):
@@ -88,7 +91,12 @@ class TestCarControllerParams:
 
   def test_cx5_2022_rate_limits(self, cx5_2022_params):
     assert cx5_2022_params.STEER_DELTA_UP == 12
-    assert cx5_2022_params.STEER_DELTA_DOWN == 25
+    assert cx5_2022_params.STEER_DELTA_DOWN == 12
+
+  def test_cx5_2022_winddown_stays_within_the_panda_backstop(self, cx5_2022_params):
+    # opendbc/safety/modes/mazda.h declares max_rate_down = 25 for every Mazda; commanding a
+    # tighter winddown is allowed, commanding a looser one would be blocked frame by frame.
+    assert cx5_2022_params.STEER_DELTA_DOWN <= 25
 
   def test_cx5_eps_driver_multiplier(self, cx5_2022_params):
     # 15 is the CX-5-EPS tune (upstream stock is 1)

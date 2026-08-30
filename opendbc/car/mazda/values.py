@@ -189,8 +189,16 @@ class CarControllerParams:
       self.STEER_MAX_LOOKUP = ([0., 14.2, 14.5], [1200, 1200, 800])
       # EPS hardware rate limit: 12 units/frame at 100 Hz (4-unit quantization, max 3 steps).
       # Per unit time, not per frame -- see the STEER_STEP note above before changing either.
+      # Symmetric because the hardware is: over 11.7M clean 0x241 frames the delivered step
+      # |dLKAS_EFFECTIVE| has p99 AND p99.9 of 12 at every speed, for the stock camera and for
+      # openpilot alike, and stays there when the request jumps 40-100 units in a frame (mean
+      # delivery 8.2). A winddown above 12 therefore buys no faster release at the wheel -- the
+      # EPS still walks at 12 -- it only lets the command run ahead of where the wheel actually
+      # is (p99 of that gap was 700-800 units below 20 mph, max 1400), so the command can cross
+      # zero while the wheel is still turned and the P term keeps building against a measurement
+      # that has not responded yet. Panda keeps max_rate_down = 25 as the looser backstop.
       self.STEER_DELTA_UP = 12
-      self.STEER_DELTA_DOWN = 25
+      self.STEER_DELTA_DOWN = 12
       self.STEER_DRIVER_MULTIPLIER = 15   # weight driver torque (tuned for the CX-5 EPS; upstream stock is 1)
       # Torque the EPS will actually apply, by speed. Measured over 11,408,748 clean frames
       # (4798 segments, not LKAS_BLOCK / not steeringPressed / vEgo > 2) from 0x241
