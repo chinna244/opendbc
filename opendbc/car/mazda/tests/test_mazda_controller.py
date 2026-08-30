@@ -830,9 +830,9 @@ class TestLongitudinalIntegration:
       peak = max(peak, cc.accel_last)
     assert peak > 0.47 + 0.2, f"command plateaued at the plan and never asked harder: {peak:.2f}"
     assert peak <= CarControllerParams.ACCEL_BREAKAWAY_MAX + 1e-6, f"climbed past the cap: {peak:.2f}"
-    # the override is comfort the model did not ask for, spent creeping toward a close lead:
-    # it must stay a gentle pull-away, never a launch
-    assert CarControllerParams.ACCEL_BREAKAWAY_MAX <= 1.0, "breakaway ceiling is lurch territory"
+    # the override sits on top of the plan, so it is bounded by what stock itself commands
+    # pulling away from a stop: the corpus breakaways span +0.66..+1.32 (median +1.03)
+    assert CarControllerParams.ACCEL_BREAKAWAY_MAX <= 1.32, "breakaway ceiling past stock's own max"
 
     # once it moves, the plan owns the command again
     for _ in range(int(0.5 / 0.01)):
