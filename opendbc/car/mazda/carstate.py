@@ -176,7 +176,7 @@ class CarState(CarStateBase, CarStateExt):
       #  - After the radar has been silenced once, hearing it again is a genuine
       #    two-master conflict (dropped tester present, S3 recovery, or the ordered
       #    hand-back) and is a real accFaulted. The alpha-long toggle monitor relies on
-      #    exactly this edge as its "stock radar heard" acknowledgement.
+      #    exactly this edge as its "stock radar heard" acknowledgment.
       if len(cp.vl_all["CRZ_INFO"]["CTR1"]) > 0:
         self.stock_radar_silent_frames = 0
       else:
@@ -314,10 +314,12 @@ class CarState(CarStateBase, CarStateExt):
       pt_messages.append(("CRZ_INFO", float("nan")))
       pt_messages.append(("RADAR_UDS_RESPONSE", float("nan")))
     cam_messages = [
-      # read through vl_all, which unlike vl has no lazy registration
-      ("CAM_LANEINFO", 0),
-      ("CAM_TRAFFIC_SIGNS", 0),
-      ("CAM_EMPTY", 0),
+      # read through vl_all, which unlike vl has no lazy registration.
+      # No liveness checks: these are read opportunistically and not every Mazda camera
+      # sends them (the 2016-20 CX-9 sends none), so a missing frame must not fail canValid.
+      ("CAM_LANEINFO", float("nan")),
+      ("CAM_TRAFFIC_SIGNS", float("nan")),
+      ("CAM_EMPTY", float("nan")),
     ]
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, 0),
