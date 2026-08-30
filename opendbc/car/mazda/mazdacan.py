@@ -19,7 +19,9 @@ LEAD_TRACK_ADDR = 0x364
 # slots empty). Its status pair byte4/byte5 reads 1c/00 through the whole stop, unlatch and
 # drive-off; the old capture carried 1d/c0, and c0 in byte 5 is the empty-slot signature
 # (fff7fefe1fc00000), so every unlatch pulse went out over a track whose status bits read
-# half-invalid -- unattested in any of the 24 stock at-release occupied slots. The
+# half-invalid -- unattested in any of the 24 stock at-release occupied slots. (Route 132
+# then showed the old bytes were not the SCBS trigger -- the latch keyed on the CRZ_INFO
+# checksum, see crz_info_checksum -- but this template is the attested content and stays.) The
 # measurement fields are zeroed here because create_lead_track rewrites DIST_OBJ and
 # RELV_OBJ every frame; byte 2 wanders on a live radar but parks at zero in clean stock
 # releases too (drive_0e), so it stays fixed.
@@ -29,9 +31,14 @@ DIST_OBJ_MAX = 255.875    # m, the full-scale DIST_OBJ reading a track can carry
 
 
 def crz_info_checksum(dat: bytes) -> int:
-  # Inverted sum of the first seven bytes; the radar leaves the STOPPING bit out of the
-  # sum. Verified against 1.94M stock frames, including every stop-bit frame.
-  return (0xFF - ((sum(dat[:7]) - (dat[5] & 0x04)) & 0xFF)) & 0xFF
+  # Inverted sum of the first seven bytes; the radar leaves both event bits out of the
+  # sum: STOPPING (byte 5) and RESUME_UNLATCHING (byte 6). Verified against 1.67M stock
+  # frames with zero mismatches, including all 9,681 stop-bit frames and all 269
+  # unlatch-pulse frames. Summing the unlatch bit made every pulse frame this port ever
+  # sent checksum-invalid by exactly 0x40 -- the camera latched the SCBS trio ~3 frames
+  # into each pulse (11/11 releases across every radar-content variant, route 132 closing
+  # the case) while the body, which does not validate the sum, still answered the pulse.
+  return (0xFF - ((sum(dat[:7]) - (dat[5] & 0x04) - (dat[6] & 0x40)) & 0xFF)) & 0xFF
 
 
 def create_acc_command(packer, bus, counter, accel, *, long_active, acc_available,

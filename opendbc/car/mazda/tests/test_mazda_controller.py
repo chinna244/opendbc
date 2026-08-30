@@ -114,9 +114,10 @@ class TestCarControllerParams:
 
 
 def crz_info_reference_checksum(dat):
-  # independent reimplementation of the CRZ_INFO checksum, validated against 1.94M stock
-  # frames including all 10,350 stop-bit frames
-  return (0xFF - ((sum(dat[:7]) - (dat[5] & 0x04)) & 0xFF)) & 0xFF
+  # independent reimplementation of the CRZ_INFO checksum, validated against 1.67M stock
+  # frames with zero mismatches: the sum excludes the STOPPING bit (byte 5, 9,681 frames)
+  # and the RESUME_UNLATCHING bit (byte 6, 269 frames)
+  return (0xFF - ((sum(dat[:7]) - (dat[5] & 0x04) - (dat[6] & 0x40)) & 0xFF)) & 0xFF
 
 
 def decode_accel_cmd_raw(dat):
@@ -170,7 +171,10 @@ class TestMazdaLongitudinalMessages:
     (-3.5, False, False, 7, "01ffe04a868007c8"),    # ISO max brake, raw -3500
     (-1.024, True, False, 5, "01ffe18006841503"),   # standstill hold, raw -1024 + stop bits
     (-0.001, False, False, 9, "01ffe1ffe68009b0"),  # latched hold, raw -1
-    (0.0, False, True, 11, "01ffe20006804b4c"),     # resume unlatch pulse
+    (0.0, False, True, 11, "01ffe20006804b8c"),     # resume unlatch pulse
+    # wire-attested twin: stock drive_0b's first pulse frame is 01ffe1ffe68040b9 -- the
+    # checksum matches the counter-0 hold frame (b9) because the unlatch bit is not summed
+    (-0.001, False, True, 0, "01ffe1ffe68040b9"),
   ])
   def test_crz_info_engaged_golden_bytes(self, packer, accel, stopping, unlatching, counter, expected):
     dat = mazdacan.create_acc_command(packer, 0, counter, accel, long_active=True, acc_available=False,
@@ -181,13 +185,20 @@ class TestMazdaLongitudinalMessages:
     # the packed command must round-trip at the 0.001 factor and carry a valid masked-bit
     # checksum over the whole command window, stop bits set or not
     for raw in range(-3500, 2001, 137):
-      for stopping in (False, True):
+      for stopping, unlatching in ((False, False), (True, False), (False, True)):
         dat = mazdacan.create_acc_command(packer, 0, raw % 16, raw / 1000.0, long_active=True, acc_available=False,
-                                          stopping=stopping)[1]
+                                          stopping=stopping, resume_unlatching=unlatching)[1]
         assert decode_accel_cmd_raw(dat) == raw
         assert dat[7] == crz_info_reference_checksum(dat)
         assert bool(dat[5] & 0x04) == stopping
         assert bool(dat[6] & 0x10) == stopping
+        assert bool(dat[6] & 0x40) == unlatching
+        # the excluded event bits must not move the checksum: stripping them yields the
+        # same byte a bare frame carries (stock 0b: 8040b9 vs 8000b9, both chk b9)
+        bare = bytearray(dat)
+        bare[5] &= ~0x04
+        bare[6] &= ~0x40
+        assert dat[7] == crz_info_reference_checksum(bytes(bare))
 
   @pytest.mark.parametrize(("long_active", "acc_available", "gap", "has_lead", "phase", "acc_active_2", "expected"), [
     (False, False, 0, False, 0, False, "0201010000000000"),  # standby
