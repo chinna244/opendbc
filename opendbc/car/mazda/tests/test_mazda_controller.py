@@ -441,7 +441,7 @@ class TestStandstillHold:
   def test_latched_pulse_runs_to_completion_through_a_re_hold(self, sm):
     # a latched pulse spans the body's actual unlatch, so a re-hold mid-pulse waits it out
     # (stop bits blocked, stock never emits STOPPING with RESUME_UNLATCHING) instead of
-    # cancelling it; a second release cannot fire a fresh pulse before the first ends because
+    # canceling it; a second release cannot fire a fresh pulse before the first ends because
     # the release debounce is at least as long as any pulse window
     assert RELEASE_DEBOUNCE_FRAMES >= RESUME_UNLATCH_LATCHED_FRAMES
     self.run(sm, 1, stopping=True)
@@ -987,7 +987,7 @@ class TestLongitudinalIntegration:
     assert pulse[0] == -1, f"fallback pulse did not snap back to the relaxed hold: {pulse[0]}"
 
   def test_body_releasing_on_the_nudge_never_pulses(self, cc):
-    # the outcome we are actually after: the body honours the request and no unlatch bit
+    # the outcome we are actually after: the body honors the request and no unlatch bit
     # ever reaches the camera
     long = structs.CarControl.Actuators.LongControlState
     lead = dict(lead_visible=True, lead_d_rel=4.0, lead_v_rel=0.0)
