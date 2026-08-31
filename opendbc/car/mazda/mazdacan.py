@@ -14,17 +14,13 @@ RADAR_TRACK_MSGS = {
   0x366: bytes.fromhex("fff7fe7ffbff3fc0"),
 }
 LEAD_TRACK_ADDR = 0x364
-# An occupied track slot's constant bytes, rebased on stock drive_0b's clean latched hold
-# release -- the one stock release with exactly our bus topology (lead in 0x364 alone, five
-# slots empty). Its status pair byte4/byte5 reads 1c/00 through the whole stop, unlatch and
-# drive-off; the old capture carried 1d/c0, and c0 in byte 5 is the empty-slot signature
-# (fff7fefe1fc00000), so every unlatch pulse went out over a track whose status bits read
-# half-invalid -- unattested in any of the 24 stock at-release occupied slots. (Route 132
-# then showed the old bytes were not the SCBS trigger -- the latch keyed on the CRZ_INFO
-# checksum, see crz_info_checksum -- but this template is the attested content and stays.) The
-# measurement fields are zeroed here because create_lead_track rewrites DIST_OBJ and
-# RELV_OBJ every frame; byte 2 wanders on a live radar but parks at zero in clean stock
-# releases too (drive_0e), so it stays fixed.
+# An occupied track slot's constant bytes, taken from stock drive_0b's latched hold release --
+# the one stock release with exactly our bus topology (lead in 0x364 alone, five slots empty).
+# Its status pair byte4/byte5 reads 1c/00 through the whole stop, unlatch and drive-off, which
+# keeps it clear of the empty-slot signature c0 in byte 5 (fff7fefe1fc00000). The measurement
+# fields are zeroed here because create_lead_track rewrites DIST_OBJ and RELV_OBJ every frame;
+# byte 2 wanders on a live radar but parks at zero in clean stock releases too (drive_0e), so
+# it stays fixed.
 LEAD_TRACK_TEMPLATE = bytes.fromhex("000e00001c000000")
 DIST_OBJ_SCALE = 0.0625   # m per bit, DIST_OBJ and RELV_OBJ share it
 DIST_OBJ_MAX = 255.875    # m, the full-scale DIST_OBJ reading a track can carry
@@ -38,6 +34,7 @@ def crz_info_checksum(dat: bytes) -> int:
   # sent checksum-invalid by exactly 0x40 -- the camera latched the SCBS trio ~3 frames
   # into each pulse (11/11 releases across every radar-content variant, route 132 closing
   # the case) while the body, which does not validate the sum, still answered the pulse.
+  # Route 00000139 is the first drive with the corrected sum: one pulse, camera clean.
   return (0xFF - ((sum(dat[:7]) - (dat[5] & 0x04) - (dat[6] & 0x40)) & 0xFF)) & 0xFF
 
 
@@ -93,10 +90,10 @@ def create_lead_track(d_rel: float, v_rel: float) -> bytes:
   """Place the lead we are following on the track slot the camera reads.
 
   A stock radar re-measures every track every 100 ms, so its range and range rate move with
-  the lead even at a standstill. Repeating one frozen frame instead makes the camera latch an
-  SCBS fault the moment a standstill hold releases: it is told an object sits at a fixed range
-  with zero closing speed while the car is commanded to drive off, which its own view of the
-  lead pulling away contradicts. RELV_OBJ carries the same sign as vRel, positive opening.
+  the lead even at a standstill. Repeating one frozen frame instead tells the camera an object
+  sits at a fixed range with zero closing speed while the car is commanded to drive off, which
+  its own view of the lead pulling away contradicts -- content no radar ever puts on the bus.
+  RELV_OBJ carries the same sign as vRel, positive opening.
   """
   dist = round(min(max(d_rel, 0.), DIST_OBJ_MAX) / DIST_OBJ_SCALE)
   relv = round(min(max(v_rel, -64.), 63.9375) / DIST_OBJ_SCALE) & 0x7ff

@@ -196,9 +196,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     if sm.just_released:
       # the release command follows stock's shape, not a slew off the hold value: a
       # never-latched stop relax-jumps into the release band in one frame, a latched hold
-      # ramps off the relaxed -0.001 (values.py census). Slewing up from -1.024 instead kept
-      # hold-grade braking under the release pulse, and the camera latched it as an SCBS
-      # fault 90 ms in (route 00000053 t+714.8, real departing lead advertised)
+      # ramps off the relaxed -0.001 (values.py census). Slewing up from -1.024 instead
+      # keeps hold-grade braking on the wire underneath the release pulse, a tuple stock
+      # never emits.
       self.release_ramp = CarControllerParams.ACCEL_HOLD_LATCHED if sm.latched_release else \
                           CarControllerParams.ACCEL_RELEASE_BAND
     elif sm.holding or not CC.longActive:
@@ -223,8 +223,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         # ~+1.25 m/s3 straight through the blip or pulse and on into the drive-off.
         # A latched release does not start climbing until the body lets go: stock pins
         # the command at -1 raw until GEAR.BRAKE_HOLD drops in every latched release of
-        # the corpus, and climbing against the still-latched hold is what the camera
-        # faulted 90 ms into the pulse (route 00000115 t+381.3)
+        # the corpus, and there is nothing to gain by pushing against brakes the body
+        # still owns.
         accel = self.release_ramp
         if not (sm.latched_release and CS.brake_hold):
           self.release_ramp = min(self.release_ramp + CarControllerParams.ACCEL_RELEASE_RAMP * DT_CTRL,
@@ -241,23 +241,18 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       elif sm.holding:
         # while the plan is braking the hold command is the plan's own, but the moment it
         # turns positive (release debounce) the hold freezes where it is:
-        # stock never lets ACCEL_CMD climb while STOPPING is asserted, and pre-ramping toward
-        # the plan here put the release's zero-cross inside the unlatch pulse, which the
-        # camera latched as an SCBS fault (route 00000100 t+353)
+        # stock never lets ACCEL_CMD climb while STOPPING is asserted, and pre-ramping
+        # toward the plan puts the release's zero-cross inside the unlatch pulse, which
+        # stock never does either.
         accel = min(accel, 0.) if CC.actuators.accel <= 0. else min(self.accel_last, 0.)
       if sm.resume_unlatching:
-        if sm.latched_release:
-          # stock's latched pulse runs -1 raw to +0.25 m/s2. The ceiling is an invariant
-          # the ramp already keeps. The floor does real work on a re-hold that lands while
-          # the pulse is still playing: the pulse runs out (stock never restarts one), and
-          # this keeps the re-hold's braking off the pulse frames -- hold-grade command
-          # under RESUME_UNLATCHING is the exact tuple the camera latches on
-          accel = min(max(accel, CarControllerParams.ACCEL_HOLD_LATCHED),
-                      CarControllerParams.ACCEL_RESUME_PULSE_MAX)
-        else:
-          # stock's command is negative in every never-latched blip frame of the corpus;
-          # the blip already stays under this, kept as a guard
-          accel = min(accel, 0.)
+        # only a latched release ever arms the pulse, so this is stock's latched shape:
+        # -1 raw to +0.25 m/s2. The ceiling is an invariant the ramp already keeps. The
+        # floor does real work on a re-hold that lands while the pulse is still playing:
+        # the pulse runs out (stock never restarts one), and this keeps the re-hold's
+        # braking off the pulse frames, which is the shape stock's own releases have.
+        accel = min(max(accel, CarControllerParams.ACCEL_HOLD_LATCHED),
+                    CarControllerParams.ACCEL_RESUME_PULSE_MAX)
     self.accel_last = accel
 
     if radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:

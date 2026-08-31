@@ -386,8 +386,9 @@ class TestStandstillHold(unittest.TestCase):
   def test_never_latched_release_emits_no_pulse(self):
     sm = _sm()
     # a never-latched release has nothing latched to unlatch, so it puts no RESUME_UNLATCHING
-    # on the wire at all. Stock blips here, but every pulse this port has emitted latched the
-    # camera's SCBS fault (4/4), and mimicking a blip that unlatches nothing is not worth one
+    # on the wire at all. Stock blips here; we dropped it back when every pulse this port sent
+    # latched the camera (the CRZ_INFO checksum, since fixed), and it has stayed dropped
+    # because a blip that unlatches nothing buys nothing. Restoring it needs a drive, not a fix
     self.drive(sm, 1, stopping=True)
     self.drive(sm, 100, stopping=True, standstill=True)
     self.assertFalse(sm.resume_unlatching)
@@ -439,8 +440,8 @@ class TestStandstillHold(unittest.TestCase):
     sm = _sm()
     # the driver's pedal outranks the hold, the way Toyota's PCM lets the pedal outrank its
     # standstill request -- but the pulse is the ACC's resume protocol, not the driver's:
-    # stock's captured gas-ended hold drops the stop bits with no RESUME_UNLATCHING at all,
-    # and pulsing there latched an SCBS fault (route 00000103 t+163.8)
+    # stock's captured gas-ended hold drops the stop bits with no RESUME_UNLATCHING at all.
+    # (The SCBS latch that also motivated this, route 00000103 t+163.8, was the checksum)
     self.drive(sm, 1, stopping=True)
     self.drive(sm, 100, stopping=True, standstill=True)
     self.assertTrue(sm.holding)
@@ -454,7 +455,7 @@ class TestStandstillHold(unittest.TestCase):
 
   def test_plan_flap_below_the_debounce_never_releases(self):
     sm = _sm()
-    # the SCBS-axis contamination shape: at a held standstill the lead inches forward and
+    # the phantom-release shape: at a held standstill the lead inches forward and
     # stops, the plan flapping across zero. Sub-debounce flaps must not release at all, and
     # no frame may ever carry the stop bits and the release pulse together
     self.drive(sm, 1, stopping=True)
@@ -555,7 +556,7 @@ class TestAdvertisedLead(unittest.TestCase):
     # leadOne goes to zero the instant vision drops the lead, well before the debounce expires.
     # Advertising a fabricated stand-in there put a stationary object 10.25 m dead ahead on the
     # bus at 22 m/s; the last real measurement carries the gap instead -- propagated by its own
-    # range rate, never repeated frozen (a frozen range is the camera's proven SCBS trigger)
+    # range rate, never repeated frozen (a frozen range is content no radar ever emits)
     self.drive(al, 2 * LEAD_DEBOUNCE_FRAMES, d_rel=120.0, v_rel=0.5)
     self.assertEqual(al.lead, (120.0, 0.5))
     coast_frames = LEAD_DEBOUNCE_FRAMES - 1
@@ -835,9 +836,9 @@ class TestLongitudinalIntegration(unittest.TestCase):
     cc = _cc()
     """Stock never lets ACCEL_CMD climb while STOPPING is asserted: through the release
     debounce the command stays at the hold value. Once the stop bits drop it relax-jumps
-    into stock's release band and ramps. Pre-ramping toward the plan during the debounce put
-    the zero-cross inside the pulse (route 00000100 t+353); slewing up off the hold value put
-    hold-grade braking under it (route 00000053 t+714.8). Both latched SCBS."""
+    into stock's release band and ramps. Pre-ramping toward the plan during the debounce puts
+    the zero-cross inside the pulse; slewing up off the hold value puts hold-grade braking
+    under it. Stock emits neither tuple."""
     long = structs.CarControl.Actuators.LongControlState
     lead = dict(lead_visible=True, lead_d_rel=4.0, lead_v_rel=0.0)
     for _ in range(int(0.5 / 0.01)):
@@ -944,13 +945,12 @@ class TestLongitudinalIntegration(unittest.TestCase):
 
   def test_never_latched_release_speaks_the_stock_wire_grammar(self):
     cc = _cc()
-    """Route 00000053 t+714.8 (second CX-5): slewing off the hold value under a 13-frame pulse
-    put hold-grade braking beneath RESUME_UNLATCHING, a (stop, unlatch, cmd) tuple stock never
-    emits, and the camera latched SCBS 90 ms in with a real departing lead advertised. Stock's
-    never-latched grammar (33-pulse census): the command relax-jumps into the -0.27..-0.11 band
-    in one frame and the ramp climbs ~+25 raw per wire frame. Stock also blips RESUME_UNLATCHING
-    here; we do not -- nothing is latched, and 4 of 4 pulses this port ever emitted latched the
-    camera -- so the blip assertions are replaced by requiring no unlatch bit at all."""
+    """Slewing off the hold value under a long pulse put hold-grade braking beneath
+    RESUME_UNLATCHING, a (stop, unlatch, cmd) tuple stock never emits (route 00000053 t+714.8).
+    Stock's never-latched grammar (33-pulse census): the command relax-jumps into the
+    -0.27..-0.11 band in one frame and the ramp climbs ~+25 raw per wire frame. Stock also blips
+    RESUME_UNLATCHING here; we do not, since nothing is latched, so the blip assertions are
+    replaced by requiring no unlatch bit at all."""
     long = structs.CarControl.Actuators.LongControlState
     lead = dict(lead_visible=True, lead_d_rel=4.0, lead_v_rel=0.0)
     for _ in range(int(0.5 / 0.01)):
@@ -1054,7 +1054,7 @@ class TestLongitudinalIntegration(unittest.TestCase):
 
   def test_lead_track_follows_the_measured_lead(self):
     cc = _cc()
-    # a frozen track is what latches the camera's SCBS fault, so the range we advertise has to
+    # a real radar re-measures every track every 100 ms, so the range we advertise has to
     # move with the lead we are actually following
     long = structs.CarControl.Actuators.LongControlState
     # let the lead debounce adopt the visible lead before sampling the track
@@ -1077,7 +1077,7 @@ class TestLongitudinalIntegration(unittest.TestCase):
     # No fabricated object. The body does not decide the latch on the advertisement: across 32
     # stock engaged standstills the radar said has_lead=1 in every one, yet 23 latched
     # GEAR.BRAKE_HOLD and 9 did not (one held 104 s), and 89 of 115 stock latches happened at
-    # has_lead=0 / phase=0. A phantom the camera can refute is the SCBS trigger.
+    # has_lead=0 / phase=0. What is left to avoid is a phantom the camera can refute.
     long = structs.CarControl.Actuators.LongControlState
     held, ctrls = [], []
     for _ in range(400):

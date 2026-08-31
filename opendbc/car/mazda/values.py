@@ -57,8 +57,7 @@ class CarControllerParams:
   #   - a never-latched stop only blips 1-6 wire frames (mostly 2-3), starting ~3 wire frames
   #     AFTER the stop bits drop, once the command has relax-jumped into its release band
   # Treating every release as a long latched-style pulse held the unlatch bit over hold-grade
-  # braking, a tuple stock never emits, and the camera latched SCBS 90 ms in
-  # (route 00000053 t+714.8, second CX-5, with a real departing lead advertised)
+  # braking, a tuple stock never emits.
   RESUME_UNLATCH_LATCHED_T = 0.18  # s, 9 wire frames, the latched-family mode
   # The pulse is the release protocol: the body answers nothing else. Deferring it behind
   # silence (route 0000011d, 0.3 s) and behind a +0.15 m/s2 nudge (route 0000012c, 2.0 s,
@@ -66,10 +65,9 @@ class CarControllerParams:
   # body then dropped it within 2-3 wire frames of the fallback pulse every time. So a
   # latched release pulses immediately -- waiting only added dead time to every resume.
   # Stock's never-latched blip stays dropped: nothing is latched there, so it unlatches
-  # nothing. The SCBS latch that used to key on the pulse (10 of 10 with a healthy camera,
-  # across builds up to a byte-level stock twin) is addressed on the radar side instead:
-  # every one of those pulses went out while the advertised lead track carried the
-  # empty-slot status signature (see LEAD_TRACK_TEMPLATE in mazdacan.py).
+  # nothing. (Dropping it was originally an SCBS workaround, from when every pulse this port
+  # emitted latched the camera. That is fixed at the source -- see crz_info_checksum -- so
+  # restoring stock's blip is a free choice now, gated on a drive rather than on the fault.)
 
   CANCEL_CONTEXT_T = 0.5       # a wheel CANCEL keeps availability drops landing this long after release
 
