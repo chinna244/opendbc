@@ -231,6 +231,9 @@ MADS_HUD_SAFE_BASE_PAYLOADS = frozenset({
   bytes.fromhex("4201000000001060"),
   bytes.fromhex("4221000000004040"),
   bytes.fromhex("4221000000001040"),
+  # Same unnamed byte-7 0x40/0x60 nibble on the 4221 family (DBC bit 61). All 17
+  # named CAM_LANEINFO fields match 4221000000001040; WHITE XOR leaves byte 7 as 0x60.
+  bytes.fromhex("4221000000001060"),
   bytes.fromhex("4201000000004040"),
   bytes.fromhex("0221000000000040"),
   bytes.fromhex("4201000000000040"),
@@ -269,7 +272,7 @@ def cam_laneinfo_matches_normalized(raw: bytes, packed: bytes) -> bool:
 
 
 def white_hud_allowlist_base(fsc_raw: bytes | None) -> bytes | None:
-  """Return the 13-base payload FSC matches with TJA / TJA_TRANSITION ignored."""
+  """Return the 14-base payload FSC matches with TJA / TJA_TRANSITION ignored."""
   if fsc_raw is None or len(fsc_raw) != 8:
     return None
   return _MADS_HUD_SAFE_BASE_BY_INT.get(

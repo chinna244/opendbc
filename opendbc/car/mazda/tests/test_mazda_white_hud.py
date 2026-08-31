@@ -24,6 +24,11 @@ LANE_AHB_4122 = bytes.fromhex("4122000000001040")
 LANE_AHB_4122_WHITE = bytes.fromhex("4122000020001040")
 COUNTER_4361_0060 = bytes.fromhex("4361000000000060")
 COUNTER_4361_0060_WHITE = bytes.fromhex("4361000020000060")
+BIT2_4221_1040 = bytes.fromhex("4221000000001040")
+BIT2_4221_1040_WHITE = bytes.fromhex("4221000020001040")
+BIT2_4221_1060 = bytes.fromhex("4221000000001060")
+BIT2_4221_1060_WHITE = bytes.fromhex("4221000020001060")
+NEARBY_4221_10E0 = bytes.fromhex("42210000000010E0")  # extra unnamed byte-7 bit; not audited
 UNKNOWN = bytes.fromhex("4201000000011040")  # ERR_BIT=1; normalized packed not allowlisted
 TRANS_4102 = bytes.fromhex("4102000400001040")  # TJA_TRANSITION=1 (DBC); normalizes to 410200…1040
 WHITE_TJA_XOR = mazdacan.MADS_HUD_WHITE_TJA_XOR
@@ -47,10 +52,11 @@ def test_allowlist_payload_only_flips_white_tja_bits(base):
   assert mazdacan.is_mads_white_hud(out)
 
 
-def test_allowlist_stays_thirteen_stable_bases():
-  assert len(mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS) == 13
+def test_allowlist_stays_fourteen_stable_bases():
+  assert len(mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS) == 14
   assert bytes.fromhex("4202000000001040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
   assert bytes.fromhex("4102000400001040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert NEARBY_4221_10E0 not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
 
 
 @pytest.mark.parametrize(("fsc_raw", "packed_dat", "enabled", "expected"), [
@@ -126,7 +132,7 @@ def test_non_tja_bit_flip_fail_closes():
       assert mazdacan.cam_laneinfo_matches_normalized(flipped, OFF)
     else:
       assert not mazdacan.cam_laneinfo_matches_normalized(flipped, OFF)
-      # Leave the 13-base allowlist unless this flip lands on another audited payload.
+      # Leave the 14-base allowlist unless this flip lands on another audited payload.
       if flipped not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS:
         assert not mazdacan.is_white_hud_normalized_base(flipped, OFF)
 
@@ -186,6 +192,34 @@ def test_unpacked_lane_lines_variant_420200_remains_blocked():
   assert rare not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
   assert not mazdacan.is_white_hud_normalized_base(rare, rare)
   assert mazdacan.apply_mads_white_hud(rare, rare, True) == rare
+
+
+def test_4221_1060_is_trusted_white_base_preserving_byte7():
+  assert BIT2_4221_1060 in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert mazdacan.white_hud_allowlist_base(BIT2_4221_1060) == BIT2_4221_1060
+  assert mazdacan.is_white_hud_normalized_base(BIT2_4221_1060, BIT2_4221_1060)
+  out = mazdacan.apply_mads_white_hud(BIT2_4221_1060, BIT2_4221_1060, True)
+  assert out == BIT2_4221_1060_WHITE
+  assert bytes(a ^ b for a, b in zip(BIT2_4221_1060, out, strict=True)) == WHITE_TJA_XOR
+  assert out[7] == 0x60
+  assert mazdacan.is_mads_white_hud(out)
+
+
+def test_4221_1040_white_behavior_is_unchanged():
+  assert BIT2_4221_1040 in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  out = mazdacan.apply_mads_white_hud(BIT2_4221_1040, BIT2_4221_1040, True)
+  assert out == BIT2_4221_1040_WHITE
+  assert bytes(a ^ b for a, b in zip(BIT2_4221_1040, out, strict=True)) == WHITE_TJA_XOR
+  assert out[7] == 0x40
+  assert mazdacan.is_mads_white_hud(out)
+
+
+def test_nearby_4221_10e0_remains_fail_closed():
+  assert NEARBY_4221_10E0 not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert mazdacan.white_hud_allowlist_base(NEARBY_4221_10E0) is None
+  assert not mazdacan.is_white_hud_normalized_base(NEARBY_4221_10E0, NEARBY_4221_10E0)
+  assert mazdacan.apply_mads_white_hud(NEARBY_4221_10E0, NEARBY_4221_10E0, True) == NEARBY_4221_10E0
+  assert not mazdacan.is_mads_white_hud(NEARBY_4221_10E0)
 
 
 def test_raw_latch_accepts_only_camera_bus_eight_byte_frames():
@@ -349,7 +383,7 @@ class TestWhiteHudController:
     assert bytes(a ^ b for a, b in zip(base, out, strict=True)) == WHITE_TJA_XOR
     assert mazdacan.is_mads_white_hud(out)
 
-  @pytest.mark.parametrize("base", [LANE_VISIBLE_4361, LANE_VISIBLE_4102, COUNTER_1060, LANE_AHB_4122, COUNTER_4361_0060])
+  @pytest.mark.parametrize("base", [LANE_VISIBLE_4361, LANE_VISIBLE_4102, COUNTER_1060, LANE_AHB_4122, COUNTER_4361_0060, BIT2_4221_1040, BIT2_4221_1060])
   def test_lane_visible_bases_become_tja_only_white_after_stable_off(self, base):
     CC, CC_SP = self._controls(active=True)
     controller = self._controller()
