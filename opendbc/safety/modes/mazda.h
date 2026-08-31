@@ -195,6 +195,17 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
   }
 }
 
+static bool mazda_is_lka_addr(int addr) {
+  return (((unsigned int)addr == MAZDA_LKAS) || ((unsigned int)addr == MAZDA_LKAS_HUD));
+}
+
+// One sender per LKAS address, at frame granularity: the camera owns them while openpilot
+// controls neither axis (stock lane keep and dash LDW stay live), openpilot once either
+// axis engages. Either axis, not lateral alone: the controller still sends idle 0x243.
+static bool mazda_openpilot_controlling(void) {
+  return controls_allowed || controls_allowed_lateral;
+}
+
 static bool mazda_tx_hook(const CANPacket_t *msg) {
   // Envelope sized for the CX-5 2022+ EPS, which the controller commands up to (max_torque 1200,
   // driver_torque_multiplier 15 vs upstream stock 800/1). SafetyModel.mazda is per-brand and can't
@@ -230,6 +241,11 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     if (steer_torque_cmd_checks(desired_torque, -1, MAZDA_STEERING_LIMITS)) {
       tx = false;
     }
+  }
+
+  // keep after the steer checks, which reset rate-limit state on every disengaged frame
+  if (main_bus && mazda_is_lka_addr(msg->addr) && !mazda_openpilot_controlling()) {
+    tx = false;
   }
 
   if (mazda_longitudinal && long_replacement_bus && (msg->addr == MAZDA_CRZ_INFO)) {
@@ -312,6 +328,18 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   return tx;
 }
 
+static bool mazda_fwd_hook(int bus_num, int addr) {
+  bool block_msg = false;
+
+  if (bus_num == MAZDA_CAM) {
+    if (mazda_is_lka_addr(addr)) {
+      block_msg = mazda_openpilot_controlling();
+    }
+  }
+
+  return block_msg;
+}
+
 static safety_config mazda_init(uint16_t param) {
   mazda_engage_btn_frames = 0U;
   mazda_radar_mastered = false;
@@ -319,9 +347,9 @@ static safety_config mazda_init(uint16_t param) {
   mazda_radar_was_silenced = false;
 
   static const CanMsg MAZDA_TX_MSGS[] = {
-    {MAZDA_LKAS, 0, 8, .check_relay = true},
+    {MAZDA_LKAS, 0, 8, .check_relay = true, .disable_static_blocking = true},
     {MAZDA_CRZ_BTNS, 0, 8, .check_relay = false},
-    {MAZDA_LKAS_HUD, 0, 8, .check_relay = true},
+    {MAZDA_LKAS_HUD, 0, 8, .check_relay = true, .disable_static_blocking = true},
   };
 
   // The replaced-radar addresses stay check_relay = false on purpose: that mechanism is for
@@ -331,9 +359,9 @@ static safety_config mazda_init(uint16_t param) {
   // relay check would fault every boot. The two-master guard lives in carstate instead
   // (accFaulted on radar-came-back) plus the session manager's bounded re-silence.
   static const CanMsg MAZDA_LONG_TX_MSGS[] = {
-    {MAZDA_LKAS, 0, 8, .check_relay = true},
+    {MAZDA_LKAS, 0, 8, .check_relay = true, .disable_static_blocking = true},
     {MAZDA_CRZ_BTNS, 0, 8, .check_relay = false},
-    {MAZDA_LKAS_HUD, 0, 8, .check_relay = true},
+    {MAZDA_LKAS_HUD, 0, 8, .check_relay = true, .disable_static_blocking = true},
     {MAZDA_CRZ_INFO, 0, 8, .check_relay = false},
     {MAZDA_CRZ_CTRL, 0, 8, .check_relay = false},
     {MAZDA_RADAR_STATIC, 0, 8, .check_relay = false},
@@ -382,4 +410,5 @@ const safety_hooks mazda_hooks = {
   .init = mazda_init,
   .rx = mazda_rx_hook,
   .tx = mazda_tx_hook,
+  .fwd = mazda_fwd_hook,
 };

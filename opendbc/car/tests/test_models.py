@@ -308,7 +308,12 @@ class TestCarModelBase(unittest.TestCase):
 
     CC_SP = structs.CarControlSP()
 
-    def test_car_controller(car_control):
+    # Mazda relays the stock camera CAM_LKAS (0x243) and CAM_LANEINFO (0x440) while
+    # disengaged (mazda_fwd_hook). The tx hook drops the controller idle copies then
+    # (mazda_tx_hook), so those two are expected to be rejected in the disengaged passes below
+    disengaged_dropped_addrs = {0x243, 0x440} if self.CP.brand == "mazda" else set()
+
+    def test_car_controller(car_control, disengaged):
       now_nanos = 0
       msgs_sent = 0
       CI = self.CarInterface(controller_params, copy.deepcopy(self.CP_SP))
@@ -319,18 +324,21 @@ class TestCarModelBase(unittest.TestCase):
         msgs_sent += len(sendcan)
         for addr, dat, bus in sendcan:
           packet = libsafety_py.make_CANPacket(addr, bus % 4, dat)
-          self.assertTrue(self.safety.safety_tx_hook(packet), (addr, dat, bus))
+          if not disengaged or addr not in disengaged_dropped_addrs:
+            self.assertTrue(self.safety.safety_tx_hook(packet), (addr, dat, bus))
+          else:
+            self.assertFalse(self.safety.safety_tx_hook(packet), (addr, dat, bus))
       self.assertGreater(msgs_sent, 50)
 
-    test_car_controller(structs.CarControl().as_reader())
+    test_car_controller(structs.CarControl().as_reader(), disengaged=True)
 
     self.safety.set_cruise_engaged_prev(True)
     CC = structs.CarControl(cruiseControl=structs.CarControl.CruiseControl(cancel=True))
-    test_car_controller(CC.as_reader())
+    test_car_controller(CC.as_reader(), disengaged=True)
 
     self.safety.set_controls_allowed(True)
     CC = structs.CarControl(cruiseControl=structs.CarControl.CruiseControl(resume=True))
-    test_car_controller(CC.as_reader())
+    test_car_controller(CC.as_reader(), disengaged=False)
 
   @fuzzy_test(max_examples=300)
   def test_panda_safety_carstate_fuzzy(self, fuzzy):

@@ -13,7 +13,10 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
   TX_MSGS = [[0x243, 0], [0x09d, 0], [0x440, 0]]
   STANDSTILL_THRESHOLD = .1
   RELAY_MALFUNCTION_ADDRS = {0: (0x243, 0x440)}
-  FWD_BLACKLISTED_ADDRS = {2: [0x243, 0x440]}
+  # camera 0x243/0x440 frames forward while openpilot is not controlling
+  FWD_BLACKLISTED_ADDRS = {2: []}
+  STOCK_PASSTHROUGH_ADDRS = {2: [0x243, 0x440]}
+  ALLOW_DISENGAGED_STEER_TX = False
 
   MAX_RATE_UP = 12
   MAX_RATE_DOWN = 25
@@ -44,6 +47,10 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
   def _torque_cmd_msg(self, torque, steer_req=1):
     values = {"LKAS_REQUEST": torque}
     return self.packer.make_can_msg_safety("CAM_LKAS", 0, values)
+
+  def _laneinfo_msg(self):
+    values = {"LINE_VISIBLE": 0}
+    return self.packer.make_can_msg_safety("CAM_LANEINFO", 0, values)
 
   def _speed_msg(self, speed):
     values = {"SPEED": speed}
@@ -84,6 +91,22 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.safety.set_controls_allowed(1)
     self.assertTrue(self._tx(self._button_msg(cancel=True)))
     self.assertTrue(self._tx(self._button_msg(resume=True)))
+
+  def _passthrough_probe_msg(self, addr):
+    return self._torque_cmd_msg(0) if addr == 0x243 else self._laneinfo_msg()
+
+  def _set_engagement(self, controls_allowed, controls_allowed_lateral):
+    self.safety.set_controls_allowed(controls_allowed)
+    self.safety.set_controls_allowed_lateral(controls_allowed_lateral)
+
+  def _stock_passthrough_states(self):
+    # the camera owns 0x243/0x440 only while openpilot controls neither axis;
+    # engaging either axis hands the addresses to openpilot
+    return [
+      (True, lambda: self._set_engagement(False, False)),
+      (False, lambda: self._set_engagement(True, False)),
+      (False, lambda: self._set_engagement(False, True)),
+    ]
 
 
 class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafetyTest):
@@ -154,6 +177,17 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
       self._rx(self._pcm_status_msg(True))
       self.assertTrue(self.safety.get_controls_allowed(), btn)
       self._rx(self._pcm_status_msg(False))
+
+  def test_cancel_button_exits_controls(self):
+    self._press_set()
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    # the driver's cancel press always exits controls
+    self._rx(self._button_msg(cancel=True))
+    self.assertFalse(self.safety.get_controls_allowed())
+    # ACC_ACTIVE alone does not re-arm without a fresh button press
+    self._rx(self._pcm_status_msg(True))
+    self.assertFalse(self.safety.get_controls_allowed())
 
   def test_camera_bus_accel_actuation_limits(self):
     # the synthetic radar frames are duplicated onto the camera bus; same limits apply there
