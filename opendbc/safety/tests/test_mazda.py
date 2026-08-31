@@ -24,7 +24,10 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
   TX_MSGS = [[0x243, 0], [0x09d, 0], [0x440, 0]]
   STANDSTILL_THRESHOLD = .1
   RELAY_MALFUNCTION_ADDRS = {0: (0x243, 0x440)}
-  FWD_BLACKLISTED_ADDRS = {2: [0x243, 0x440]}
+  # camera 0x243/0x440 frames forward while openpilot is not controlling
+  FWD_BLACKLISTED_ADDRS = {2: []}
+  STOCK_PASSTHROUGH_ADDRS = {2: [0x243, 0x440]}
+  ALLOW_DISENGAGED_STEER_TX = False
 
   MAX_RATE_UP = 12
   MAX_RATE_DOWN = 25
@@ -57,6 +60,10 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
   def _torque_cmd_msg(self, torque, steer_req=1):
     values = {"LKAS_REQUEST": torque}
     return self.packer.make_can_msg_safety("CAM_LKAS", 0, values)
+
+  def _laneinfo_msg(self):
+    values = {"LINE_VISIBLE": 0}
+    return self.packer.make_can_msg_safety("CAM_LANEINFO", 0, values)
 
   def _speed_msg(self, speed):
     values = {"SPEED": speed}
@@ -464,6 +471,22 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     self.assertEqual(0, self.safety.get_mads_button_press())
     self.assertTrue(self.safety.get_controls_allowed_lateral())
 
+  def _passthrough_probe_msg(self, addr):
+    return self._torque_cmd_msg(0) if addr == 0x243 else self._laneinfo_msg()
+
+  def _set_engagement(self, controls_allowed, controls_allowed_lateral):
+    self.safety.set_controls_allowed(controls_allowed)
+    self.safety.set_controls_allowed_lateral(controls_allowed_lateral)
+
+  def _stock_passthrough_states(self):
+    # the camera owns 0x243/0x440 only while openpilot controls neither axis;
+    # engaging either axis hands the addresses to openpilot
+    return [
+      (True, lambda: self._set_engagement(False, False)),
+      (False, lambda: self._set_engagement(True, False)),
+      (False, lambda: self._set_engagement(False, True)),
+    ]
+
 
 class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafetyTest):
 
@@ -558,6 +581,17 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
         self.safety.set_controls_allowed(True)
         self.assertTrue(self._tx(msg))
 
+  def test_cancel_button_exits_controls(self):
+    self._press_set()
+    self._rx(self._pcm_status_msg(True))
+    self.assertTrue(self.safety.get_controls_allowed())
+    # the driver's cancel press always exits controls
+    self._rx(self._button_msg(cancel=True))
+    self.assertFalse(self.safety.get_controls_allowed())
+    # ACC_ACTIVE alone does not re-arm without a fresh button press
+    self._rx(self._pcm_status_msg(True))
+    self.assertFalse(self.safety.get_controls_allowed())
+
   def test_synthetic_lead_radar_track_allowed_disengaged(self):
     # DIST_OBJ and RELV_OBJ are free fields; the template bytes must match. The non-template
     # frames are real on-road emissions (route 6bb2dc61c4), which a byte-exact check silently
@@ -565,11 +599,11 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
     # perception, not actuation, so it flows with controls_allowed low the way a stock radar
     # reports objects with cruise off.
     lead_frames = [
-      "0a4000001dc00000",  # the fabricated stopped lead at 10.25 m
-      "229000007dc0000e",  # lead at 34.56 m, closing slowly
-      "22d000ff7dc00004",  # lead at 34.81 m, opening slowly
-      "000000001dc00000",  # zero range, zero relv corner
-      "fff000fffdc0000f",  # max range, max relv corner
+      "0a4e00001c000000",  # stopped lead at 10.25 m
+      "229e00007c00000e",  # lead at 34.56 m, closing slowly
+      "22de00ff7c000004",  # lead at 34.81 m, opening slowly
+      "000e00001c000000",  # zero range, zero relv corner (the template itself)
+      "fffe00fffc00000f",  # max range, max relv corner
     ]
     for bus in (0, 2):
       for hexdat in lead_frames:
@@ -622,12 +656,12 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
   def test_malformed_lead_radar_track_blocked(self):
     # each corrupts one template-owned field of a valid lead frame
     bad_frames = [
-      "229100007dc0000e",  # data[1] low nibble not zero
-      "229001007dc0000e",  # data[2] not zero
-      "229000007cc0000e",  # data[4] template bits wrong
-      "229000007dc1000e",  # data[5] wrong
-      "229000007dc0010e",  # data[6] not zero
-      "229000007dc0100e",  # data[7] high nibble not zero
+      "229100007c00000e",  # data[1] low nibble off the template
+      "229e01007c00000e",  # data[2] not zero
+      "229e00007d00000e",  # data[4] template bits wrong
+      "229e00007cc0000e",  # data[5] wrong -- the retired capture's empty-slot signature
+      "229e00007c00010e",  # data[6] not zero
+      "229e00007c00100e",  # data[7] high nibble not zero
     ]
     self.safety.set_controls_allowed(True)
     for bus in (0, 2):

@@ -235,6 +235,9 @@ class TorqueSteeringSafetyTestBase(SafetyTestBase, abc.ABC):
 
   NO_STEER_REQ_BIT = False
 
+  # False where the stock steering message is forwarded while disengaged (mazda_fwd_hook)
+  ALLOW_DISENGAGED_STEER_TX = True
+
   @classmethod
   def setUpClass(cls):
     if cls.__name__ == "TorqueSteeringSafetyTestBase":
@@ -284,7 +287,7 @@ class TorqueSteeringSafetyTestBase(SafetyTestBase, abc.ABC):
         for t in range(int(-max_torque * 1.5), int(max_torque * 1.5)):
           self.safety.set_controls_allowed(enabled)
           self._set_prev_torque(t)
-          if abs(t) > max_torque or (not enabled and abs(t) > 0):
+          if abs(t) > max_torque or (not enabled and (abs(t) > 0 or not self.ALLOW_DISENGAGED_STEER_TX)):
             self.assertFalse(self._tx(self._torque_cmd_msg(t)))
           else:
             self.assertTrue(self._tx(self._torque_cmd_msg(t)))
@@ -566,7 +569,7 @@ class MotorTorqueSteeringSafetyTest(TorqueSteeringSafetyTestBase, abc.ABC):
           if controls_allowed:
             send = (-max_torque <= torque <= max_torque)
           else:
-            send = torque == 0
+            send = torque == 0 and self.ALLOW_DISENGAGED_STEER_TX
 
           self.assertEqual(send, self._tx(self._torque_cmd_msg(torque)))
 
@@ -940,6 +943,9 @@ class SafetyTest(SafetyTestBase):
                    *range(0x18DB00F1, 0x18DC00F1, 0x100),   # 29-bit UDS functional addressing
                    *range(0x3300, 0x3400)]                  # Honda
   FWD_BLACKLISTED_ADDRS: dict[int, list[int]] = {}  # {bus: [addr]}
+  # stock addrs the stock ECU owns instead of openpilot in some states; opts the
+  # mode into test_stock_passthrough
+  STOCK_PASSTHROUGH_ADDRS: dict[int, list[int]] = {}  # {bus: [addr]}
   FWD_BUS_LOOKUP: dict[int, int] = {0: 2, 2: 0}
 
   @classmethod
@@ -967,6 +973,31 @@ class SafetyTest(SafetyTestBase):
         if bus in self.FWD_BLACKLISTED_ADDRS and addr in self.FWD_BLACKLISTED_ADDRS[bus]:
           fwd_bus = -1
         self.assertEqual(fwd_bus, self.safety.safety_fwd_hook(bus, addr), f"{addr=:#x} from {bus=} to {fwd_bus=}")
+
+  def test_stock_passthrough(self):
+    # one sender per address: the fwd hook forwards a stock passthrough addr only
+    # while the tx hook vetoes openpilot frames on it, and vice versa
+    if not self.STOCK_PASSTHROUGH_ADDRS:
+      return
+
+    for stock_active, setup in self._stock_passthrough_states():
+      setup()
+      for bus, addrs in self.STOCK_PASSTHROUGH_ADDRS.items():
+        for addr in addrs:
+          fwd_bus = self.FWD_BUS_LOOKUP[bus] if stock_active else -1
+          self.assertEqual(fwd_bus, self.safety.safety_fwd_hook(bus, addr), f"{addr=:#x} from {bus=} to {fwd_bus=}")
+          self.assertEqual(not stock_active, self._tx(self._passthrough_probe_msg(addr)), f"openpilot tx {addr=:#x}, stock_active={stock_active}")
+
+  def _stock_passthrough_states(self):
+    # (stock_active, setup) pairs. setup drives the gating state both hooks read;
+    # stock_active means the stock ECU owns the addrs: its frames forward and
+    # openpilot tx is vetoed
+    raise NotImplementedError
+
+  def _passthrough_probe_msg(self, addr: int):
+    # a clean openpilot frame on a passthrough addr; must pass the tx hook while
+    # openpilot owns the addr
+    raise NotImplementedError
 
   def test_spam_can_buses(self):
     for bus in range(4):

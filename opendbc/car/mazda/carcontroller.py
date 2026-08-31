@@ -488,9 +488,6 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.lead_adv.update(CC.hudControl.leadVisible, CC_SP.leadOne.dRel,
                          CC_SP.leadOne.vRel, sm.holding)
 
-    if sm.just_fell_back:
-      # the nudge did not move the body; drop it and let the fallback pulse run stock's shape
-      self.release_ramp = CarControllerParams.ACCEL_HOLD_LATCHED
     if sm.just_released:
       # the release command follows stock's shape, not a slew off the hold value: a
       # never-latched stop relax-jumps into the release band in one frame, a latched hold
@@ -514,8 +511,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         self.breakaway_frames = 0
       else:
         self.breakaway_frames += 1
-      breakaway = (CS.out.standstill and not sm.deferring_release and
-                   self.breakaway_frames <= BREAKAWAY_FRAMES)
+      breakaway = CS.out.standstill and self.breakaway_frames <= BREAKAWAY_FRAMES
       ramp_ceiling = max(accel, CarControllerParams.ACCEL_BREAKAWAY_MAX)
       if self.release_ramp is not None and (self.release_ramp < accel or breakaway):
         # the release owns the command until its ramp catches the plan: stock climbs
@@ -525,16 +521,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         # the corpus, and climbing against the still-latched hold is what the camera
         # faulted 90 ms into the pulse (route 00000115 t+381.3)
         accel = self.release_ramp
-        if sm.deferring_release:
-          # the nudge: a body-latched hold needs to be asked. Pinning at the hold value here
-          # changes nothing on the wire -- the command is already relaxed and the stop bits
-          # already dropped -- and the body sat through it (route 0000011d t+398.0). Climb
-          # into a small positive request instead, capped well under a lurch, and see whether
-          # the body releases on that alone. It is the only release signal left untried that
-          # does not involve the bit the camera latches on.
-          self.release_ramp = min(self.release_ramp + CarControllerParams.ACCEL_RELEASE_RAMP * DT_CTRL,
-                                  CarControllerParams.ACCEL_DEFER_NUDGE)
-        elif not (sm.latched_release and CS.brake_hold):
+        if not (sm.latched_release and CS.brake_hold):
           self.release_ramp = min(self.release_ramp + CarControllerParams.ACCEL_RELEASE_RAMP * DT_CTRL,
                                   ramp_ceiling)
       else:

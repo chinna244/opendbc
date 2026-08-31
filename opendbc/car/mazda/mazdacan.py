@@ -14,19 +14,31 @@ RADAR_TRACK_MSGS = {
   0x366: bytes.fromhex("fff7fe7ffbff3fc0"),
 }
 LEAD_TRACK_ADDR = 0x364
-# An occupied track slot, captured from a 0x764 radar holding a stopped lead at 10.25 m.
-# create_lead_track only rewrites DIST_OBJ and RELV_OBJ; the rest is the radar's track-valid
-# pattern, which is not understood well enough to synthesize.
-LEAD_TRACK_TEMPLATE = bytes.fromhex("0a4000001dc00000")
-LEAD_TRACK_DIST = 10.25   # m, the range LEAD_TRACK_TEMPLATE was captured at; not a control value
+# An occupied track slot's constant bytes, rebased on stock drive_0b's clean latched hold
+# release -- the one stock release with exactly our bus topology (lead in 0x364 alone, five
+# slots empty). Its status pair byte4/byte5 reads 1c/00 through the whole stop, unlatch and
+# drive-off; the old capture carried 1d/c0, and c0 in byte 5 is the empty-slot signature
+# (fff7fefe1fc00000), so every unlatch pulse went out over a track whose status bits read
+# half-invalid -- unattested in any of the 24 stock at-release occupied slots. (Route 132
+# then showed the old bytes were not the SCBS trigger -- the latch keyed on the CRZ_INFO
+# checksum, see crz_info_checksum -- but this template is the attested content and stays.) The
+# measurement fields are zeroed here because create_lead_track rewrites DIST_OBJ and
+# RELV_OBJ every frame; byte 2 wanders on a live radar but parks at zero in clean stock
+# releases too (drive_0e), so it stays fixed.
+LEAD_TRACK_TEMPLATE = bytes.fromhex("000e00001c000000")
 DIST_OBJ_SCALE = 0.0625   # m per bit, DIST_OBJ and RELV_OBJ share it
 DIST_OBJ_MAX = 255.875    # m, the full-scale DIST_OBJ reading a track can carry
 
 
 def crz_info_checksum(dat: bytes) -> int:
-  # Inverted sum of the first seven bytes; the radar leaves the STOPPING bit out of the
-  # sum. Verified against 1.94M stock frames, including every stop-bit frame.
-  return (0xFF - ((sum(dat[:7]) - (dat[5] & 0x04)) & 0xFF)) & 0xFF
+  # Inverted sum of the first seven bytes; the radar leaves both event bits out of the
+  # sum: STOPPING (byte 5) and RESUME_UNLATCHING (byte 6). Verified against 1.67M stock
+  # frames with zero mismatches, including all 9,681 stop-bit frames and all 269
+  # unlatch-pulse frames. Summing the unlatch bit made every pulse frame this port ever
+  # sent checksum-invalid by exactly 0x40 -- the camera latched the SCBS trio ~3 frames
+  # into each pulse (11/11 releases across every radar-content variant, route 132 closing
+  # the case) while the body, which does not validate the sum, still answered the pulse.
+  return (0xFF - ((sum(dat[:7]) - (dat[5] & 0x04) - (dat[6] & 0x40)) & 0xFF)) & 0xFF
 
 
 def create_acc_command(packer, bus, counter, accel, *, long_active, acc_available,

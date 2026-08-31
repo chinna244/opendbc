@@ -62,33 +62,16 @@ class CarControllerParams:
   # braking, a tuple stock never emits, and the camera latched SCBS 90 ms in
   # (route 00000053 t+714.8, second CX-5, with a real departing lead advertised)
   RESUME_UNLATCH_LATCHED_T = 0.18  # s, 9 wire frames, the latched-family mode
-  # The unlatch pulse is a last resort, not the release protocol. Of the 11 RESUME_UNLATCHING
-  # pulses this port has ever put on the wire, 8 went out to a healthy camera and all 8 latched
-  # the SCBS fault 80-90 ms in (routes 0000007e, 0000007f, 000000fe, 00000100, 00000103,
-  # 00000115, 00000118, 00000053); the other 3 hit a camera already faulted. There is no clean
-  # pulse anywhere in our history, across builds whose shape converged to a byte-level twin of
-  # a stock latched release.
-  #
-  # Across those 8 every candidate signal takes both values and still latches -- phase 0/2/3,
-  # RADAR_HAS_LEAD 0/1, ACC_ACTIVE_2 0/1, GEAR.BRAKE_HOLD 0/1 (4 latched-family, 4 not),
-  # longActive 0/1, lead 0.0-7.5 m. Seven rounds of matching stock's pulse grammar each found a
-  # deviation to fix and each was falsified by the next drive; the only invariant is the pulse.
-  # So the command relaxes first and the body is given this long to drop GEAR.BRAKE_HOLD on
-  # its own; the pulse only fires if it does not. Stock's never-latched blip is dropped
-  # outright: nothing is latched there, so it unlatches nothing.
-  # Route 0000011d proved the body will not let go on its own: the command is already at
-  # ACCEL_HOLD_LATCHED and the stop bits are already dropped during a body-latched hold, so a
-  # deferral that only withholds the pulse puts nothing new on the wire at all. The body sat
-  # through 300 ms of that silence and released 40 ms after the pulse finally fired. So the
-  # deferral now makes an actual request -- a small positive command, the one release signal
-  # we have never tried -- and only falls back to the pulse if the body ignores it too.
-  # The nudge gets a long window on purpose. Every second spent here is a second the camera is
-  # not being shown the one signal that has latched it 8 times out of 8, and the cost of
-  # waiting is only a slower drive-off -- the driver's pedal outranks the hold throughout. The
-  # 0.5 s this started at was sized against the *silent* deferral it replaced (route 0000011d,
-  # where nothing new went on the wire at all), not against a deferral that actually asks.
-  RESUME_PULSE_DEFER_T = 2.0       # s the nudge gets before we resort to the pulse
-  ACCEL_DEFER_NUDGE = 0.15         # m/s2, the release request made while the body still holds
+  # The pulse is the release protocol: the body answers nothing else. Deferring it behind
+  # silence (route 0000011d, 0.3 s) and behind a +0.15 m/s2 nudge (route 0000012c, 2.0 s,
+  # three latched stops) both left GEAR.BRAKE_HOLD untouched for the whole window, and the
+  # body then dropped it within 2-3 wire frames of the fallback pulse every time. So a
+  # latched release pulses immediately -- waiting only added dead time to every resume.
+  # Stock's never-latched blip stays dropped: nothing is latched there, so it unlatches
+  # nothing. The SCBS latch that used to key on the pulse (10 of 10 with a healthy camera,
+  # across builds up to a byte-level stock twin) is addressed on the radar side instead:
+  # every one of those pulses went out while the advertised lead track carried the
+  # empty-slot status signature (see LEAD_TRACK_TEMPLATE in mazdacan.py).
 
   CANCEL_CONTEXT_T = 0.5       # a wheel CANCEL keeps availability drops landing this long after release
 

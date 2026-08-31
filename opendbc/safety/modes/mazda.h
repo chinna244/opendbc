@@ -114,8 +114,8 @@ static bool mazda_synthetic_lead_radar_track_msg_valid(const CANPacket_t *msg) {
   // match it exactly. A byte-exact check here silently dropped every real-lead frame and
   // starved the camera of the track (route 6bb2dc61c4: 982 asked, 0 transmitted).
   return (msg->addr == MAZDA_RADAR_TRACK_4) &&
-         ((msg->data[1] & 0x0fU) == 0x00U) && (msg->data[2] == 0x00U) &&
-         ((msg->data[4] & 0x1fU) == 0x1dU) && (msg->data[5] == 0xc0U) &&
+         ((msg->data[1] & 0x0fU) == 0x0eU) && (msg->data[2] == 0x00U) &&
+         ((msg->data[4] & 0x1fU) == 0x1cU) && (msg->data[5] == 0x00U) &&
          (msg->data[6] == 0x00U) && ((msg->data[7] & 0xf0U) == 0x00U);
 }
 
@@ -223,6 +223,17 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
   }
 }
 
+static bool mazda_is_lka_addr(int addr) {
+  return (((unsigned int)addr == MAZDA_LKAS) || ((unsigned int)addr == MAZDA_LKAS_HUD));
+}
+
+// One sender per LKAS address, at frame granularity: the camera owns them while openpilot
+// controls neither axis (stock lane keep and dash LDW stay live), openpilot once either
+// axis engages. Either axis, not lateral alone: the controller still sends idle 0x243.
+static bool mazda_openpilot_controlling(void) {
+  return controls_allowed || controls_allowed_lateral;
+}
+
 static bool mazda_tx_hook(const CANPacket_t *msg) {
   // Lateral envelope follows STEER_TO_ZERO in safetyParam, independently of TJA_MADS.
   const TorqueSteeringLimits MAZDA_STEERING_LIMITS_HIGH = {
@@ -265,6 +276,11 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     if (steer_torque_cmd_checks(desired_torque, -1, limits)) {
       tx = false;
     }
+  }
+
+  // keep after the steer checks, which reset rate-limit state on every disengaged frame
+  if (main_bus && mazda_is_lka_addr(msg->addr) && !mazda_openpilot_controlling()) {
+    tx = false;
   }
 
   if (mazda_longitudinal && long_replacement_bus && (msg->addr == MAZDA_CRZ_INFO)) {
@@ -354,21 +370,33 @@ static void mazda_fwd_modify(int bus_num, CANPacket_t *msg) {
   }
 }
 
+static bool mazda_fwd_hook(int bus_num, int addr) {
+  bool block_msg = false;
+
+  if (bus_num == MAZDA_CAM) {
+    if (mazda_is_lka_addr(addr)) {
+      block_msg = mazda_openpilot_controlling();
+    }
+  }
+
+  return block_msg;
+}
+
 static safety_config mazda_init(uint16_t param) {
   mazda_engage_btn_frames = 0U;
   mazda_radar_mastered = false;
   mazda_mastered_pedals_frames = 0U;
   mazda_radar_was_silenced = false;
   static const CanMsg MAZDA_TX_MSGS[] = {
-    {MAZDA_LKAS, 0, 8, .check_relay = true},
+    {MAZDA_LKAS, 0, 8, .check_relay = true, .disable_static_blocking = true},
     {MAZDA_CRZ_BTNS, 0, 8, .check_relay = false},
-    {MAZDA_LKAS_HUD, 0, 8, .check_relay = true},
+    {MAZDA_LKAS_HUD, 0, 8, .check_relay = true, .disable_static_blocking = true},
   };
 
   static const CanMsg MAZDA_LONG_TX_MSGS[] = {
-    {MAZDA_LKAS, 0, 8, .check_relay = true},
+    {MAZDA_LKAS, 0, 8, .check_relay = true, .disable_static_blocking = true},
     {MAZDA_CRZ_BTNS, 0, 8, .check_relay = false},
-    {MAZDA_LKAS_HUD, 0, 8, .check_relay = true},
+    {MAZDA_LKAS_HUD, 0, 8, .check_relay = true, .disable_static_blocking = true},
     {MAZDA_CRZ_INFO, 0, 8, .check_relay = false},
     {MAZDA_CRZ_CTRL, 0, 8, .check_relay = false},
     {MAZDA_RADAR_STATIC, 0, 8, .check_relay = false},
@@ -424,4 +452,5 @@ const safety_hooks mazda_hooks = {
   .rx = mazda_rx_hook,
   .tx = mazda_tx_hook,
   .fwd_modify = mazda_fwd_modify,
+  .fwd = mazda_fwd_hook,
 };
