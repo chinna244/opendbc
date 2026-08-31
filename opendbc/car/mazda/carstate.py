@@ -27,6 +27,8 @@ class CarState(CarStateBase, CarStateExt):
     self.crz_btns_counter = 0
     self.acc_active_last = False
     self.lkas_allowed_speed = False
+    self.lkas_blocked = False
+    self.lkas_effective = 0
 
     self.distance_button = 0
     # Either wheel gap button. distance_button stays DISTANCE_LESS for gap-adjust
@@ -139,6 +141,13 @@ class CarState(CarStateBase, CarStateExt):
 
     # Either due to low speed or hands off
     lkas_blocked = cp.vl["STEER_RATE"]["LKAS_BLOCK"] == 1
+
+    # What the EPS actually applied, as it reports it. The carcontroller uses this to tell a
+    # block that costs us nothing (4-8 m/s: the EPS still delivers a third to a half of the
+    # request) from one that costs us everything (below ~4 m/s: it delivers exactly zero), which
+    # LKAS_BLOCK alone cannot distinguish. See the non-delivery latch in carcontroller.py.
+    self.lkas_blocked = lkas_blocked
+    self.lkas_effective = cp.vl["STEER_RATE"]["LKAS_EFFECTIVE"]
 
     if self.CP.minSteerSpeed > 0:
       # LKAS is enabled at 52kph going up and disabled at 45kph going down

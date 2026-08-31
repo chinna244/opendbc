@@ -168,10 +168,11 @@ class StandstillHold:
       self.unlatch_frames -= 1
     # one pulse per release, exactly as stock: never restarted while one is still playing.
     # The pulse is the ACC's resume protocol, not the driver's: stock's captured gas-ended
-    # hold drops the stop bits with no pulse at all (the pedal is the resume authority), and
-    # pulsing there with the override's zeroed command latched an SCBS fault (route 00000103
-    # t+163.8; if that fault ever recurs on a gas release, the command side is the next
-    # candidate -- stock's steps positive off the pedal where ours holds the override zero)
+    # hold drops the stop bits with no pulse at all, the pedal being the resume authority.
+    # (Suppressing it here was also an SCBS workaround -- route 00000103 t+163.8 latched on
+    # a gas release -- and that half is obsolete now the checksum is fixed. What is left is
+    # one stock capture, so if a gassed-out latched hold is ever slow to let go, this is the
+    # first thing to revisit: the body answers nothing but the pulse, route 0000011d.)
     if was_holding and not self.holding and standstill and not gas_pressed and self.unlatch_frames == 0:
       # car_has_hold still carries last frame's value here: whether the body owned the brakes
       # going into this release tells us whether there is anything to unlatch at all. A
@@ -256,8 +257,8 @@ class AdvertisedLead:
       self._measured = None
     elif self._measured is not None:
       # propagate through the gap rather than repeating one frozen frame; a stock radar
-      # re-measures every track every 100 ms, and a frozen range with the car moving is the
-      # camera's proven SCBS trigger (create_lead_track's docstring)
+      # re-measures every track every 100 ms, and a frozen range with the car moving is
+      # content no radar ever emits (create_lead_track's docstring)
       d, v = self._measured
       self._measured = (d + v * DT_CTRL, v)
     self.real_lead = self._measured if self.visible else None

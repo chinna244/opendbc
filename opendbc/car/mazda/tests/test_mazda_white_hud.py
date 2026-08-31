@@ -342,6 +342,8 @@ class TestWhiteHudController:
       decel_button=0,
       mrcc_button=0,
       lkas_allowed_speed=True,
+      lkas_blocked=False,
+      lkas_effective=0,
     )
     for name, value in overrides.items():
       setattr(cs, name, value)
