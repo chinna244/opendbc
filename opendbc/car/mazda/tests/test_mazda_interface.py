@@ -1,4 +1,4 @@
-import pytest
+import unittest
 
 from opendbc.car import structs
 from opendbc.car.common.conversions import Conversions as CV
@@ -26,7 +26,7 @@ def _params(candidate, car_fw=None, alpha_long=False):
                                  alpha_long, is_release=False, docs=False)
 
 
-class TestMazdaEpsSwap:
+class TestMazdaEpsSwap(unittest.TestCase):
   """A 2022+ CX-5 EPS swapped into an older Mazda brings the EPS-derived behavior with it.
 
   Pre-2022 Mazdas are dashcam only because their EPS locks steering out after ~5 s hands-off
@@ -36,62 +36,63 @@ class TestMazdaEpsSwap:
 
   def test_stock_older_mazda_is_dashcam_only(self):
     CP = _params(CAR.MAZDA_CX5, _eps_fw(STOCK_CX5_EPS_FW))
-    assert CP.dashcamOnly
-    assert CP.minSteerSpeed == pytest.approx(LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS)
-    assert CP.steerActuatorDelay == pytest.approx(0.1)
+    self.assertTrue(CP.dashcamOnly)
+    self.assertAlmostEqual(CP.minSteerSpeed, LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS)
+    self.assertAlmostEqual(CP.steerActuatorDelay, 0.1)
 
   def test_swapped_eps_lifts_dashcam_and_the_speed_floor(self):
     CP = _params(CAR.MAZDA_CX5, _eps_fw(SWAPPED_EPS_FW))
-    assert not CP.dashcamOnly
-    assert CP.minSteerSpeed == 0
-    assert CP.steerActuatorDelay == pytest.approx(0.14)
+    self.assertFalse(CP.dashcamOnly)
+    self.assertEqual(CP.minSteerSpeed, 0)
+    self.assertAlmostEqual(CP.steerActuatorDelay, 0.14)
 
   def test_swapped_eps_does_not_unlock_longitudinal(self):
     # the radar and camera are not part of an EPS swap, and this car keeps its own pre-2022 pair
     CP = _params(CAR.MAZDA_CX5, _eps_fw(SWAPPED_EPS_FW), alpha_long=True)
-    assert not CP.alphaLongitudinalAvailable
-    assert not CP.openpilotLongitudinalControl
+    self.assertFalse(CP.alphaLongitudinalAvailable)
+    self.assertFalse(CP.openpilotLongitudinalControl)
 
   def test_swapped_eps_keeps_the_real_vehicle_specs(self):
     # the whole point of fixing detection is that the user no longer forces MAZDA_CX5_2022 and
     # inherits its mass, steer ratio and tire stiffness
     swapped = _params(CAR.MAZDA_CX5, _eps_fw(SWAPPED_EPS_FW))
     cx5_2022 = _params(CAR.MAZDA_CX5_2022)
-    assert swapped.mass != cx5_2022.mass
-    assert swapped.steerRatio != cx5_2022.steerRatio
-    assert swapped.tireStiffnessFactor != cx5_2022.tireStiffnessFactor
+    self.assertNotEqual(swapped.mass, cx5_2022.mass)
+    self.assertNotEqual(swapped.steerRatio, cx5_2022.steerRatio)
+    self.assertNotEqual(swapped.tireStiffnessFactor, cx5_2022.tireStiffnessFactor)
 
   def test_supported_platforms_are_unchanged(self):
     cx5_2022 = _params(CAR.MAZDA_CX5_2022)
-    assert not cx5_2022.dashcamOnly
-    assert cx5_2022.minSteerSpeed == 0
-    assert cx5_2022.steerActuatorDelay == pytest.approx(0.14)
-    assert cx5_2022.alphaLongitudinalAvailable
+    self.assertFalse(cx5_2022.dashcamOnly)
+    self.assertEqual(cx5_2022.minSteerSpeed, 0)
+    self.assertAlmostEqual(cx5_2022.steerActuatorDelay, 0.14)
+    self.assertTrue(cx5_2022.alphaLongitudinalAvailable)
 
     # the CX-9 2021 is supported without the CX-5 EPS, so it keeps the 45 kph floor
     cx9_2021 = _params(CAR.MAZDA_CX9_2021)
-    assert not cx9_2021.dashcamOnly
-    assert cx9_2021.minSteerSpeed == pytest.approx(LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS)
-    assert cx9_2021.steerActuatorDelay == pytest.approx(0.1)
+    self.assertFalse(cx9_2021.dashcamOnly)
+    self.assertAlmostEqual(cx9_2021.minSteerSpeed, LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS)
+    self.assertAlmostEqual(cx9_2021.steerActuatorDelay, 0.1)
 
   def test_docs_are_generated_without_firmware(self):
     # car_fw is empty when building CARS.md, so the docs must keep advertising dashcam mode
     for candidate in (CAR.MAZDA_CX5, CAR.MAZDA_CX9, CAR.MAZDA_3, CAR.MAZDA_6):
-      CP = CarInterface.get_params(candidate, {0: {}, 1: {}, 2: {}}, [], False,
-                                   is_release=False, docs=True)
-      assert CP.dashcamOnly, candidate
+      with self.subTest(candidate=candidate):
+        CP = CarInterface.get_params(candidate, {0: {}, 1: {}, 2: {}}, [], False,
+                                     is_release=False, docs=True)
+        self.assertTrue(CP.dashcamOnly)
 
   def test_steer_to_zero_safety_param_follows_eps(self):
     flag = MazdaSafetyFlags.STEER_TO_ZERO.value
-    assert _params(CAR.MAZDA_CX5_2022).safetyConfigs[0].safetyParam & flag
-    assert _params(CAR.MAZDA_CX5, _eps_fw(SWAPPED_EPS_FW)).safetyConfigs[0].safetyParam & flag
-    assert not (_params(CAR.MAZDA_CX5, _eps_fw(STOCK_CX5_EPS_FW)).safetyConfigs[0].safetyParam & flag)
-    assert not (_params(CAR.MAZDA_CX9_2021).safetyConfigs[0].safetyParam & flag)
+    self.assertTrue(_params(CAR.MAZDA_CX5_2022).safetyConfigs[0].safetyParam & flag)
+    self.assertTrue(_params(CAR.MAZDA_CX5, _eps_fw(SWAPPED_EPS_FW)).safetyConfigs[0].safetyParam & flag)
+    self.assertFalse(_params(CAR.MAZDA_CX5, _eps_fw(STOCK_CX5_EPS_FW)).safetyConfigs[0].safetyParam & flag)
+    self.assertFalse(_params(CAR.MAZDA_CX9_2021).safetyConfigs[0].safetyParam & flag)
 
   def test_tja_mads_is_cx5_2022_only(self):
     flag = MazdaSafetyFlags.TJA_MADS.value
-    assert _params(CAR.MAZDA_CX5_2022).safetyConfigs[0].safetyParam & flag
+    self.assertTrue(_params(CAR.MAZDA_CX5_2022).safetyConfigs[0].safetyParam & flag)
     # An EPS swap does not prove the same TJA button / CRZ_BTNS layout.
-    assert not (_params(CAR.MAZDA_CX5, _eps_fw(SWAPPED_EPS_FW)).safetyConfigs[0].safetyParam & flag)
-    assert not (_params(CAR.MAZDA_CX9_2021).safetyConfigs[0].safetyParam & flag)
-    assert not (_params(CAR.MAZDA_CX5, _eps_fw(STOCK_CX5_EPS_FW)).safetyConfigs[0].safetyParam & flag)
+    self.assertFalse(_params(CAR.MAZDA_CX5, _eps_fw(SWAPPED_EPS_FW)).safetyConfigs[0].safetyParam & flag)
+    self.assertFalse(_params(CAR.MAZDA_CX9_2021).safetyConfigs[0].safetyParam & flag)
+    self.assertFalse(_params(CAR.MAZDA_CX5, _eps_fw(STOCK_CX5_EPS_FW)).safetyConfigs[0].safetyParam & flag)
