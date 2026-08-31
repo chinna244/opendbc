@@ -3,7 +3,7 @@ import unittest
 import pytest
 from opendbc.can import CANPacker
 
-from opendbc.car import DT_CTRL, gen_empty_fingerprint
+from opendbc.car import DT_CTRL, gen_empty_fingerprint, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams
@@ -484,3 +484,117 @@ class TestCruiseStandstill(unittest.TestCase):
   def test_still_reported_with_stock_longitudinal(self):
     # stock long still needs it: it is what drives CC.cruiseControl.resume in controlsd
     self.assertTrue(self._standstill(alpha_long=False))
+
+
+class TestTjaMrccStartupLatch:
+  """CarState remembers a TJA-caused MRCC arm while card is not applying."""
+
+  @staticmethod
+  def _feed(CI, packer, t, *, acc_off=0, acc_active=0, tja=0, bit1=1, n=2):
+    pedals = packer.make_can_msg("PEDALS", 0, {"ACC_OFF": acc_off, "ACC_ACTIVE": acc_active})
+    crz = packer.make_can_msg("CRZ_BTNS", 0, {
+      "TJA_BUTTON": tja, "BIT1": bit1, "BIT1_INV": 1 - bit1,
+    })
+    msgs = [(pedals[0], pedals[1], 0), (crz[0], crz[1], 0)]
+    for i in range(n):
+      CI.update([(int((t + i) * DT_CTRL * 1e9), msgs)])
+    return t + n
+
+  def test_drive31_tja_then_arm_latches_for_first_apply(self):
+    CI = _interface(alpha_long=False)
+    packer = CANPacker("mazda_2017")
+    t = self._feed(CI, packer, 0, acc_off=0, acc_active=0, tja=0)
+    assert CI.CS.pedals_seen
+    assert CI.CS.tja_mrcc_saw_raw_off
+    assert not CI.CS.mrcc_armed_raw
+    t = self._feed(CI, packer, t, acc_off=0, acc_active=0, tja=1)
+    assert CI.CS.tja_mrcc_awaiting_arm
+    assert not CI.CS.tja_mrcc_side_effect_pending
+    self._feed(CI, packer, t, acc_off=1, acc_active=0, tja=1)
+    assert CI.CS.mrcc_armed_raw
+    assert CI.CS.tja_mrcc_side_effect_pending
+    assert not CI.CS.tja_mrcc_awaiting_arm
+
+  def test_boot_mrcc_on_without_tja_does_not_latch(self):
+    CI = _interface(alpha_long=False)
+    packer = CANPacker("mazda_2017")
+    self._feed(CI, packer, 0, acc_off=1, acc_active=0, tja=0)
+    assert CI.CS.mrcc_armed_raw
+    assert CI.CS.pedals_seen
+    assert not CI.CS.tja_mrcc_saw_raw_off
+    assert not CI.CS.tja_mrcc_side_effect_pending
+    assert not CI.CS.tja_mrcc_awaiting_arm
+
+  def test_tja_while_already_armed_does_not_latch(self):
+    CI = _interface(alpha_long=False)
+    packer = CANPacker("mazda_2017")
+    t = self._feed(CI, packer, 0, acc_off=0, acc_active=0, tja=0)
+    t = self._feed(CI, packer, t, acc_off=1, acc_active=0, tja=0)
+    self._feed(CI, packer, t, acc_off=1, acc_active=0, tja=1)
+    assert CI.CS.mrcc_armed_raw
+    assert not CI.CS.tja_mrcc_side_effect_pending
+    assert not CI.CS.tja_mrcc_awaiting_arm
+
+  def test_tja_before_pedals_seen_is_not_ownership(self):
+    CI = _interface(alpha_long=False)
+    packer = CANPacker("mazda_2017")
+    crz_idle = packer.make_can_msg("CRZ_BTNS", 0, {"TJA_BUTTON": 0, "BIT1": 1, "BIT1_INV": 0})
+    crz_tja = packer.make_can_msg("CRZ_BTNS", 0, {"TJA_BUTTON": 1, "BIT1": 1, "BIT1_INV": 0})
+    CI.update([(0, [(crz_idle[0], crz_idle[1], 0)])])
+    CI.update([(int(DT_CTRL * 1e9), [(crz_tja[0], crz_tja[1], 0)])])
+    CI.update([(int(2 * DT_CTRL * 1e9), [(crz_tja[0], crz_tja[1], 0)])])
+    assert not CI.CS.pedals_seen
+    assert not CI.CS.tja_mrcc_saw_raw_off
+    assert not CI.CS.tja_mrcc_awaiting_arm
+    assert not CI.CS.tja_mrcc_side_effect_pending
+
+  def test_physical_mrcc_clears_pending_latch(self):
+    CI = _interface(alpha_long=False)
+    packer = CANPacker("mazda_2017")
+    t = self._feed(CI, packer, 0, acc_off=0, acc_active=0, tja=0)
+    t = self._feed(CI, packer, t, acc_off=0, acc_active=0, tja=1)
+    t = self._feed(CI, packer, t, acc_off=1, acc_active=0, tja=1)
+    assert CI.CS.tja_mrcc_side_effect_pending
+    self._feed(CI, packer, t, acc_off=1, acc_active=0, tja=0, bit1=0)
+    assert not CI.CS.tja_mrcc_side_effect_pending
+    assert not CI.CS.tja_mrcc_awaiting_arm
+
+
+class TestDistanceButtonActive:
+  """DISTANCE_MORE is physical CRZ_BTNS activity; gap-adjust stays DISTANCE_LESS-only."""
+
+  @staticmethod
+  def _feed(CI, packer, t, *, less=0, more=0):
+    msg = packer.make_can_msg("CRZ_BTNS", 0, {
+      "DISTANCE_LESS": less, "DISTANCE_MORE": more, "BIT1": 1, "BIT1_INV": 0,
+    })
+    ret, _ = CI.update([(int(t * DT_CTRL * 1e9), [(msg[0], msg[1], 0)])])
+    return ret
+
+  def test_distance_more_is_activity_not_gap_adjust(self):
+    CI = _interface(alpha_long=False)
+    packer = CANPacker("mazda_2017")
+    self._feed(CI, packer, 0, less=0, more=0)
+    ret = self._feed(CI, packer, 1, less=0, more=1)
+    assert CI.CS.distance_button == 0
+    assert CI.CS.distance_button_active == 1
+    assert not any(be.type == structs.CarState.ButtonEvent.Type.gapAdjustCruise
+                   for be in ret.buttonEvents)
+
+  def test_distance_less_is_gap_adjust_and_activity(self):
+    CI = _interface(alpha_long=False)
+    packer = CANPacker("mazda_2017")
+    self._feed(CI, packer, 0, less=0, more=0)
+    ret = self._feed(CI, packer, 1, less=1, more=0)
+    assert CI.CS.distance_button == 1
+    assert CI.CS.distance_button_active == 1
+    assert any(be.type == structs.CarState.ButtonEvent.Type.gapAdjustCruise and be.pressed
+               for be in ret.buttonEvents)
+
+  def test_both_distance_buttons_idle_is_not_activity(self):
+    CI = _interface(alpha_long=False)
+    packer = CANPacker("mazda_2017")
+    self._feed(CI, packer, 0, less=0, more=0)
+    self._feed(CI, packer, 1, less=0, more=0)
+    assert CI.CS.distance_button == 0
+    assert CI.CS.distance_button_active == 0

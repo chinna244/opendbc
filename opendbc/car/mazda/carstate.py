@@ -29,6 +29,9 @@ class CarState(CarStateBase, CarStateExt):
     self.lkas_allowed_speed = False
 
     self.distance_button = 0
+    # Either wheel gap button. distance_button stays DISTANCE_LESS for gap-adjust
+    # events; this OR is only the physical-activity signal for CRZ_BTNS ownership.
+    self.distance_button_active = 0
     self.accel_button = 0
     self.decel_button = 0
     self.cancel_button = 0
@@ -46,6 +49,13 @@ class CarState(CarStateBase, CarStateExt):
     # cruise_available, this must reflect an accepted MRCC-off tap while the brake is
     # held so a second TJA press does not mistake the cached state for pre-armed MRCC.
     self.mrcc_armed_raw = False
+    # card does not apply CarController during selfdriveInitializing. Remember a
+    # positively observed TJA-caused MRCC arm so the first apply can still clean it
+    # up. mrcc_armed_raw starts False; that default is not an observed OFF.
+    self.pedals_seen = False
+    self.tja_mrcc_saw_raw_off = False
+    self.tja_mrcc_awaiting_arm = False
+    self.tja_mrcc_side_effect_pending = False
     self.cruise_enabled_blocked = True
     self.brake_pressed_prev = False
     self.stock_radar_silent_frames = 0
@@ -142,7 +152,11 @@ class CarState(CarStateBase, CarStateExt):
 
     acc_armed = cp.vl["PEDALS"]["ACC_OFF"] == 1
     acc_active = cp.vl["PEDALS"]["ACC_ACTIVE"] == 1
+    if len(cp.vl_all["PEDALS"]["ACC_OFF"]) > 0:
+      self.pedals_seen = True
     self.mrcc_armed_raw = acc_armed or acc_active
+    if self.pedals_seen and not self.mrcc_armed_raw:
+      self.tja_mrcc_saw_raw_off = True
 
     # CAM_LANEINFO freshness, same shape as stock_radar_silent_frames below: before the
     # first frame the parser reads all-zero, and through a camera dropout it repeats stale
@@ -312,6 +326,9 @@ class CarState(CarStateBase, CarStateExt):
     prev_main_button = self.main_button
     prev_tja_button = self.tja_button
     self.distance_button = cp.vl["CRZ_BTNS"]["DISTANCE_LESS"]
+    self.distance_button_active = int(
+      self.distance_button == 1 or cp.vl["CRZ_BTNS"]["DISTANCE_MORE"] == 1
+    )
     # On CX-5 2022 the wheel "+" button toggles SET_P (not RES); RES is the resume button.
     # Verified against route 0000019c--84a5408a38 seg2/3: holding "+" emits SET_P=1, body ECU increments CRZ_SPEED.
     self.accel_button = cp.vl["CRZ_BTNS"]["SET_P"]
@@ -328,6 +345,22 @@ class CarState(CarStateBase, CarStateExt):
     # updates this; a 0 here is the wheel, not our synthetic MRCC-off frame.
     self.mrcc_button = int(cp.vl["CRZ_BTNS"]["BIT1"] == 0)
     self.main_button = int(self.mode_x and self.mode_y)
+
+    # Latch a TJA-caused MRCC arm even while CarController is not applying
+    # (selfdriveInitializing). Require an observed PEDALS OFF, then a TJA rising
+    # edge, then MRCC ON. Boot MRCC-on with no TJA must not set this.
+    if has_tja_mads(self.CP):
+      tja_pressed = self.tja_button == 1 and prev_tja_button == 0
+      if tja_pressed:
+        self.tja_mrcc_awaiting_arm = bool(
+          self.pedals_seen and self.tja_mrcc_saw_raw_off and not self.mrcc_armed_raw
+        )
+      if self.tja_mrcc_awaiting_arm and self.mrcc_armed_raw:
+        self.tja_mrcc_side_effect_pending = True
+        self.tja_mrcc_awaiting_arm = False
+      if self.mrcc_button:
+        self.tja_mrcc_side_effect_pending = False
+        self.tja_mrcc_awaiting_arm = False
 
     # TJA_MADS: physical TJA is the only MADS toggle (ButtonType.lkas). MODE_X/Y are
     # copied onto OP CRZ_BTNS TX but must not emit ButtonType.mainCruise.
@@ -351,7 +384,11 @@ class CarState(CarStateBase, CarStateExt):
 
   @staticmethod
   def get_can_parsers(CP, CP_SP):
-    pt_messages = []
+    pt_messages = [
+      # vl_all has no lazy registration. The TJA->MRCC init latch must distinguish
+      # a real PEDALS sample from the parser's all-zero default.
+      ("PEDALS", float("nan")),
+    ]
     if CP.openpilotLongitudinalControl:
       # no liveness checks: the stock frame is expected to disappear after the radar
       # teardown (its presence is what the two-master guard watches for), and the UDS
