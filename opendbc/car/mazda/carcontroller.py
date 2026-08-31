@@ -29,6 +29,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       raise NotImplementedError(f"unsupported platform: {CP.carFingerprint}")
     self.params = CarControllerParams(CP)
     self.apply_torque_last = 0
+    self.steer_undelivered_frames = 0
+    self.steer_undelivered = False
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.brake_counter = 0
     self.stop_and_go = StandstillHold()
@@ -73,6 +75,38 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
       apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
                                                       CS.out.steeringTorque, self.params, steer_max)
+
+    # Non-delivery latch (values.py STEER_UNDELIVERED_*): once we have watched the EPS apply
+    # exactly nothing to a real request, stop sending it. The camera latches ERR_BIT_1 on a
+    # budget of requests that go nowhere, and the rate limiter's 12/frame walk to saturation
+    # spends that budget fast while the wheel does not move.
+    #
+    # The latch releases on LKAS_BLOCK rather than on delivery returning, because once we are
+    # sending zero there is no request left to observe delivery of -- keying the exit off our
+    # own output would ramp back into the block and limit-cycle. The block bit is the EPS's own
+    # statement that it is accepting LKAS again, and the entry condition already established
+    # that this particular block is total.
+    if hasattr(self.params, 'STEER_UNDELIVERED_FRAMES'):
+      if not CS.lkas_blocked:
+        self.steer_undelivered_frames = 0
+        self.steer_undelivered = False
+      elif not self.steer_undelivered:
+        # steeringPressed is excluded because a driver holding the wheel is a legitimate reason
+        # for the EPS to withhold torque, and apply_driver_steer_torque_limits is already
+        # unwinding the command in that case
+        if (CC.latActive and not CS.out.steeringPressed and CS.lkas_effective == 0 and
+            abs(apply_torque) > self.params.STEER_UNDELIVERED_MIN):
+          self.steer_undelivered_frames += 1
+          self.steer_undelivered = self.steer_undelivered_frames >= self.params.STEER_UNDELIVERED_FRAMES
+        else:
+          self.steer_undelivered_frames = 0
+
+      if self.steer_undelivered:
+        # apply_torque_last follows below, so delivery coming back ramps from zero at
+        # STEER_DELTA_UP (~0.8 s to full) instead of stepping into a request the EPS has
+        # not seen. That is the cost of the latch, and it is paid in the speed range where
+        # the EPS was applying nothing anyway.
+        apply_torque = 0
 
     # Under op-long, controlsd raises cancel whenever cruiseState.enabled has no matching
     # CC.enabled (pcmCruise). While the stock radar still owns the bus -- the pre-teardown

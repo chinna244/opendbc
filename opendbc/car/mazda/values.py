@@ -197,6 +197,24 @@ class CarControllerParams:
       # winds up to be paid back as overshoot on release.
       self.EPS_CEILING_LOOKUP = ([8.0, 8.5, 9.4, 10.3, 11.2, 12.1, 13.0, 13.9, 14.5],
                                  [1148, 1132, 1092, 1048, 1012,  920,  808,  676,  620])
+
+      # Non-delivery latch: stop commanding LKAS the EPS is not applying. The camera counts
+      # requests, not effect, and latches CAM_LKAS.ERR_BIT_1 ("LKAS Fault: Restart the Car",
+      # steerFaultPermanent) once enough of them go nowhere -- route 00000139 seg 14, after
+      # ~60 s cumulative of request-with-no-effect over one ignition cycle, on the 14th
+      # blocked wind-up of the drive. The wind-up itself is normal: MADS lateral saturates
+      # through a slow tight turn, the rate limiter walks 12/frame to ~1000, and below ~4 m/s
+      # LKAS_BLOCK means the EPS delivers exactly zero.
+      #
+      # Detect it from LKAS_EFFECTIVE rather than from LKAS_BLOCK, because the block is not
+      # all-or-nothing: above ~4 m/s a blocked EPS still delivers a third to a half of the
+      # request (median eff/req 0.35-0.45), and gating on the bit alone would throw that away.
+      # Zero delivery separates cleanly from normal operation -- across 96k unblocked frames
+      # with |request| > 200 the longest run of LKAS_EFFECTIVE == 0 is 2 frames, while blocked
+      # runs reach 183 -- so 20 frames sits an order of magnitude clear of both sides.
+      # Derivation: tools/mazda_long/analyze_lkas_nondelivery.py.
+      self.STEER_UNDELIVERED_MIN = 200      # counts; below this the EPS rounds to zero anyway
+      self.STEER_UNDELIVERED_FRAMES = 20    # 200 ms at 100 Hz
     else:
       self.STEER_MAX = 800         # theoretical max_steer 2047
       self.STEER_DELTA_UP = 10

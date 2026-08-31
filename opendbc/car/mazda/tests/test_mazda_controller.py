@@ -120,8 +120,20 @@ class TestCarControllerParams(unittest.TestCase):
   def test_no_eps_no_lookup(self):
     pre_2022_params = _pre_2022_params()
     self.assertFalse(hasattr(pre_2022_params, 'STEER_MAX_LOOKUP'))
+    self.assertFalse(hasattr(pre_2022_params, 'STEER_UNDELIVERED_FRAMES'))
     self.assertEqual(pre_2022_params.STEER_MAX, 800)
     self.assertEqual(pre_2022_params.STEER_DRIVER_MULTIPLIER, 1)
+
+  def test_undelivered_threshold_clears_normal_operation(self):
+    # 20 frames is an order of magnitude clear of both populations: across 96k unblocked
+    # frames with |request| > 200 the longest run of LKAS_EFFECTIVE == 0 is 2 frames, while
+    # blocked runs reach 183. Derivation: tools/mazda_long/analyze_lkas_nondelivery.py
+    params = _cx5_2022_params()
+    self.assertGreater(params.STEER_UNDELIVERED_FRAMES, 2 * 5)
+    self.assertLess(params.STEER_UNDELIVERED_FRAMES, 183 // 2)
+    # the request has to clear the rate limiter's walk before the count can start, so the
+    # minimum must sit above what one STEER_DELTA_UP step delivers
+    self.assertGreater(params.STEER_UNDELIVERED_MIN, params.STEER_DELTA_UP)
 
 
 class _Approx:
@@ -577,28 +589,35 @@ def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas
              resume=False, cancel=False, lead_visible=True, gap=2, available=True,
              stock_radar_alive=False, fsc_settled=True, handback=False, cruise_engaged=False,
              enabled=None, lead_d_rel=12.0, lead_v_rel=0.0, brake_hold=False, brake_pressed=False,
-             radar_was_silenced=False):
+             radar_was_silenced=False, lat_active=False, torque=0., v_ego=0., driver_torque=0.,
+             steering_pressed=False, lkas_blocked=False, lkas_effective=0):
   # openpilot is enabled whenever it is longitudinally active; a gas override is the case
   # where it stays enabled with longActive low. The mock carries everything the full
   # CarController.update() path reads, so tests can drive update() as well as
   # update_longitudinal() from the one builder.
   enabled = long_active if enabled is None else enabled
   out = SimpleNamespace(standstill=standstill, gasPressed=gas, brakePressed=brake_pressed,
-                        vEgoRaw=0., steeringTorque=0.,
+                        vEgoRaw=v_ego, steeringTorque=driver_torque, steeringPressed=steering_pressed,
                         cruiseState=SimpleNamespace(available=available, enabled=cruise_engaged))
-  actuators = SimpleNamespace(accel=accel, longControlState=long_state, torque=0.,
+  actuators = SimpleNamespace(accel=accel, longControlState=long_state, torque=torque,
                               as_builder=lambda: SimpleNamespace(torque=0., torqueOutputCan=0, accel=0.))
   cruise = SimpleNamespace(resume=resume, cancel=cancel)
   hud = SimpleNamespace(leadVisible=lead_visible, leadDistanceBars=gap, visualAlert=None)
-  cc = SimpleNamespace(enabled=enabled, longActive=long_active, latActive=False,
+  cc = SimpleNamespace(enabled=enabled, longActive=long_active, latActive=lat_active,
                        actuators=actuators, cruiseControl=cruise, hudControl=hud)
-  cc_sp = SimpleNamespace(stockEcuHandBack=handback,
+  icbm = SimpleNamespace(sendButton=structs.IntelligentCruiseButtonManagement.SendButtonState.none)
+  cc_sp = SimpleNamespace(stockEcuHandBack=handback, intelligentCruiseButtonManagement=icbm,
                           leadOne=SimpleNamespace(dRel=lead_d_rel, vRel=lead_v_rel))
   cs = SimpleNamespace(out=out, resume_button=0, brake_hold=brake_hold,
+                       accel_button=0, decel_button=0,
                        stock_radar_alive=stock_radar_alive, fsc_settled=fsc_settled,
                        radar_session_refused=False, radar_was_silenced=radar_was_silenced,
                        crz_btns_counter=0, cancel_button=0, lkas_allowed_speed=True,
-                       cam_lkas={"BIT_1": 0, "ERR_BIT_1": 0, "ERR_BIT_2": 0})
+                       lkas_blocked=lkas_blocked, lkas_effective=lkas_effective,
+                       cam_lkas={"BIT_1": 0, "ERR_BIT_1": 0, "ERR_BIT_2": 0},
+                       cam_laneinfo={s: 0 for s in ("LINE_VISIBLE", "LINE_NOT_VISIBLE", "LANE_LINES",
+                                                    "BIT1", "BIT2", "BIT3", "NO_ERR_BIT", "ERR_BIT",
+                                                    "S1", "S1_HBEAM")})
   return cc, cc_sp, cs
 
 
@@ -1258,6 +1277,65 @@ class TestCancelCarveOut(unittest.TestCase):
 SESSION_PROG_DAT = bytes([0x02, 0x10, 0x02, 0, 0, 0, 0, 0])
 SESSION_DFLT_DAT = bytes([0x02, 0x10, 0x01, 0, 0, 0, 0, 0])
 TESTER_PRESENT_DAT = bytes([0x02, 0x3e, 0x80, 0, 0, 0, 0, 0])
+
+
+class TestSteerNonDelivery(unittest.TestCase):
+  """The camera latches CAM_LKAS.ERR_BIT_1 on a budget of LKAS requests the EPS never applies
+  (route 00000139 seg 14). While LKAS_BLOCK is set and LKAS_EFFECTIVE reads zero the request
+  is going nowhere, so it is dropped rather than spent -- but a block is not all-or-nothing,
+  so partial delivery must keep its torque."""
+
+  def drive(self, cc, n, **kw):
+    kw.setdefault("lat_active", True)
+    kw.setdefault("torque", 1.0)
+    kw.setdefault("v_ego", 3.0)   # below ~4 m/s, where a block delivers exactly zero
+    out = None
+    for _ in range(n):
+      control, control_sp, carstate = _mock_cc(long_active=False, enabled=False, accel=0.,
+                                               long_state=structs.CarControl.Actuators.LongControlState.off,
+                                               **kw)
+      actuators, _ = cc.update(control, control_sp, carstate, 0)
+      out = actuators.torqueOutputCan
+    return out
+
+  def test_zero_delivery_under_a_block_latches_the_command_off(self):
+    cc = _cc()
+    # the rate limiter walks 12/frame, so the request needs ~17 frames just to clear
+    # STEER_UNDELIVERED_MIN before the 20-frame count can even start
+    self.assertGreater(self.drive(cc, 30, lkas_blocked=True), CarControllerParams.STEER_DRIVER_ALLOWANCE)
+    self.assertFalse(cc.steer_undelivered)
+    self.assertEqual(self.drive(cc, 20, lkas_blocked=True), 0)
+    self.assertTrue(cc.steer_undelivered)
+
+  def test_partial_delivery_under_a_block_keeps_its_torque(self):
+    cc = _cc()
+    # 4-8 m/s: LKAS_BLOCK is set but the EPS still applies a third to a half of the request.
+    # Gating on the block bit alone would throw that away
+    out = self.drive(cc, 300, lkas_blocked=True, lkas_effective=400, v_ego=6.0)
+    self.assertFalse(cc.steer_undelivered)
+    self.assertGreater(out, 0)
+
+  def test_driver_on_the_wheel_never_latches(self):
+    cc = _cc()
+    # a driver holding the wheel is a legitimate reason for the EPS to withhold torque, and
+    # apply_driver_steer_torque_limits is already unwinding the command
+    self.assertGreater(self.drive(cc, 300, lkas_blocked=True, steering_pressed=True), 0)
+    self.assertFalse(cc.steer_undelivered)
+
+  def test_a_request_the_eps_rounds_to_zero_never_latches(self):
+    cc = _cc()
+    self.assertGreater(self.drive(cc, 300, lkas_blocked=True, torque=0.1), 0)
+    self.assertFalse(cc.steer_undelivered)
+
+  def test_the_block_clearing_releases_the_latch_and_ramps_from_zero(self):
+    cc = _cc()
+    # the exit keys on LKAS_BLOCK, not on delivery returning: once we are sending zero there
+    # is no request left to observe delivery of, and keying off our own output would ramp
+    # back into the block and limit-cycle
+    self.assertEqual(self.drive(cc, 60, lkas_blocked=True), 0)
+    self.assertTrue(cc.steer_undelivered)
+    self.assertEqual(self.drive(cc, 1), _cx5_2022_params().STEER_DELTA_UP)
+    self.assertFalse(cc.steer_undelivered)
 
 
 class TestRadarSessionBounds(unittest.TestCase):
