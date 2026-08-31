@@ -4,6 +4,8 @@ import random
 import unittest
 
 from opendbc.car.mazda.values import MazdaSafetyFlags
+from opendbc.car.mazda import mazdacan
+from opendbc.can.packer import CANPacker
 from opendbc.car.structs import CarParams
 from opendbc.safety.tests.libsafety import libsafety_py
 import opendbc.safety.tests.common as common
@@ -622,18 +624,44 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
         self.assertEqual(should_tx, self._tx(self._accel_msg(accel, bus=2)))
 
   def test_stock_crz_info_standby_allowed(self):
-    # stock standby pegs the command field high; it must pass byte-exactly, checksum included,
-    # instead of being decoded as a huge accel command
+    # every not-controlling stock pattern pegs the command field high: main-off standby
+    # and both armed-idle variants (ACC_SET_ALLOWED follows the brake). All must pass
+    # byte-exactly, checksum included, instead of being decoded as a huge accel command.
+    def chk(d4, d5, counter):
+      return (0xff - ((0x01 + 0xff + 0xe3 + 0xff + d4 + d5 + counter) & 0xff)) & 0xff
+
     for controls_allowed in (False, True):
       self.safety.set_controls_allowed(controls_allowed)
       for bus in (0, 2):
-        for counter in range(16):
-          checksum = (0x5d - counter) & 0xff
-          dat = bytes.fromhex(f"01ffe3ffc000{counter:02x}{checksum:02x}")
-          self.assertTrue(self._tx(common.make_msg(bus, 0x21b, 8, dat)))
+        # (0xc0, 0x00) main-off; (0xc0, 0x80) armed + brake; (0xc4, 0x80) armed, SET allowed
+        for d4, d5 in ((0xc0, 0x00), (0xc0, 0x80), (0xc4, 0x80)):
+          for counter in range(16):
+            dat = bytes([0x01, 0xff, 0xe3, 0xff, d4, d5, counter, chk(d4, d5, counter)])
+            self.assertTrue(self._tx(common.make_msg(bus, 0x21b, 8, dat)),
+                            msg=f"blocked standby d4={d4:#x} d5={d5:#x} ctr={counter} bus={bus}")
 
         bad_checksum = bytes.fromhex("01ffe3ffc0000000")
         self.assertFalse(self._tx(common.make_msg(bus, 0x21b, 8, bad_checksum)))
+        # a pegged frame claiming ACC_ACTIVE must never ride the standby allowance
+        engaged_pegged = bytes([0x01, 0xff, 0xe3, 0xff, 0xc6, 0x80, 0x00, chk(0xc6, 0x80, 0x00)])
+        self.assertFalse(self._tx(common.make_msg(bus, 0x21b, 8, engaged_pegged)))
+        # and pegged with stop bits set is not a stock pattern either
+        stop_pegged = bytes([0x01, 0xff, 0xe3, 0xff, 0xc0, 0x84, 0x00, chk(0xc0, 0x84, 0x00)])
+        self.assertFalse(self._tx(common.make_msg(bus, 0x21b, 8, stop_pegged)))
+
+  def test_packed_armed_idle_crz_info_passes_tx(self):
+    # lock the packer to this allowance: the merge that pegged armed-idle at raw 8190
+    # without widening stock_standby dropped every SET-allowed frame on the bus
+    packer = CANPacker("mazda_2017")
+    self.safety.set_controls_allowed(False)
+    for brake_pressed in (False, True):
+      for counter in range(16):
+        dat = mazdacan.create_acc_command(packer, 0, counter, 0.0, long_active=False,
+                                          acc_available=True, brake_pressed=brake_pressed)[1]
+        self.assertTrue(self._tx(common.make_msg(0, 0x21b, 8, dat)),
+                        msg=f"packed armed-idle blocked brake={brake_pressed} ctr={counter} {bytes(dat).hex()}")
+    dat_off = mazdacan.create_acc_command(packer, 0, 0, 0.0, long_active=False, acc_available=False)[1]
+    self.assertTrue(self._tx(common.make_msg(0, 0x21b, 8, dat_off)))
 
   def test_empty_radar_tracks_allowed(self):
     radar_messages = {

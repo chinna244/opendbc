@@ -284,13 +284,19 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   }
 
   if (mazda_longitudinal && long_replacement_bus && (msg->addr == MAZDA_CRZ_INFO)) {
-    // the stock standby pattern pegs the command field high; allow it byte-exactly
-    // (checksum included) instead of decoding it as a huge accel command
+    // Not-controlling stock CRZ_INFO pegs ACCEL_CMD at raw 8190. Main-off is
+    // data[4]=0xc0, data[5]=0x00. Armed-idle sets bit 47 (data[5]=0x80) and
+    // ACC_SET_ALLOWED (data[4]=0xc4) when the brake is up. Allow those byte-exactly
+    // (checksum included) instead of decoding them as a 4.094 m/s2 command.
+    // ACC_ACTIVE is data[4] bit 1 (0x02); the 0xfb mask keeps it required-low so
+    // an engaged frame cannot ride this allowance.
     bool stock_standby = (msg->data[0] == 0x01U) && (msg->data[1] == 0xffU) &&
                          (msg->data[2] == 0xe3U) && (msg->data[3] == 0xffU) &&
-                         (msg->data[4] == 0xc0U) && (msg->data[5] == 0x00U) &&
+                         ((msg->data[4] & 0xfbU) == 0xc0U) &&
+                         ((msg->data[5] & 0x7fU) == 0x00U) &&
                          ((msg->data[6] & 0xf0U) == 0x00U) &&
-                         (msg->data[7] == ((0x5dU - msg->data[6]) & 0xffU));
+                         (msg->data[7] == ((0xffU - ((msg->data[0] + msg->data[1] + msg->data[2] + msg->data[3] +
+                                                     msg->data[4] + msg->data[5] + msg->data[6]) & 0xffU)) & 0xffU));
 
     // 13-bit ACCEL_CMD: data[2] low bits, data[3], data[4] high bits, offset 4096.
     // Assembled unsigned so every shift operand is an essential unsigned type (MISRA 10.1).
