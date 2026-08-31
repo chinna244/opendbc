@@ -57,8 +57,7 @@ class CarControllerParams:
   #   - a never-latched stop only blips 1-6 wire frames (mostly 2-3), starting ~3 wire frames
   #     AFTER the stop bits drop, once the command has relax-jumped into its release band
   # Treating every release as a long latched-style pulse held the unlatch bit over hold-grade
-  # braking, a tuple stock never emits, and the camera latched SCBS 90 ms in
-  # (route 00000053 t+714.8, second CX-5, with a real departing lead advertised)
+  # braking, a tuple stock never emits.
   RESUME_UNLATCH_LATCHED_T = 0.18  # s, 9 wire frames, the latched-family mode
   # The pulse is the release protocol: the body answers nothing else. Deferring it behind
   # silence (route 0000011d, 0.3 s) and behind a +0.15 m/s2 nudge (route 0000012c, 2.0 s,
@@ -66,10 +65,9 @@ class CarControllerParams:
   # body then dropped it within 2-3 wire frames of the fallback pulse every time. So a
   # latched release pulses immediately -- waiting only added dead time to every resume.
   # Stock's never-latched blip stays dropped: nothing is latched there, so it unlatches
-  # nothing. The SCBS latch that used to key on the pulse (10 of 10 with a healthy camera,
-  # across builds up to a byte-level stock twin) is addressed on the radar side instead:
-  # every one of those pulses went out while the advertised lead track carried the
-  # empty-slot status signature (see LEAD_TRACK_TEMPLATE in mazdacan.py).
+  # nothing. (Dropping it was originally an SCBS workaround, from when every pulse this port
+  # emitted latched the camera. That is fixed at the source -- see crz_info_checksum -- so
+  # restoring stock's blip is a free choice now, gated on a drive rather than on the fault.)
 
   CANCEL_CONTEXT_T = 0.5       # a wheel CANCEL keeps availability drops landing this long after release
 
@@ -199,6 +197,24 @@ class CarControllerParams:
       # winds up to be paid back as overshoot on release.
       self.EPS_CEILING_LOOKUP = ([8.0, 8.5, 9.4, 10.3, 11.2, 12.1, 13.0, 13.9, 14.5],
                                  [1148, 1132, 1092, 1048, 1012,  920,  808,  676,  620])
+
+      # Non-delivery latch: stop commanding LKAS the EPS is not applying. The camera counts
+      # requests, not effect, and latches CAM_LKAS.ERR_BIT_1 ("LKAS Fault: Restart the Car",
+      # steerFaultPermanent) once enough of them go nowhere -- route 00000139 seg 14, after
+      # ~60 s cumulative of request-with-no-effect over one ignition cycle, on the 14th
+      # blocked wind-up of the drive. The wind-up itself is normal: MADS lateral saturates
+      # through a slow tight turn, the rate limiter walks 12/frame to ~1000, and below ~4 m/s
+      # LKAS_BLOCK means the EPS delivers exactly zero.
+      #
+      # Detect it from LKAS_EFFECTIVE rather than from LKAS_BLOCK, because the block is not
+      # all-or-nothing: above ~4 m/s a blocked EPS still delivers a third to a half of the
+      # request (median eff/req 0.35-0.45), and gating on the bit alone would throw that away.
+      # Zero delivery separates cleanly from normal operation -- across 96k unblocked frames
+      # with |request| > 200 the longest run of LKAS_EFFECTIVE == 0 is 2 frames, while blocked
+      # runs reach 183 -- so 20 frames sits an order of magnitude clear of both sides.
+      # Derivation: tools/mazda_long/analyze_lkas_nondelivery.py.
+      self.STEER_UNDELIVERED_MIN = 200      # counts; below this the EPS rounds to zero anyway
+      self.STEER_UNDELIVERED_FRAMES = 20    # 200 ms at 100 Hz
     else:
       self.STEER_MAX = 800         # theoretical max_steer 2047
       self.STEER_DELTA_UP = 10

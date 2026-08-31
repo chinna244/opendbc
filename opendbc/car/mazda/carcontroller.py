@@ -29,6 +29,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       raise NotImplementedError(f"unsupported platform: {CP.carFingerprint}")
     self.params = CarControllerParams(CP)
     self.apply_torque_last = 0
+    self.steer_undelivered_frames = 0
+    self.steer_undelivered = False
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.brake_counter = 0
     self.stop_and_go = StandstillHold()
@@ -73,6 +75,38 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
       apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
                                                       CS.out.steeringTorque, self.params, steer_max)
+
+    # Non-delivery latch (values.py STEER_UNDELIVERED_*): once we have watched the EPS apply
+    # exactly nothing to a real request, stop sending it. The camera latches ERR_BIT_1 on a
+    # budget of requests that go nowhere, and the rate limiter's 12/frame walk to saturation
+    # spends that budget fast while the wheel does not move.
+    #
+    # The latch releases on LKAS_BLOCK rather than on delivery returning, because once we are
+    # sending zero there is no request left to observe delivery of -- keying the exit off our
+    # own output would ramp back into the block and limit-cycle. The block bit is the EPS's own
+    # statement that it is accepting LKAS again, and the entry condition already established
+    # that this particular block is total.
+    if hasattr(self.params, 'STEER_UNDELIVERED_FRAMES'):
+      if not CS.lkas_blocked:
+        self.steer_undelivered_frames = 0
+        self.steer_undelivered = False
+      elif not self.steer_undelivered:
+        # steeringPressed is excluded because a driver holding the wheel is a legitimate reason
+        # for the EPS to withhold torque, and apply_driver_steer_torque_limits is already
+        # unwinding the command in that case
+        if (CC.latActive and not CS.out.steeringPressed and CS.lkas_effective == 0 and
+            abs(apply_torque) > self.params.STEER_UNDELIVERED_MIN):
+          self.steer_undelivered_frames += 1
+          self.steer_undelivered = self.steer_undelivered_frames >= self.params.STEER_UNDELIVERED_FRAMES
+        else:
+          self.steer_undelivered_frames = 0
+
+      if self.steer_undelivered:
+        # apply_torque_last follows below, so delivery coming back ramps from zero at
+        # STEER_DELTA_UP (~0.8 s to full) instead of stepping into a request the EPS has
+        # not seen. That is the cost of the latch, and it is paid in the speed range where
+        # the EPS was applying nothing anyway.
+        apply_torque = 0
 
     # Under op-long, controlsd raises cancel whenever cruiseState.enabled has no matching
     # CC.enabled (pcmCruise). While the stock radar still owns the bus -- the pre-teardown
@@ -196,9 +230,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     if sm.just_released:
       # the release command follows stock's shape, not a slew off the hold value: a
       # never-latched stop relax-jumps into the release band in one frame, a latched hold
-      # ramps off the relaxed -0.001 (values.py census). Slewing up from -1.024 instead kept
-      # hold-grade braking under the release pulse, and the camera latched it as an SCBS
-      # fault 90 ms in (route 00000053 t+714.8, real departing lead advertised)
+      # ramps off the relaxed -0.001 (values.py census). Slewing up from -1.024 instead
+      # keeps hold-grade braking on the wire underneath the release pulse, a tuple stock
+      # never emits.
       self.release_ramp = CarControllerParams.ACCEL_HOLD_LATCHED if sm.latched_release else \
                           CarControllerParams.ACCEL_RELEASE_BAND
     elif sm.holding or not CC.longActive:
@@ -223,8 +257,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         # ~+1.25 m/s3 straight through the blip or pulse and on into the drive-off.
         # A latched release does not start climbing until the body lets go: stock pins
         # the command at -1 raw until GEAR.BRAKE_HOLD drops in every latched release of
-        # the corpus, and climbing against the still-latched hold is what the camera
-        # faulted 90 ms into the pulse (route 00000115 t+381.3)
+        # the corpus, and there is nothing to gain by pushing against brakes the body
+        # still owns.
         accel = self.release_ramp
         if not (sm.latched_release and CS.brake_hold):
           self.release_ramp = min(self.release_ramp + CarControllerParams.ACCEL_RELEASE_RAMP * DT_CTRL,
@@ -241,23 +275,18 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       elif sm.holding:
         # while the plan is braking the hold command is the plan's own, but the moment it
         # turns positive (release debounce) the hold freezes where it is:
-        # stock never lets ACCEL_CMD climb while STOPPING is asserted, and pre-ramping toward
-        # the plan here put the release's zero-cross inside the unlatch pulse, which the
-        # camera latched as an SCBS fault (route 00000100 t+353)
+        # stock never lets ACCEL_CMD climb while STOPPING is asserted, and pre-ramping
+        # toward the plan puts the release's zero-cross inside the unlatch pulse, which
+        # stock never does either.
         accel = min(accel, 0.) if CC.actuators.accel <= 0. else min(self.accel_last, 0.)
       if sm.resume_unlatching:
-        if sm.latched_release:
-          # stock's latched pulse runs -1 raw to +0.25 m/s2. The ceiling is an invariant
-          # the ramp already keeps. The floor does real work on a re-hold that lands while
-          # the pulse is still playing: the pulse runs out (stock never restarts one), and
-          # this keeps the re-hold's braking off the pulse frames -- hold-grade command
-          # under RESUME_UNLATCHING is the exact tuple the camera latches on
-          accel = min(max(accel, CarControllerParams.ACCEL_HOLD_LATCHED),
-                      CarControllerParams.ACCEL_RESUME_PULSE_MAX)
-        else:
-          # stock's command is negative in every never-latched blip frame of the corpus;
-          # the blip already stays under this, kept as a guard
-          accel = min(accel, 0.)
+        # only a latched release ever arms the pulse, so this is stock's latched shape:
+        # -1 raw to +0.25 m/s2. The ceiling is an invariant the ramp already keeps. The
+        # floor does real work on a re-hold that lands while the pulse is still playing:
+        # the pulse runs out (stock never restarts one), and this keeps the re-hold's
+        # braking off the pulse frames, which is the shape stock's own releases have.
+        accel = min(max(accel, CarControllerParams.ACCEL_HOLD_LATCHED),
+                    CarControllerParams.ACCEL_RESUME_PULSE_MAX)
     self.accel_last = accel
 
     if radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:
