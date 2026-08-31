@@ -12,7 +12,7 @@ from opendbc.can import CANPacker, CANParser
 from opendbc.car import Bus, DT_CTRL, structs
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.carcontroller import CarController, TJA_MRCC_HOLD_TIMEOUT_FRAMES, \
-    TJA_MRCC_RAW_OFF_CONFIRM_FRAMES
+    TJA_MRCC_RAW_OFF_CONFIRM_FRAMES, TJA_MRCC_CTR_STEP_FRAMES, TJA_MRCC_MAX_UNIQUE_CTRS
 from opendbc.car.mazda.longitudinal import (BREAKAWAY_FRAMES, LEAD_DEBOUNCE_FRAMES, RADAR_SESSION_LIMIT_FRAMES,
                                             RELEASE_DEBOUNCE_FRAMES, RESUME_UNLATCH_LATCHED_FRAMES,
                                             AdvertisedLead, RadarSessionManager, RadarSessionState, StandstillHold)
@@ -1674,14 +1674,16 @@ class TestTjaMrccSideEffect:
     assert cc.tja_mrcc_unarm_pending
     assert not CS_first.tja_mrcc_side_effect_pending
     assert self._payload_ctrs(payloads) == [11]
-    # A stale latch on a later apply must not restart the hold.
+    # While we own cleanup, a late CarState latch must be cleared every cycle and must
+    # not restart the hold. Within the first ~60 ms, packed CTR stays at OEM+1.
     leftover = []
     for _ in range(5):
       leftover.extend(self._mrcc_off_payloads(
         self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=10,
                    tja_mrcc_side_effect_pending=True)))
-    assert leftover == [payloads[0]] * 5
+    assert self._payload_ctrs(leftover) == [11] * 5
     assert cc.tja_mrcc_hold_frames == 6
+    assert cc.tja_mrcc_unique_ctrs == 1
 
     # Boot MRCC ON with no TJA latch must not start cleanup.
     cc2 = self._cc()
@@ -1690,20 +1692,22 @@ class TestTjaMrccSideEffect:
                  tja_mrcc_side_effect_pending=False))
     assert not cc2.tja_mrcc_unarm_pending
 
-  def test_drive30_hold_keeps_tx_while_oem_counter_is_frozen(self):
-    """Route 00000030 t+38.6: OEM counter can sit still ~100 ms; keep emitting."""
+  def test_route33_physical_like_ctr_while_oem_frozen(self):
+    """Frozen OEM: OEM+1 for ~60 ms TX, then OEM+2 held; raw OFF stops TX."""
     cc = self._cc()
     CC, CC_SP = self._controls()
     self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=14)
     self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=15)
     payloads = []
-    # 10 frozen-counter 10 ms steps = 100 ms of idle OEM CRZ_BTNS.
     for _ in range(10):
       payloads.extend(self._mrcc_off_payloads(
         self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=15)))
     assert len(payloads) == 10
-    assert self._payload_ctrs(payloads) == [0] * 10
+    # Packed: seed 15 → CTR 0 for 6 TX, then seed 0 → CTR 1 for remaining.
+    assert self._payload_ctrs(payloads) == [0] * TJA_MRCC_CTR_STEP_FRAMES + [1] * (10 - TJA_MRCC_CTR_STEP_FRAMES)
+    assert cc.tja_mrcc_unique_ctrs == 2
     assert cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_tx_frames == 10
 
     assert not self._mrcc_off_payloads(
       self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=15))
@@ -1711,6 +1715,119 @@ class TestTjaMrccSideEffect:
       assert not self._mrcc_off_payloads(
         self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=15))
     assert not cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_cmd_counter is None
+    assert cc.tja_mrcc_unique_ctrs == 0
+
+  def test_route33_timeout_at_most_two_unique_ctrs(self):
+    """Full 300 ms timeout: at most 2 unique packed CTRs, no wrap/runaway."""
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+    ctrs = []
+    for _ in range(TJA_MRCC_HOLD_TIMEOUT_FRAMES + 5):
+      ctrs.extend(self._payload_ctrs(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2))))
+    assert len(ctrs) == TJA_MRCC_HOLD_TIMEOUT_FRAMES
+    # OEM seed=2 → packed 3, then 4 held for the remainder (no third unique).
+    step = TJA_MRCC_CTR_STEP_FRAMES
+    expected = [3] * step + [4] * (TJA_MRCC_HOLD_TIMEOUT_FRAMES - step)
+    assert ctrs == expected
+    assert len(set(ctrs)) == TJA_MRCC_MAX_UNIQUE_CTRS
+    assert max(ctrs) - min(ctrs) == TJA_MRCC_MAX_UNIQUE_CTRS - 1  # no wrap
+    assert not cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_cmd_counter is None
+    assert cc.tja_mrcc_unique_ctrs == 0
+    assert cc.tja_mrcc_tx_frames == 0
+
+  def test_route33_oem_advancing_keeps_bounded_physical_like_sequence(self):
+    """Moving OEM wheel: synth stays OEM+1 then one +1 step; no race; driver aborts."""
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=2)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=3)
+
+    # OEM starts at 3; synth packed CTR=4. Advance OEM while cleanup TX runs.
+    oem = 3
+    ctrs = []
+    for i in range(12):
+      if i > 0 and i % 3 == 0:
+        oem = (oem + 1) % 16
+      ctrs.extend(self._payload_ctrs(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=oem))))
+    # Still only two unique packed CTRs even as OEM walks forward.
+    assert ctrs == [4] * TJA_MRCC_CTR_STEP_FRAMES + [5] * (12 - TJA_MRCC_CTR_STEP_FRAMES)
+    assert len(set(ctrs)) == TJA_MRCC_MAX_UNIQUE_CTRS
+    assert cc.tja_mrcc_unique_ctrs == 2
+    # Seeded from OEM=3: packed 4 then 5 only — never races further ahead of the start.
+    assert max(ctrs) == 5
+    assert (max(ctrs) - 3) % 16 == TJA_MRCC_MAX_UNIQUE_CTRS
+
+    assert not self._mrcc_off_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=oem))
+    assert cc.tja_mrcc_unarm_pending
+
+    # Physical driver input aborts before another synth TX after a fresh re-arm path.
+    # Restart a cleanup and abort on MRCC.
+    cc2 = self._cc()
+    CC2, CC_SP2 = self._controls()
+    self._step(cc2, CC2, CC_SP2, tja=0, armed=False, raw_armed=False, counter=3)
+    self._step(cc2, CC2, CC_SP2, tja=1, armed=True, raw_armed=True, counter=3)
+    assert self._mrcc_off_payloads(
+      self._step(cc2, CC2, CC_SP2, tja=0, armed=True, raw_armed=True, counter=4))
+    assert not self._mrcc_off_payloads(
+      self._step(cc2, CC2, CC_SP2, tja=0, armed=True, raw_armed=True, counter=5,
+                 mrcc_button=1))
+    assert not cc2.tja_mrcc_unarm_pending
+
+  def test_route33_wrap_boundary_oem_ctr_15(self):
+    """OEM CTR 15: first packed wraps to 0, second unique is 1; no runaway."""
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=14)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=15)
+    ctrs = []
+    for _ in range(TJA_MRCC_HOLD_TIMEOUT_FRAMES + 5):
+      ctrs.extend(self._payload_ctrs(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=15))))
+    assert len(ctrs) == TJA_MRCC_HOLD_TIMEOUT_FRAMES
+    step = TJA_MRCC_CTR_STEP_FRAMES
+    assert ctrs == [0] * step + [1] * (TJA_MRCC_HOLD_TIMEOUT_FRAMES - step)
+    assert set(ctrs) == {0, 1}
+    assert cc.tja_mrcc_unique_ctrs == 0  # cleared after timeout
+    assert not cc.tja_mrcc_unarm_pending
+
+  def test_route33_stale_carstate_latch_does_not_double_timeout(self):
+    """Post-init TJA also sets CarState latch; timeout must not re-inherit it (~600 ms)."""
+    cc = self._cc()
+    CC, CC_SP = self._controls()
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
+
+    # Shared CS: CarState sets the latch once when PEDALS arms after the same TJA edge.
+    CS = TestTjaIcbmSuppressScoping._cs(
+      tja_button=0, cruise_available=True, mrcc_armed_raw=True, crz_btns_counter=2,
+      tja_mrcc_side_effect_pending=True)
+    n = 0
+    now = getattr(cc, "_test_now_nanos", 0)
+    for _ in range(TJA_MRCC_HOLD_TIMEOUT_FRAMES + 1):
+      now += round(DT_CTRL * 1e9)
+      CS.tja_mrcc_side_effect_pending = True  # late observation while we already own it
+      n += len(self._mrcc_off_payloads(cc.update(CC, CC_SP, CS, now)[1]))
+      assert not CS.tja_mrcc_side_effect_pending  # eaten every owned cycle / end_cleanup
+    assert n == TJA_MRCC_HOLD_TIMEOUT_FRAMES
+    assert not cc.tja_mrcc_unarm_pending
+    assert not CS.tja_mrcc_side_effect_pending
+
+    # Same CS object after timeout: without a new TJA edge CarState will not re-set the
+    # latch, so even a leftover True would have been cleared — no second episode.
+    leftover = []
+    for _ in range(TJA_MRCC_HOLD_TIMEOUT_FRAMES + 5):
+      now += round(DT_CTRL * 1e9)
+      leftover.extend(self._mrcc_off_payloads(cc.update(CC, CC_SP, CS, now)[1]))
+    assert leftover == []
+    assert not cc.tja_mrcc_unarm_pending
+    assert n == TJA_MRCC_HOLD_TIMEOUT_FRAMES
 
   def test_hold_times_out_at_300ms_if_pedals_never_ack(self):
     cc = self._cc()
@@ -1718,27 +1835,47 @@ class TestTjaMrccSideEffect:
     self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=0)
     self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=1)
     n = 0
+    ctrs = []
     for _ in range(TJA_MRCC_HOLD_TIMEOUT_FRAMES + 5):
-      n += len(self._mrcc_off_payloads(
-        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2)))
+      payloads = self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=2))
+      n += len(payloads)
+      ctrs.extend(self._payload_ctrs(payloads))
     assert n == TJA_MRCC_HOLD_TIMEOUT_FRAMES
+    step = TJA_MRCC_CTR_STEP_FRAMES
+    assert ctrs == [3] * step + [4] * (n - step)
     assert not cc.tja_mrcc_unarm_pending
     assert cc.tja_mrcc_hold_frames == 0
     assert cc.tja_mrcc_saw_armed is False
     assert cc.tja_mrcc_tx_frames == 0
+    assert cc.tja_mrcc_cmd_counter is None
 
-  def test_raw_dropout_stops_tx_then_resumes_if_rearmed(self):
+  def test_raw_dropout_stops_tx_then_resumes_bounded_sequence(self):
+    """Raw OFF stops TX immediately; re-arm continues the same bounded CTR sequence."""
     cc = self._cc()
     CC, CC_SP = self._controls()
-    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False)
-    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True)
-    assert self._mrcc_off_payloads(self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True))
+    self._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, counter=14)
+    self._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, counter=15)
+    # 3 TX at packed CTR=0 (seed 15).
+    for _ in range(3):
+      assert self._payload_ctrs(self._mrcc_off_payloads(
+        self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=15))) == [0]
     assert not self._mrcc_off_payloads(
-      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=False))
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=False, counter=15))
     assert cc.tja_mrcc_unarm_pending
-    payloads = self._mrcc_off_payloads(
-      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True))
-    assert len(payloads) == 1
+    assert cc.tja_mrcc_unique_ctrs == 1
+    assert cc.tja_mrcc_ctr_tx_frames == 3
+    # Resume: still on first unique until 6 active TX total, then step to CTR=1.
+    assert self._payload_ctrs(self._mrcc_off_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=15))) == [0]
+    assert self._payload_ctrs(self._mrcc_off_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=15))) == [0]
+    assert self._payload_ctrs(self._mrcc_off_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=15))) == [0]
+    assert cc.tja_mrcc_ctr_tx_frames == 6
+    assert self._payload_ctrs(self._mrcc_off_payloads(
+      self._step(cc, CC, CC_SP, tja=0, armed=True, raw_armed=True, counter=15))) == [1]
+    assert cc.tja_mrcc_unique_ctrs == 2
     assert cc.tja_mrcc_unarm_pending
 
   def test_off_on_flicker_does_not_extend_timeout(self):
