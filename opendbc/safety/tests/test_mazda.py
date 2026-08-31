@@ -642,6 +642,11 @@ class TestMazdaLongitudinalSafety(TestMazdaSafety, common.LongitudinalAccelSafet
 
         bad_checksum = bytes.fromhex("01ffe3ffc0000000")
         self.assertFalse(self._tx(common.make_msg(bus, 0x21b, 8, bad_checksum)))
+        # SET-allowed with main-off is not a stock pattern; the old 0xfb/0x7f masks allowed it
+        for counter in range(16):
+          mixed = bytes([0x01, 0xff, 0xe3, 0xff, 0xc4, 0x00, counter, chk(0xc4, 0x00, counter)])
+          self.assertFalse(self._tx(common.make_msg(bus, 0x21b, 8, mixed)),
+                           msg=f"mixed SET-allowed/main-off passed ctr={counter} bus={bus}")
         # a pegged frame claiming ACC_ACTIVE must never ride the standby allowance
         engaged_pegged = bytes([0x01, 0xff, 0xe3, 0xff, 0xc6, 0x80, 0x00, chk(0xc6, 0x80, 0x00)])
         self.assertFalse(self._tx(common.make_msg(bus, 0x21b, 8, engaged_pegged)))

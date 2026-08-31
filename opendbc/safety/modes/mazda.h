@@ -284,16 +284,20 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   }
 
   if (mazda_longitudinal && long_replacement_bus && (msg->addr == MAZDA_CRZ_INFO)) {
-    // Not-controlling stock CRZ_INFO pegs ACCEL_CMD at raw 8190. Main-off is
-    // data[4]=0xc0, data[5]=0x00. Armed-idle sets bit 47 (data[5]=0x80) and
-    // ACC_SET_ALLOWED (data[4]=0xc4) when the brake is up. Allow those byte-exactly
-    // (checksum included) instead of decoding them as a 4.094 m/s2 command.
-    // ACC_ACTIVE is data[4] bit 1 (0x02); the 0xfb mask keeps it required-low so
-    // an engaged frame cannot ride this allowance.
+    // Not-controlling stock CRZ_INFO pegs ACCEL_CMD at raw 8190. Allow only the three
+    // observed standby states, byte-exactly (checksum included), instead of decoding
+    // them as a 4.094 m/s2 command:
+    //   data[4]=0xc0, data[5]=0x00  main-off
+    //   data[4]=0xc0, data[5]=0x80  armed, brake down, SET not allowed
+    //   data[4]=0xc4, data[5]=0x80  armed, brake up, SET allowed
+    // ACC_SET_ALLOWED without the armed bit (0xc4, 0x00) is not a stock pattern.
+    // ACC_ACTIVE is data[4] bit 1 (0x02); none of the three pairs set it.
+    bool main_off = (msg->data[4] == 0xc0U) && (msg->data[5] == 0x00U);
+    bool armed_brake = (msg->data[4] == 0xc0U) && (msg->data[5] == 0x80U);
+    bool armed_set = (msg->data[4] == 0xc4U) && (msg->data[5] == 0x80U);
     bool stock_standby = (msg->data[0] == 0x01U) && (msg->data[1] == 0xffU) &&
                          (msg->data[2] == 0xe3U) && (msg->data[3] == 0xffU) &&
-                         ((msg->data[4] & 0xfbU) == 0xc0U) &&
-                         ((msg->data[5] & 0x7fU) == 0x00U) &&
+                         (main_off || armed_brake || armed_set) &&
                          ((msg->data[6] & 0xf0U) == 0x00U) &&
                          (msg->data[7] == ((0xffU - ((msg->data[0] + msg->data[1] + msg->data[2] + msg->data[3] +
                                                      msg->data[4] + msg->data[5] + msg->data[6]) & 0xffU)) & 0xffU));
