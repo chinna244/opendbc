@@ -256,6 +256,9 @@ class CAR(Platforms):
   MAZDA_CX9 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-9 2016-20")],
     MazdaCarSpecs(mass=4217 * CV.LB_TO_KG, wheelbase=2.93, steerRatio=17.6),
+    # no radar bus: this is the one Mazda whose radar does not put the 0x361-0x366 tracks on
+    # bus 0, so claiming one would leave radard waiting on a parser that never goes valid
+    dbc_dict={Bus.pt: 'mazda_2017'},
     wmis={WMI.JAPAN_CROSSOVER}, chassis_codes={'TC'}, years={'G', 'H', 'J', 'K', 'L'},  # 2016-20
   )
   MAZDA_3 = MazdaPlatformConfig(

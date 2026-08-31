@@ -12,8 +12,7 @@ over 29k track frames (route 0b): sentinels occur either all-three (empty slot)
 or not at all, except real tracks at exactly -1.0 m/s.
 """
 import math
-
-import pytest
+import unittest
 
 from opendbc.can import CANPacker
 from opendbc.car import gen_empty_fingerprint
@@ -49,19 +48,20 @@ def burst(ri, t_ns, overrides=None):
   return rr
 
 
-class TestRadarSentinels:
+class TestRadarSentinels(unittest.TestCase):
   def test_empty_slots_produce_no_points(self):
     ri = _radar_interface()
     rr = burst(ri, 0)
-    assert len(rr.points) == 0
+    self.assertEqual(len(rr.points), 0)
 
   def test_real_track_parses(self):
     ri = _radar_interface()
     rr = burst(ri, 0, {0x361: track_msg(0x361, dist=40.0, ang=2.0, relv=-5.0)})
-    assert len(rr.points) == 1
+    self.assertEqual(len(rr.points), 1)
     pt = rr.points[0]
-    assert pt.dRel == pytest.approx(math.cos(math.radians(2.0)) * 40.0, rel=1e-6)
-    assert pt.vRel == -5.0
+    expected_drel = math.cos(math.radians(2.0)) * 40.0
+    self.assertAlmostEqual(pt.dRel, expected_drel, delta=abs(expected_drel) * 1e-6)
+    self.assertEqual(pt.vRel, -5.0)
 
   def test_track_at_exactly_minus_one_mps_is_kept(self):
     """-1.0 m/s with a real distance is a live lead, not an empty slot. Dropping it
@@ -73,34 +73,35 @@ class TestRadarSentinels:
 
     # lead decelerates through exactly -1.0 m/s: the track must survive with its identity
     rr = burst(ri, int(0.1e9), {0x361: track_msg(0x361, dist=39.875, ang=0.0, relv=SENTINEL_RELV)})
-    assert len(rr.points) == 1
-    assert rr.points[0].vRel == SENTINEL_RELV
-    assert rr.points[0].trackId == track_id
+    self.assertEqual(len(rr.points), 1)
+    self.assertEqual(rr.points[0].vRel, SENTINEL_RELV)
+    self.assertEqual(rr.points[0].trackId, track_id)
 
     rr = burst(ri, int(0.2e9), {0x361: track_msg(0x361, dist=39.75, ang=0.0, relv=-0.9375)})
-    assert rr.points[0].trackId == track_id
+    self.assertEqual(rr.points[0].trackId, track_id)
 
   def test_track_at_max_range_is_kept(self):
     ri = _radar_interface()
     rr = burst(ri, 0, {0x362: track_msg(0x362, dist=SENTINEL_DIST, ang=0.0, relv=-10.0)})
-    assert len(rr.points) == 1
-    assert rr.points[0].dRel == SENTINEL_DIST
+    self.assertEqual(len(rr.points), 1)
+    self.assertEqual(rr.points[0].dRel, SENTINEL_DIST)
 
   def test_track_at_sentinel_angle_is_kept(self):
     ri = _radar_interface()
     rr = burst(ri, 0, {0x363: track_msg(0x363, dist=40.0, ang=SENTINEL_ANG, relv=-5.0)})
-    assert len(rr.points) == 1
-    assert rr.points[0].yRel == pytest.approx(-math.sin(math.radians(SENTINEL_ANG)) * 40.0, rel=1e-6)
+    self.assertEqual(len(rr.points), 1)
+    expected_yrel = -math.sin(math.radians(SENTINEL_ANG)) * 40.0
+    self.assertAlmostEqual(rr.points[0].yRel, expected_yrel, delta=abs(expected_yrel) * 1e-6)
 
   def test_all_sentinel_slot_deletes_a_prior_track(self):
     ri = _radar_interface()
     burst(ri, 0, {0x361: track_msg(0x361, dist=40.0, ang=0.0, relv=-5.0)})
     rr = burst(ri, int(0.1e9))  # slot empties: all three sentinels
-    assert len(rr.points) == 0
+    self.assertEqual(len(rr.points), 0)
 
   def test_undecoded_relv_addrs_never_produce_points(self):
     ri = _radar_interface()
     overrides = {addr: track_msg(addr, dist=40.0, ang=0.0, relv=-5.0)
                  for addr in RADAR_TRACK_ADDRS if addr not in RADAR_USABLE_ADDRS}
     rr = burst(ri, 0, overrides)
-    assert len(rr.points) == 0
+    self.assertEqual(len(rr.points), 0)

@@ -1,4 +1,4 @@
-import pytest
+import unittest
 
 from opendbc.car import DT_CTRL, gen_empty_fingerprint
 from opendbc.car.common.conversions import Conversions as CV
@@ -42,18 +42,20 @@ def _feed(CI, payload, seconds):
   return CI.CS.fsc_settled
 
 
-@pytest.mark.parametrize("alpha_long", [False, True])
-def test_carstate_runs_with_real_parsers(alpha_long):
-  # vl_all, unlike vl, has no lazy message registration: every message read through it
-  # must be listed in get_can_parsers. The op-long FSC settle gate crashed card on its
-  # first update when CAM_LANEINFO was missing from the cam parser (KeyError, 2026-07-29).
-  CI = _interface(alpha_long)
-  assert CI.CP.openpilotLongitudinalControl == alpha_long
-  for _ in range(10):
-    CI.update([])
+class TestCarStateParsers(unittest.TestCase):
+  def test_carstate_runs_with_real_parsers(self):
+    # vl_all, unlike vl, has no lazy message registration: every message read through it
+    # must be listed in get_can_parsers. The op-long FSC settle gate crashed card on its
+    # first update when CAM_LANEINFO was missing from the cam parser (KeyError, 2026-07-29).
+    for alpha_long in (False, True):
+      with self.subTest(alpha_long=alpha_long):
+        CI = _interface(alpha_long)
+        self.assertEqual(CI.CP.openpilotLongitudinalControl, alpha_long)
+        for _ in range(10):
+          CI.update([])
 
 
-class TestFscSettleGate:
+class TestFscSettleGate(unittest.TestCase):
   """The gate that defers the radar teardown past the FSC's cold-boot radar-presence check.
 
   It must hold while the camera is booting or faulted, and must not be vetoed indefinitely
@@ -62,30 +64,30 @@ class TestFscSettleGate:
 
   def test_never_settles_while_boot_marker_is_set(self):
     settle = CarControllerParams.FSC_SETTLE_T
-    assert not _feed(_interface(), BOOTING, settle * 2)
+    self.assertFalse(_feed(_interface(), BOOTING, settle * 2))
 
   def test_never_settles_while_err_bit_is_set(self):
     # a latched i-ACTIVSENSE fault shows the boot markers clear, so ERR_BIT must veto on its own
     settle = CarControllerParams.FSC_SETTLE_T
-    assert not _feed(_interface(), FAULTED, settle * 2)
+    self.assertFalse(_feed(_interface(), FAULTED, settle * 2))
 
   def test_settles_once_the_boot_marker_clears(self):
     CI = _interface()
-    assert not _feed(CI, BOOTING, 3.0)
-    assert not _feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T - 1.0)
-    assert _feed(CI, SETTLED, 1.5)
+    self.assertFalse(_feed(CI, BOOTING, 3.0))
+    self.assertFalse(_feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T - 1.0))
+    self.assertTrue(_feed(CI, SETTLED, 1.5))
 
   def test_a_latched_bit2_does_not_block_the_teardown_forever(self):
     # One CX-5 2022 cold-booted with BIT2 high and NO_ERR_BIT clear for an entire ignition
     # cycle (36.5 s, route 7c735af5fce56485|00000011). BIT2 was in the gate, so the radar was
     # never silenced and the two-master guard held accFaulted for the whole drive.
-    assert _feed(_interface(), BIT2_LATCHED, CarControllerParams.FSC_SETTLE_T * 1.5)
+    self.assertTrue(_feed(_interface(), BIT2_LATCHED, CarControllerParams.FSC_SETTLE_T * 1.5))
 
   def test_settles_at_the_longest_observed_camera_period(self):
     # _feed runs at the longest measured period, the worst case the freshness window has to
     # ride through: a shorter window zeroes the settle counter on every gap and the gate
     # never opens (the regression that shipped in baf0f383c3 with CAM_LANEINFO_FRESH_T = 0.5)
-    assert _feed(_interface(), SETTLED, CarControllerParams.FSC_SETTLE_T * 1.5)
+    self.assertTrue(_feed(_interface(), SETTLED, CarControllerParams.FSC_SETTLE_T * 1.5))
 
   def test_camera_dropout_resets_the_settle_timer(self):
     # the window is a freshness gate, not decoration: a genuine dropout, well past any real
@@ -93,18 +95,18 @@ class TestFscSettleGate:
     CI = _interface()
     _feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T * 0.8)
     _feed(CI, None, CarControllerParams.CAM_LANEINFO_FRESH_T + 0.5)
-    assert not _feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T * 0.5)
-    assert _feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T * 0.6)
+    self.assertFalse(_feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T * 0.5))
+    self.assertTrue(_feed(CI, SETTLED, CarControllerParams.FSC_SETTLE_T * 0.6))
 
   def test_gate_starts_closed_before_any_camera_frame(self):
     # the parser reads all-zero before the first frame, which would otherwise look settled
     CI = _interface()
     for i in range(int(CarControllerParams.FSC_SETTLE_T * 2 / DT_CTRL)):
       CI.update([(int(i * DT_CTRL * 1e9), [])])
-    assert not CI.CS.fsc_settled
+    self.assertFalse(CI.CS.fsc_settled)
 
 
-class TestStockFcw:
+class TestStockFcw(unittest.TestCase):
   """0x21d (CAM_EMPTY) idles at STATUS 0x7f and leaves it only while the camera actively
   shows its SCBS collision display (route 0000004d t+213). The payloads are the captured
   idle and active frames from that route."""
@@ -118,74 +120,77 @@ class TestStockFcw:
 
   def test_display_active_sets_fcw(self):
     CI = _interface()
-    assert self._feed_21d(CI, self.IDLE).stockFcw is False
-    assert self._feed_21d(CI, self.ACTIVE, 1).stockFcw is True
-    assert self._feed_21d(CI, self.IDLE, 2).stockFcw is False
+    self.assertIs(self._feed_21d(CI, self.IDLE).stockFcw, False)
+    self.assertIs(self._feed_21d(CI, self.ACTIVE, 1).stockFcw, True)
+    self.assertIs(self._feed_21d(CI, self.IDLE, 2).stockFcw, False)
 
   def test_no_fcw_before_first_camera_frame(self):
     # the parser reads STATUS as 0 before the first frame, which is != 0x7f
     CI = _interface()
     ret, _ = CI.update([(0, [])])
-    assert ret.stockFcw is False
+    self.assertIs(ret.stockFcw, False)
 
   def test_ped_warning_bit_sets_fcw(self):
     # never observed in 1.57M corpus frames, wired for coverage: PED_WARNING is bit 9
     CI = _interface()
     self._feed_21d(CI, self.IDLE)
     ret, _ = CI.update([(int(1 * DT_CTRL * 1e9), [(CAM_PEDESTRIAN, bytes.fromhex("07fa3c0000000000"), 2), (CAM_EMPTY, self.IDLE, 2)])])
-    assert ret.stockFcw is True
+    self.assertIs(ret.stockFcw, True)
 
 
-class TestRadarSessionResponse:
+class TestRadarSessionResponse(unittest.TestCase):
   """The radar answers session requests within ~10 ms (route 000000fe t+15.0), and the
   session manager consumes the flag on the same control frame it is set."""
 
   def test_negative_response_sets_refused(self):
     CI = _interface()
-    assert not CI.CS.radar_session_refused
+    self.assertFalse(CI.CS.radar_session_refused)
     # 03 7F 10 22: conditionsNotCorrect to a session-control request
     CI.update([(0, [(RADAR_UDS_RESP, bytes.fromhex("037f102200000000"), 0)])])
-    assert CI.CS.radar_session_refused
+    self.assertTrue(CI.CS.radar_session_refused)
     CI.update([(int(DT_CTRL * 1e9), [])])
-    assert not CI.CS.radar_session_refused, "the flag is same-frame, not latched"
+    self.assertFalse(CI.CS.radar_session_refused, "the flag is same-frame, not latched")
 
   def test_positive_response_is_not_a_refusal(self):
     CI = _interface()
     # the real capture: 06 50 02 with the session parameter record (P2*=5.0 s)
     CI.update([(0, [(RADAR_UDS_RESP, bytes.fromhex("065002001901f400"), 0)])])
-    assert not CI.CS.radar_session_refused
+    self.assertFalse(CI.CS.radar_session_refused)
 
   def test_response_pending_is_not_a_refusal(self):
     CI = _interface()
     # 03 7F 10 78: requestCorrectlyReceived-ResponsePending; UDS clients wait through it
     CI.update([(0, [(RADAR_UDS_RESP, bytes.fromhex("037f107800000000"), 0)])])
-    assert not CI.CS.radar_session_refused
+    self.assertFalse(CI.CS.radar_session_refused)
 
 
-class TestBrakeHold:
+class TestBrakeHold(unittest.TestCase):
   """GEAR.BRAKE_HOLD is the body ECU reporting that it owns the standstill hold. Stock relaxes
   its own command the instant this sets, so the payloads below come straight off the two logs
   that pinned the signal down: a hold that latched (route caace206f6 seg 8, 0x17 at 1157.34 s)
   and one that never did (route 00000065 seg 4, stuck at 0x07 while the car crept)."""
 
-  @pytest.mark.parametrize(("payload", "expected"), [
+  HOLD_BIT_CASES = [
     ("142007ff02f00000", False),  # hold not taken over: keep braking
     ("142017ff02f00000", True),   # body has the brakes
     ("14200fff02f00000", False),  # released again at the resume
-  ])
-  def test_decodes_the_hold_bit(self, payload, expected):
-    CI = _interface()
-    # CANParser registers a message lazily on first access, so the first frame only arms it
-    for i in range(2):
-      CI.update([(int(i * DT_CTRL * 1e9), [(0x228, bytes.fromhex(payload), 0)])])
-    assert CI.CS.brake_hold is expected
+  ]
+
+  def test_decodes_the_hold_bit(self):
+    for payload, expected in self.HOLD_BIT_CASES:
+      with self.subTest(payload=payload):
+        CI = _interface()
+        # CANParser registers a message lazily on first access, so the first frame only arms it
+        for i in range(2):
+          CI.update([(int(i * DT_CTRL * 1e9), [(0x228, bytes.fromhex(payload), 0)])])
+        self.assertIs(CI.CS.brake_hold, expected)
 
   def test_defaults_to_not_held(self):
     # nothing parsed yet must read as "the car is not holding", the direction that keeps braking
-    assert not _interface().CS.brake_hold
+    self.assertFalse(_interface().CS.brake_hold)
 
 
-class TestTwoMasterGuard:
+class TestTwoMasterGuard(unittest.TestCase):
   """The stock-radar guard wears two hats: before the first teardown it is the expected boot
   phase and must only hold availability low (no fault alert); once the radar has been silenced,
   hearing it again is a genuine two-master conflict and must raise accFaulted."""
@@ -208,16 +213,16 @@ class TestTwoMasterGuard:
     # radar broadcasting, teardown not started: engagement blocked quietly, no Cruise Fault
     CI = _interface()
     ret, _ = self._feed_guard(CI, 5.0, radar_alive=True)
-    assert not ret.accFaulted
-    assert not ret.cruiseState.available
+    self.assertFalse(ret.accFaulted)
+    self.assertFalse(ret.cruiseState.available)
 
   def test_availability_arrives_with_radar_silence(self):
     CI = _interface()
     ret, n = self._feed_guard(CI, 5.0, radar_alive=True)
     ret, n = self._feed_guard(CI, CarControllerParams.STOCK_RADAR_GUARD_T + 0.5,
                               radar_alive=False, start_frame=n)
-    assert not ret.accFaulted
-    assert ret.cruiseState.available
+    self.assertFalse(ret.accFaulted)
+    self.assertTrue(ret.cruiseState.available)
 
   def test_radar_return_after_teardown_is_a_fault(self):
     CI = _interface()
@@ -225,15 +230,15 @@ class TestTwoMasterGuard:
     ret, n = self._feed_guard(CI, CarControllerParams.STOCK_RADAR_GUARD_T + 0.5,
                               radar_alive=False, start_frame=n)
     ret, n = self._feed_guard(CI, 0.5, radar_alive=True, start_frame=n)
-    assert ret.accFaulted
+    self.assertTrue(ret.accFaulted)
     # availability keys on the latched "was silenced", so a transient return does not
     # yank lateral out from under MADS on top of the fault
-    assert ret.cruiseState.available
+    self.assertTrue(ret.cruiseState.available)
     # silence restores the clean state
     ret, n = self._feed_guard(CI, CarControllerParams.STOCK_RADAR_GUARD_T + 0.5,
                               radar_alive=False, start_frame=n)
-    assert not ret.accFaulted
-    assert ret.cruiseState.available
+    self.assertFalse(ret.accFaulted)
+    self.assertTrue(ret.cruiseState.available)
 
   def test_stock_engagement_inside_the_guard_is_not_reported(self):
     # The radar is still master during the boot phase, so a stock MRCC engage is not ours to
@@ -241,8 +246,8 @@ class TestTwoMasterGuard:
     # every off-switch shut (route 00000057).
     CI = _interface()
     ret, _ = self._feed_guard(CI, 5.0, radar_alive=True, acc_active=True)
-    assert not ret.cruiseState.available
-    assert not ret.cruiseState.enabled
+    self.assertFalse(ret.cruiseState.available)
+    self.assertFalse(ret.cruiseState.enabled)
 
   def test_engagement_still_live_when_the_guard_lifts_is_not_adopted(self):
     # Silence alone must not turn a pre-existing stock engagement into an openpilot engage:
@@ -251,8 +256,8 @@ class TestTwoMasterGuard:
     ret, n = self._feed_guard(CI, 5.0, radar_alive=True, acc_active=True)
     ret, n = self._feed_guard(CI, CarControllerParams.STOCK_RADAR_GUARD_T + 0.5,
                               radar_alive=False, acc_active=True, start_frame=n)
-    assert ret.cruiseState.available
-    assert not ret.cruiseState.enabled
+    self.assertTrue(ret.cruiseState.available)
+    self.assertFalse(ret.cruiseState.enabled)
 
   def test_engagement_after_an_idle_sample_is_adopted(self):
     CI = _interface()
@@ -260,12 +265,12 @@ class TestTwoMasterGuard:
     ret, n = self._feed_guard(CI, CarControllerParams.STOCK_RADAR_GUARD_T + 0.5,
                               radar_alive=False, acc_active=True, start_frame=n)
     ret, n = self._feed_guard(CI, 0.2, radar_alive=False, acc_active=False, start_frame=n)
-    assert not ret.cruiseState.enabled
+    self.assertFalse(ret.cruiseState.enabled)
     ret, n = self._feed_guard(CI, 0.2, radar_alive=False, acc_active=True, start_frame=n)
-    assert ret.cruiseState.enabled
+    self.assertTrue(ret.cruiseState.enabled)
 
 
-class TestSpeedSignLimit:
+class TestSpeedSignLimit(unittest.TestCase):
   """CAM_TRAFFIC_SIGNS.SPEED_SIGN_ON is a 2-bit field carrying the display unit, not a 1-bit
   on-flag: 1 = limit displayed in mph, 2 = displayed in km/h, 0 = none. Which value an FSC
   emits tracks its market, not the cluster's unit setting. Payloads are real captures: mph
@@ -273,7 +278,7 @@ class TestSpeedSignLimit:
   ded445e51c0e1830|00000007--4b5a89a1ce) where the old 1-bit decode at bit 12 read 0 and SLA
   never saw a limit."""
 
-  @pytest.mark.parametrize(("payload", "expected_ms"), [
+  UNIT_CASES = [
     ("0000000002005300", 0.0),                 # no limit displayed
     ("0650000002005300", 25 * CV.MPH_TO_MS),   # US 25 mph
     ("0a10000003001300", 40 * CV.MPH_TO_MS),   # US 40 mph
@@ -281,32 +286,38 @@ class TestSpeedSignLimit:
     ("0a20000002000900", 40 * CV.KPH_TO_MS),   # NZ 40 km/h
     ("0ca0000002000900", 50 * CV.KPH_TO_MS),   # NZ 50 km/h
     ("1920000002010900", 100 * CV.KPH_TO_MS),  # NZ 100 km/h
-  ])
-  def test_unit_comes_from_the_frame(self, payload, expected_ms):
-    CI = _interface()
-    ret_sp = None
-    for i in range(2):
-      _, ret_sp = CI.update([(int(i * DT_CTRL * 1e9), [(0x35F, bytes.fromhex(payload), 2)])])
-    assert ret_sp.speedLimit == pytest.approx(expected_ms)
+  ]
 
-  @pytest.mark.parametrize(("sign_on", "speed_sign"), [
+  def test_unit_comes_from_the_frame(self):
+    for payload, expected_ms in self.UNIT_CASES:
+      with self.subTest(payload=payload):
+        CI = _interface()
+        ret_sp = None
+        for i in range(2):
+          _, ret_sp = CI.update([(int(i * DT_CTRL * 1e9), [(0x35F, bytes.fromhex(payload), 2)])])
+        self.assertAlmostEqual(ret_sp.speedLimit, expected_ms, delta=max(abs(expected_ms) * 1e-6, 1e-12))
+
+  IMPLAUSIBLE_CASES = [
     (1, 120),  # above any real mph posting
     (2, 127),  # all-ones: invalid sentinel
     (3, 50),   # undefined state
     (1, 0),    # displayed-but-zero
-  ])
-  def test_implausible_frames_read_as_no_limit(self, sign_on, speed_sign):
+  ]
+
+  def test_implausible_frames_read_as_no_limit(self):
     from opendbc.can import CANPacker
     packer = CANPacker("mazda_2017")
-    msg = packer.make_can_msg("CAM_TRAFFIC_SIGNS", 2, {"SPEED_SIGN_ON": sign_on, "SPEED_SIGN": speed_sign})
-    CI = _interface()
-    ret_sp = None
-    for i in range(2):
-      _, ret_sp = CI.update([(int(i * DT_CTRL * 1e9), [(msg[0], msg[1], msg[2])])])
-    assert ret_sp.speedLimit == 0.0
+    for sign_on, speed_sign in self.IMPLAUSIBLE_CASES:
+      with self.subTest(sign_on=sign_on, speed_sign=speed_sign):
+        msg = packer.make_can_msg("CAM_TRAFFIC_SIGNS", 2, {"SPEED_SIGN_ON": sign_on, "SPEED_SIGN": speed_sign})
+        CI = _interface()
+        ret_sp = None
+        for i in range(2):
+          _, ret_sp = CI.update([(int(i * DT_CTRL * 1e9), [(msg[0], msg[1], msg[2])])])
+        self.assertEqual(ret_sp.speedLimit, 0.0)
 
 
-class TestCancelUnderBraking:
+class TestCancelUnderBraking(unittest.TestCase):
   """The availability brake-hold exists for brake-only PEDALS samples that arrive with both
   bits low mid-press. A wheel CANCEL turns the MRCC main state off for real and must land
   even with the brake down (route 7f9e3ff336 t+484-488: cancel mashed under braking was
@@ -320,7 +331,7 @@ class TestCancelUnderBraking:
     for i in range(int(guard / DT_CTRL)):
       msgs = [packer.make_can_msg("PEDALS", 0, {"ACC_OFF": 1})]
       ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(m[0], m[1], m[2]) for m in msgs])])
-    assert ret.cruiseState.available
+    self.assertTrue(ret.cruiseState.available)
     return packer, int(guard / DT_CTRL)
 
   def _feed(self, CI, packer, n0, seconds, brake, cancel):
@@ -336,13 +347,13 @@ class TestCancelUnderBraking:
     CI = _interface()
     packer, n = self._armed_and_silent(CI)
     ret, n = self._feed(CI, packer, n, 1.0, brake=True, cancel=False)
-    assert ret.cruiseState.available
+    self.assertTrue(ret.cruiseState.available)
 
   def test_cancel_lands_through_the_brake(self):
     CI = _interface()
     packer, n = self._armed_and_silent(CI)
     ret, n = self._feed(CI, packer, n, 0.3, brake=True, cancel=True)
-    assert not ret.cruiseState.available
+    self.assertFalse(ret.cruiseState.available)
 
   def test_cancel_context_outlives_the_press(self):
     # the PEDALS reaction can trail the button: press-and-release while still armed, then the
@@ -354,12 +365,12 @@ class TestCancelUnderBraking:
       msgs = [packer.make_can_msg("PEDALS", 0, {"ACC_OFF": 1}),
               packer.make_can_msg("CRZ_BTNS", 0, {"CAN_OFF": 1})]
       ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(m[0], m[1], m[2]) for m in msgs])])
-    assert ret.cruiseState.available
+    self.assertTrue(ret.cruiseState.available)
     ret, n = self._feed(CI, packer, n + 5, 0.2, brake=True, cancel=False)
-    assert not ret.cruiseState.available
+    self.assertFalse(ret.cruiseState.available)
 
 
-class TestCruiseStandstill:
+class TestCruiseStandstill(unittest.TestCase):
   """PEDALS.STANDSTILL is the PCM's wheel-speed "stopped" bit, not a stock-ACC hold state.
 
   LongControl's starting_condition is `not should_stop and not cruise_standstill and not
@@ -384,8 +395,8 @@ class TestCruiseStandstill:
   def test_not_reported_under_openpilot_longitudinal(self):
     # the stock MRCC is not in the loop at all here: its radar is silenced and we synthesize
     # its frames, so there is no stock standstill state to report
-    assert not self._standstill(alpha_long=True)
+    self.assertFalse(self._standstill(alpha_long=True))
 
   def test_still_reported_with_stock_longitudinal(self):
     # stock long still needs it: it is what drives CC.cruiseControl.resume in controlsd
-    assert self._standstill(alpha_long=False)
+    self.assertTrue(self._standstill(alpha_long=False))

@@ -320,6 +320,7 @@ class CarState(CarStateBase, CarStateExt):
       ("CAM_LANEINFO", float("nan")),
       ("CAM_TRAFFIC_SIGNS", float("nan")),
       ("CAM_EMPTY", float("nan")),
+      ("CAM_PEDESTRIAN", float("nan")),
     ]
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, 0),
