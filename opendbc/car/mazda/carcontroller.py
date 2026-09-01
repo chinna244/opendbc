@@ -74,7 +74,6 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.tja_mrcc_raw_off_frames = 0
     self.mads_white_hud_off_frames = 0
     self.mads_white_hud_on_bus = False
-    self.mads_white_hud_norm_base: bytes | None = None
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -410,16 +409,12 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       mrcc_off
     )
     if white_hud_off_base_allowed:
-      if self.mads_white_hud_norm_base is not None and self.mads_white_hud_norm_base != hud_base:
-        self.mads_white_hud_off_frames = 0
-      self.mads_white_hud_norm_base = hud_base
       self.mads_white_hud_off_frames = min(
         self.mads_white_hud_off_frames + 1,
         MADS_WHITE_HUD_OFF_CONFIRM_FRAMES,
       )
     else:
       self.mads_white_hud_off_frames = 0
-      self.mads_white_hud_norm_base = None
 
     white_hud = (
       white_hud_off_base_allowed and

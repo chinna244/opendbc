@@ -585,4 +585,3 @@ class TestWhiteHudController:
       raw = TRANS_4102 if i % 2 else LANE_VISIBLE_4102
       controller.update(CC, CC_SP, self._carstate(raw=raw), round((MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 2 + i) * DT_CTRL * 1e9))
     assert controller.mads_white_hud_off_frames == MADS_WHITE_HUD_OFF_CONFIRM_FRAMES
-    assert controller.mads_white_hud_norm_base == LANE_VISIBLE_4102
