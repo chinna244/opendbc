@@ -594,9 +594,16 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
                                                      long_active=long_engaged, acc_available=acc_available,
                                                      brake_pressed=CS.out.brakePressed,
                                                      stopping=sm.stop_bits, resume_unlatching=sm.resume_unlatching))
-        can_sends.append(mazdacan.create_crz_ctrl(self.packer, bus, long_engaged, acc_available, gap,
-                                                  self.lead_adv.has_lead, self.lead_adv.ctrl_phase,
-                                                  acc_active_2))
+        crz_ctrl = mazdacan.create_crz_ctrl(self.packer, bus, long_engaged, acc_available, gap,
+                                            self.lead_adv.has_lead, self.lead_adv.ctrl_phase,
+                                            acc_active_2)
+        if (bus == 0 and CC_SP.mads.active and
+            not CS.mrcc_armed_raw and not CS.cruise_available and not CS.cruise_enabled):
+          addr, dat, crz_bus = crz_ctrl
+          dat = bytearray(dat)
+          dat[4] |= 0x20
+          crz_ctrl = (addr, bytes(dat), crz_bus)
+        can_sends.append(crz_ctrl)
       self.long_counter += 1
 
     return can_sends

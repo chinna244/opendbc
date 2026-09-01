@@ -267,6 +267,7 @@ class TestMazdaLongitudinalMessages(unittest.TestCase):
         dat = mazdacan.create_crz_ctrl(packer, 0, long_active, acc_available, gap, has_lead, phase, acc_active_2)[1]
         self.assertEqual(dat.hex(), expected)
 
+
   def test_radar_frames_match_stock(self):
     expected = [
       (0x499, "0008c00000000000"),
@@ -314,6 +315,7 @@ class TestMazdaLongitudinalMessages(unittest.TestCase):
         self.assertEqual(dat[2], mazdacan.LEAD_TRACK_TEMPLATE[2])
         self.assertEqual(dat[4] & 0x1f, mazdacan.LEAD_TRACK_TEMPLATE[4] & 0x1f)
         self.assertEqual(dat[5:], mazdacan.LEAD_TRACK_TEMPLATE[5:])
+
 
 def _sm():
   return StandstillHold()
@@ -593,12 +595,19 @@ def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas
              stock_radar_alive=False, fsc_settled=True, handback=False, cruise_engaged=False,
              enabled=None, lead_d_rel=12.0, lead_v_rel=0.0, brake_hold=False, brake_pressed=False,
              radar_was_silenced=False, lat_active=False, torque=0., v_ego=0., driver_torque=0.,
-             steering_pressed=False, lkas_blocked=False, lkas_effective=0):
+             steering_pressed=False, lkas_blocked=False, lkas_effective=0,
+             mads_active=False, mrcc_armed_raw=None, cruise_available=None, cruise_enabled=None):
   # openpilot is enabled whenever it is longitudinally active; a gas override is the case
   # where it stays enabled with longActive low. The mock carries everything the full
   # CarController.update() path reads, so tests can drive update() as well as
   # update_longitudinal() from the one builder.
   enabled = long_active if enabled is None else enabled
+  if mrcc_armed_raw is None:
+    mrcc_armed_raw = bool(cruise_engaged or available)
+  if cruise_available is None:
+    cruise_available = mrcc_armed_raw
+  if cruise_enabled is None:
+    cruise_enabled = cruise_engaged
   out = SimpleNamespace(standstill=standstill, gasPressed=gas, brakePressed=brake_pressed,
                         vEgoRaw=v_ego, steeringTorque=driver_torque, steeringPressed=steering_pressed,
                         cruiseState=SimpleNamespace(available=available, enabled=cruise_engaged))
@@ -610,13 +619,16 @@ def _mock_cc(long_active=True, accel=0.5, long_state=None, standstill=False, gas
                        actuators=actuators, cruiseControl=cruise, hudControl=hud)
   icbm = SimpleNamespace(sendButton=structs.IntelligentCruiseButtonManagement.SendButtonState.none)
   cc_sp = SimpleNamespace(stockEcuHandBack=handback, intelligentCruiseButtonManagement=icbm,
-                          leadOne=SimpleNamespace(dRel=lead_d_rel, vRel=lead_v_rel))
+                          leadOne=SimpleNamespace(dRel=lead_d_rel, vRel=lead_v_rel),
+                          mads=SimpleNamespace(active=mads_active))
   cs = SimpleNamespace(out=out, resume_button=0, brake_hold=brake_hold,
                        accel_button=0, decel_button=0,
                        stock_radar_alive=stock_radar_alive, fsc_settled=fsc_settled,
                        radar_session_refused=False, radar_was_silenced=radar_was_silenced,
                        crz_btns_counter=0, cancel_button=0, lkas_allowed_speed=True,
                        lkas_blocked=lkas_blocked, lkas_effective=lkas_effective,
+                       mrcc_armed_raw=mrcc_armed_raw, cruise_available=cruise_available,
+                       cruise_enabled=cruise_enabled,
                        cam_lkas_live=True,
                        cam_lkas={"BIT_1": 0, "ERR_BIT_1": 0, "ERR_BIT_2": 0, "LINE_NOT_VISIBLE": 0},
                        cam_laneinfo={s: 0 for s in ("LINE_VISIBLE", "LINE_NOT_VISIBLE", "LANE_LINES",
@@ -1532,6 +1544,38 @@ class TestRadarSessionSequencing(unittest.TestCase):
     # and settles back to silenced once quiet again
     sends = self._step(cc, stock_radar_alive=False, fsc_settled=True)
     self.assertTrue(SESSION_PROG_DAT not in self._uds(sends))
+
+  def test_crz_ctrl_standby_marker_experiment(self):
+    off = dict(stock_radar_alive=False, fsc_settled=True, long_active=False, available=False,
+                mrcc_armed_raw=False, cruise_available=False, cruise_enabled=False, lead_visible=False)
+    for extra, want_bus0 in (
+      (dict(mads_active=False), "0201010000000000"),
+      (dict(mads_active=True), "0201010020000000"),
+      (dict(mads_active=True, mrcc_armed_raw=True, cruise_available=True, available=True), "02010b0000000000"),
+    ):
+      cc = _cc()
+      for _ in range(100):
+        _step(cc, **{**off, **extra})
+      dat0 = dat2 = None
+      for _ in range(CarControllerParams.LONG_STEP):
+        sends = _step(cc, **{**off, **extra})
+        dat0 = _frame(sends, 0x21c, 0) or dat0
+        dat2 = _frame(sends, 0x21c, 2) or dat2
+      self.assertEqual(dat0.hex(), want_bus0)
+      if want_bus0 == "0201010020000000":
+        self.assertEqual(dat2.hex(), "0201010000000000")
+    cc = _cc()
+    active = dict(mads_active=True, long_active=True, enabled=True, cruise_engaged=True,
+                  mrcc_armed_raw=True, cruise_available=True, cruise_enabled=True, available=True)
+    for _ in range(100):
+      _step(cc, **{**off, **active})
+    dat = None
+    for _ in range(CarControllerParams.LONG_STEP):
+      dat = _frame(_step(cc, **{**off, **active}), 0x21c, 0) or dat
+    self.assertEqual(int(_decode("CRZ_CTRL", 0x21c, dat)["CRZ_ACTIVE"]), 1)
+    self.assertEqual(dat[4] & 0x20, 0)
+
+
 class TestCamLkasTorqueGate:
   """Stale CAM_LKAS must drop commanded torque on the wire, not only the liveness flag."""
 
