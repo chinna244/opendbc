@@ -25,21 +25,14 @@ ICBM_SET_BUTTONS = (
 # Synthetic radar frames go to the car and to the camera; the panda only forwards
 # received frames between those buses, not our own transmissions.
 LONG_BUSES = (0, 2)
+TJA_MRCC_RELEASE_WAIT_FRAMES = 25
+TJA_MRCC_FIRST_TX_DELAY_NANOS = 50_000_000
+TJA_MRCC_MAX_TX_FRAMES = 3
 # PEDALS can briefly report both ACC bits low during a brake transition. Require
 # raw-off to persist before it overrides the intentionally brake-held public cruise
 # state. Route 56's real TJA cleanup stayed raw-off for seconds, so this remains well
 # inside the interval before another deliberate button press.
 TJA_MRCC_RAW_OFF_CONFIRM_FRAMES = 5
-# Keep BIT1=0 newer than the wheel's ~10 Hz idle CRZ_BTNS. Isolated taps on
-# consecutive OEM counters are overwritten (route 00000030 t+38.6). 300 ms is
-# long enough to outlast a few idle frames and short enough not to own the bus.
-TJA_MRCC_HOLD_TIMEOUT_FRAMES = int(0.3 / DT_CTRL)
-# Route 33: physical MRCC holds and successful synth cleanups advance to a fresh
-# CTR about every 50–60 ms of active BIT1=0 TX (not every 10 ms controller tick).
-# Successful synth episodes needed only 1–2 unique packed CTRs with lead ≤ 1 over
-# the concurrent OEM wheel — never a third unique CTR.
-TJA_MRCC_CTR_STEP_FRAMES = int(0.06 / DT_CTRL)
-TJA_MRCC_MAX_UNIQUE_CTRS = 2
 # WHITE uses CAM_LANEINFO.TJA=2, which the Mazda body/MRCC also consumes as
 # functional TJA state. Only expose it after cruise has been completely off and
 # quiet for 0.5 s; any interaction withdraws it immediately.
@@ -71,14 +64,12 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.tja_button_prev = False
     self.tja_mrcc_unarm_pending = False
     self.tja_mrcc_saw_armed = False
-    self.tja_mrcc_hold_frames = 0
+    self.tja_mrcc_release_counter: int | None = None
+    self.tja_mrcc_release_wait_frames = 0
+    self.tja_mrcc_first_tx_not_before_nanos: int | None = None
+    self.tja_mrcc_wait_for_fresh_counter_after_op = False
+    self.tja_mrcc_press_frames = 0
     self.tja_mrcc_tx_frames = 0
-    # Seed for create_button_cmd (packs CTR = seed+1). Re-TX the same seed at 100 Hz;
-    # advance seed only every TJA_MRCC_CTR_STEP_FRAMES of active MRCC-OFF TX, and at
-    # most TJA_MRCC_MAX_UNIQUE_CTRS unique packed CTRs per episode (route 33).
-    self.tja_mrcc_cmd_counter: int | None = None
-    self.tja_mrcc_unique_ctrs = 0
-    self.tja_mrcc_ctr_tx_frames = 0
     self.tja_mrcc_armed_prev: bool | None = None
     self.tja_mrcc_raw_off_frames = 0
     self.mads_white_hud_off_frames = 0
@@ -182,14 +173,15 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # On the CX-5 2022, the physical TJA button also arms Mazda MRCC on bus 0.
     # Panda can strip the camera-forwarded copy, but it cannot hide a frame from ECUs
     # already sharing bus 0. If MRCC was off before TJA, undo only that side effect
-    # after TJA release with a 100 Hz MRCC-off hold. Route 33: re-TX the current
-    # packed CTR every 10 ms for bus ownership, and advance to a fresh CTR only about
-    # every 60 ms of active TX (max 2 unique CTRs), matching physical holds. Preserve
-    # MRCC that was already armed before TJA. A TJA-caused arm during
-    # selfdriveInitializing is latched in CarState and inherited on the first apply
-    # (route 00000031 t+8.4).
+    # after TJA release with a physical-style MRCC-off hold. Route 61 showed three
+    # isolated later retries can all be ignored; a physical press stays asserted on
+    # consecutive counters. Never send more than three frames total for one ownership
+    # episode. A later physical TJA can interrupt the hold; any replacement hold uses
+    # only the remaining global budget. Stop immediately on raw-off and preserve MRCC
+    # that was already armed before TJA.
     if has_tja_mads(self.CP):
       tja_button = bool(getattr(CS, "tja_button", 0))
+      crz_btns_counter = int(CS.crz_btns_counter)
       filtered_mrcc_armed = bool(CS.cruise_available) if hasattr(CS, "cruise_available") else \
         bool(getattr(getattr(CS.out, "cruiseState", None), "available", False))
       raw_mrcc_armed = bool(getattr(CS, "mrcc_armed_raw", filtered_mrcc_armed))
@@ -200,91 +192,145 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       # deliberately cached until brake release.
       mrcc_armed = raw_mrcc_armed or (filtered_mrcc_armed and not raw_off_confirmed)
       tja_pressed = tja_button and not self.tja_button_prev
-      driver_cruise_cmd = (
-        getattr(CS, "cancel_button", 0) == 1 or getattr(CS, "resume_button", 0) == 1 or
-        bool(getattr(CS, "accel_button", 0)) or bool(getattr(CS, "decel_button", 0)) or
-        getattr(CS, "mrcc_button", 0) == 1 or
-        getattr(CS, "distance_button_active", 0) == 1 or getattr(CS, "distance_button", 0) == 1
-      )
+      tja_released = not tja_button and self.tja_button_prev
 
-      def end_cleanup():
-        self.tja_mrcc_unarm_pending = False
-        self.tja_mrcc_saw_armed = False
-        self.tja_mrcc_hold_frames = 0
-        self.tja_mrcc_tx_frames = 0
-        self.tja_mrcc_cmd_counter = None
-        self.tja_mrcc_unique_ctrs = 0
-        self.tja_mrcc_ctr_tx_frames = 0
-        # Drop any CarState observation of this same TJA side-effect so a post-init
-        # latch cannot restart a second ~300 ms episode after timeout (route 33).
-        if hasattr(CS, "tja_mrcc_side_effect_pending"):
-          CS.tja_mrcc_side_effect_pending = False
-
-      def begin_cleanup(*, saw_armed: bool):
-        self.tja_mrcc_unarm_pending = True
-        self.tja_mrcc_saw_armed = saw_armed
-        self.tja_mrcc_hold_frames = 0
-        self.tja_mrcc_tx_frames = 0
-        self.tja_mrcc_cmd_counter = None
-        self.tja_mrcc_unique_ctrs = 0
-        self.tja_mrcc_ctr_tx_frames = 0
-
-      # First apply after init: consume a CarState-latched TJA-caused arm.
-      if (not self.tja_mrcc_unarm_pending and
-          getattr(CS, "tja_mrcc_side_effect_pending", False)):
-        begin_cleanup(saw_armed=raw_mrcc_armed)
-        CS.tja_mrcc_side_effect_pending = False
-
-      if tja_pressed and not self.tja_mrcc_unarm_pending:
-        # PEDALS may already show the TJA-induced arm in the same update as the button
-        # edge. The previous stable sample is the state that existed before the press.
-        mrcc_armed_before_press = self.tja_mrcc_armed_prev if self.tja_mrcc_armed_prev is not None else mrcc_armed
-        if not mrcc_armed_before_press:
-          begin_cleanup(saw_armed=False)
-          # Same TJA edge also arms the CarState latch once PEDALS catch up. Clear it
-          # now so timeout cannot re-inherit this episode.
-          if hasattr(CS, "tja_mrcc_side_effect_pending"):
-            CS.tja_mrcc_side_effect_pending = False
+      if tja_pressed:
+        if not self.tja_mrcc_unarm_pending:
+          # PEDALS may already show the TJA-induced arm in the same update as the button
+          # edge. The previous stable sample is the state that existed before the press.
+          mrcc_armed_before_press = self.tja_mrcc_armed_prev if self.tja_mrcc_armed_prev is not None else mrcc_armed
+          if not mrcc_armed_before_press:
+            # Acquire a new ownership episode. The cumulative three-frame budget resets
+            # only here, never for a later TJA while leftover MRCC remains armed.
+            self.tja_mrcc_unarm_pending = True
+            self.tja_mrcc_saw_armed = False
+            self.tja_mrcc_tx_frames = 0
+            self.tja_mrcc_press_frames = 0
+        elif self.tja_mrcc_press_frames > 0:
+          # Route 5d: the second TJA ends this uninterrupted hold, but not ownership
+          # of the TJA-caused arm. Any replacement hold uses only the global budget
+          # remaining after the already-transmitted frames.
+          self.tja_mrcc_press_frames = 0
+        # Keep ownership and wait for the newest release. No TX while TJA is held.
+        self.tja_mrcc_release_counter = None
+        self.tja_mrcc_release_wait_frames = 0
+        self.tja_mrcc_first_tx_not_before_nanos = None
+        self.tja_mrcc_wait_for_fresh_counter_after_op = False
 
       if self.tja_mrcc_unarm_pending:
         self.tja_mrcc_saw_armed |= raw_mrcc_armed
-        # While we own cleanup, keep eating a late CarState latch for this episode.
-        if hasattr(CS, "tja_mrcc_side_effect_pending"):
-          CS.tja_mrcc_side_effect_pending = False
-        if driver_cruise_cmd or CC.cruiseControl.cancel or CC.cruiseControl.resume:
-          end_cleanup()
+        if (CS.cancel_button == 1 or getattr(CS, "resume_button", 0) == 1 or
+            CS.accel_button or CS.decel_button or getattr(CS, "mrcc_button", 0) == 1):
+          # Driver cruise-button activity owns CRZ_BTNS regardless of whether TJA
+          # is held or a cleanup counter has been anchored.
+          self.tja_mrcc_unarm_pending = False
+          self.tja_mrcc_press_frames = 0
+        elif (CC.cruiseControl.cancel or CC.cruiseControl.resume) and self.tja_mrcc_tx_frames > 0:
+          # A synthetic hold has already spent budget. Do not allow cancel/resume
+          # during TJA hold to resume later as a replacement press.
+          self.tja_mrcc_unarm_pending = False
+          self.tja_mrcc_press_frames = 0
         elif self.tja_mrcc_saw_armed and raw_off_confirmed:
-          end_cleanup()
-        elif tja_button:
-          # Pause TX while TJA is held. Keep the leftover arm and the episode timer:
-          # a later TJA must not restart the 300 ms budget or treat this as pre-armed.
-          pass
-        else:
-          # Count every post-release cycle, including raw-OFF dropouts, so OFF/ON
-          # flickers cannot stretch cleanup past the original 300 ms episode.
-          self.tja_mrcc_hold_frames += 1
-          if self.tja_mrcc_hold_frames > TJA_MRCC_HOLD_TIMEOUT_FRAMES:
-            end_cleanup()
-          elif raw_mrcc_armed:
-            if self.tja_mrcc_cmd_counter is None:
-              # First packed CTR = OEM+1 via create_button_cmd, like route 33 successes.
-              self.tja_mrcc_cmd_counter = int(CS.crz_btns_counter)
-              self.tja_mrcc_unique_ctrs = 1
-              self.tja_mrcc_ctr_tx_frames = 0
-            elif (self.tja_mrcc_ctr_tx_frames >= TJA_MRCC_CTR_STEP_FRAMES and
-                  self.tja_mrcc_unique_ctrs < TJA_MRCC_MAX_UNIQUE_CTRS):
-              # ~60 ms of active TX at this packed CTR → one fresh consecutive CTR.
-              self.tja_mrcc_cmd_counter = (self.tja_mrcc_cmd_counter + 1) % 16
-              self.tja_mrcc_unique_ctrs += 1
-              self.tja_mrcc_ctr_tx_frames = 0
-            can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP,
-                                                        self.tja_mrcc_cmd_counter,
-                                                        Buttons.MRCC_OFF, CS))
-            self.tja_mrcc_ctr_tx_frames += 1
-            tja_mrcc_cleanup_tx = True
-            self.tja_mrcc_tx_frames += 1
-          # raw OFF: stop TX immediately; keep ownership / CTR sequence until confirm
-          # or a re-arm inside the timeout resumes the hold.
+          self.tja_mrcc_unarm_pending = False
+          self.tja_mrcc_press_frames = 0
+        elif tja_released:
+          if self.tja_mrcc_tx_frames > 0 and not raw_mrcc_armed:
+            # Delayed acknowledgement of an interrupted press can arrive while TJA is
+            # held. Observe it before arming a replacement press.
+            self.tja_mrcc_unarm_pending = False
+            self.tja_mrcc_press_frames = 0
+          else:
+            # Experimentally delay only the first actual MRCC_OFF frame. Replacement
+            # holds after transmission retain the existing consecutive-counter behavior.
+            self.tja_mrcc_release_counter = crz_btns_counter
+            self.tja_mrcc_release_wait_frames = 0
+            self.tja_mrcc_first_tx_not_before_nanos = (
+              now_nanos + TJA_MRCC_FIRST_TX_DELAY_NANOS if self.tja_mrcc_tx_frames == 0 else None
+            )
+            self.tja_mrcc_wait_for_fresh_counter_after_op = False
+        elif self.tja_mrcc_release_counter is not None:
+          if not raw_mrcc_armed:
+            # Raw-off is sufficient to stop an in-flight transaction. Waiting for the
+            # filtered state here could send another toggle after a manual/accepted off.
+            self.tja_mrcc_unarm_pending = False
+            self.tja_mrcc_press_frames = 0
+          elif CC.cruiseControl.cancel or CC.cruiseControl.resume:
+            # No budget has been spent. Wait for a new OEM counter after this
+            # command clears rather than sending from an old retained sample.
+            self.tja_mrcc_release_counter = crz_btns_counter
+            self.tja_mrcc_release_wait_frames = 0
+            self.tja_mrcc_wait_for_fresh_counter_after_op = True
+          elif self.tja_mrcc_tx_frames >= TJA_MRCC_MAX_TX_FRAMES:
+            self.tja_mrcc_unarm_pending = False
+            self.tja_mrcc_press_frames = 0
+          else:
+            self.tja_mrcc_release_wait_frames += 1
+            counter_delta = (crz_btns_counter - self.tja_mrcc_release_counter) % 16
+            first_tx_waiting = (
+              self.tja_mrcc_tx_frames == 0 and
+              self.tja_mrcc_first_tx_not_before_nanos is not None
+            )
+            first_tx_due = (
+              first_tx_waiting and
+              now_nanos >= self.tja_mrcc_first_tx_not_before_nanos and
+              not self.tja_mrcc_wait_for_fresh_counter_after_op
+            )
+            if first_tx_waiting:
+              if self.tja_mrcc_wait_for_fresh_counter_after_op:
+                if counter_delta == 1:
+                  self.tja_mrcc_wait_for_fresh_counter_after_op = False
+                elif counter_delta > 1:
+                  self.tja_mrcc_release_counter = crz_btns_counter
+              if not self.tja_mrcc_wait_for_fresh_counter_after_op:
+                # Keep the release anchor synchronized with the latest OEM counter.
+                # At the deadline, create_button_cmd packs latest_counter + 1.
+                self.tja_mrcc_release_counter = crz_btns_counter
+                self.tja_mrcc_release_wait_frames = 0
+                first_tx_due = now_nanos >= self.tja_mrcc_first_tx_not_before_nanos
+
+            # Experimental change: the delayed first frame is deadline-gated rather
+            # than counter-delta-gated. Follow-ups retain the delta == 1 requirement.
+            if first_tx_due or (not first_tx_waiting and counter_delta == 1):
+              if raw_mrcc_armed:
+                can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, crz_btns_counter, Buttons.MRCC_OFF, CS))
+                tja_mrcc_cleanup_tx = True
+                self.tja_mrcc_tx_frames += 1
+                self.tja_mrcc_press_frames += 1
+                self.tja_mrcc_release_counter = crz_btns_counter
+                self.tja_mrcc_release_wait_frames = 0
+                self.tja_mrcc_first_tx_not_before_nanos = None
+                self.tja_mrcc_wait_for_fresh_counter_after_op = False
+                if self.tja_mrcc_tx_frames >= TJA_MRCC_MAX_TX_FRAMES:
+                  self.tja_mrcc_unarm_pending = False
+                  self.tja_mrcc_press_frames = 0
+              else:
+                self.tja_mrcc_unarm_pending = False
+                self.tja_mrcc_press_frames = 0
+            elif first_tx_waiting:
+              if self.tja_mrcc_release_wait_frames > TJA_MRCC_RELEASE_WAIT_FRAMES:
+                self.tja_mrcc_unarm_pending = False
+                self.tja_mrcc_press_frames = 0
+            elif counter_delta > 1:
+              if self.tja_mrcc_press_frames > 0:
+                # The physical-style hold has been broken.
+                self.tja_mrcc_unarm_pending = False
+                self.tja_mrcc_press_frames = 0
+              elif self.tja_mrcc_release_wait_frames > TJA_MRCC_RELEASE_WAIT_FRAMES:
+                # Repeated pre-start jumps must not suppress ICBM forever.
+                self.tja_mrcc_unarm_pending = False
+                self.tja_mrcc_press_frames = 0
+              else:
+                # Press has not started. A skipped OEM counter is not a broken hold;
+                # wait for the next consecutive counter from here.
+                self.tja_mrcc_release_counter = crz_btns_counter
+            elif self.tja_mrcc_release_wait_frames > TJA_MRCC_RELEASE_WAIT_FRAMES:
+              # A dead/stale CRZ_BTNS stream must not suppress ICBM indefinitely.
+              self.tja_mrcc_unarm_pending = False
+              self.tja_mrcc_press_frames = 0
+
+      if not self.tja_mrcc_unarm_pending:
+        self.tja_mrcc_first_tx_not_before_nanos = None
+        self.tja_mrcc_wait_for_fresh_counter_after_op = False
 
       self.tja_button_prev = tja_button
       self.tja_mrcc_armed_prev = mrcc_armed
