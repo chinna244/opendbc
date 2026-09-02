@@ -1,5 +1,5 @@
 from opendbc.car.can_definitions import CanData
-from opendbc.car.mazda.values import Buttons
+from opendbc.car.mazda.values import Buttons, has_tja_mads
 
 # Captured empty radar tracks required by the body ECU for stop-and-go. Only the counter
 # nibble changes; 0x364 carries the advertised lead when present.
@@ -180,11 +180,21 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool)
   return packer.make_can_msg("CAM_LANEINFO", 0, values)
 
 
-def create_button_cmd(packer, CP, counter, button):
+def create_button_cmd(packer, CP, counter, button, CS=None):
   can = int(button == Buttons.CANCEL)
   res = int(button == Buttons.RESUME)
   inc = int(button == Buttons.SET_PLUS)
   dec = int(button == Buttons.SET_MINUS)
+  mrcc_button = int(button == Buttons.MRCC_OFF)
+  # Live TJA/MODE copy is TJA_MADS-only. Upstream packs MODE_X/Y=0 and leaves TJA clear.
+  if has_tja_mads(CP):
+    tja = int(getattr(CS, "tja_button", 0) == 1)
+    mode_x = int(getattr(CS, "mode_x", 0) == 1)
+    mode_y = int(getattr(CS, "mode_y", 0) == 1)
+  else:
+    tja = 0
+    mode_x = 0
+    mode_y = 0
 
   values = {
     "CAN_OFF": can,
@@ -205,13 +215,16 @@ def create_button_cmd(packer, CP, counter, button):
     "DISTANCE_MORE": 0,
     "DISTANCE_MORE_INV": 1,
 
-    "MODE_X": 0,
-    "MODE_X_INV": 1,
+    # TJA_MADS: copy live wheel bits so OP CRZ_BTNS cannot fabricate a TJA 1→0→1
+    # edge or drop MODE_X/Y while cancel/resume/ICBM is on the bus.
+    "TJA_BUTTON": tja,
+    "MODE_X": mode_x,
+    "MODE_X_INV": (mode_x + 1) % 2,
+    "MODE_Y": mode_y,
+    "MODE_Y_INV": (mode_y + 1) % 2,
 
-    "MODE_Y": 0,
-    "MODE_Y_INV": 1,
-
-    "BIT1": 1,
+    "BIT1": 1 - mrcc_button,
+    "BIT1_INV": mrcc_button,
     "BIT2": 1,
     "BIT3": 1,
     "CTR": (counter + 1) % 16,

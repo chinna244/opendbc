@@ -30,6 +30,11 @@ class CarInterface(CarInterfaceBase):
     else:
       ret.minSteerSpeed = LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS
 
+    # Physical TJA as MADS is verified on CX-5 2022. An EPS swap does not prove the
+    # same TJA button or CRZ_BTNS layout, so TJA_MADS stays platform-scoped.
+    if candidate == CAR.MAZDA_CX5_2022:
+      ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.TJA_MADS.value
+
     # Offer alpha longitudinal only with the EPS that retains lateral control through a stop.
     ret.alphaLongitudinalAvailable = steer_to_zero and not ret.radarUnavailable
     ret.openpilotLongitudinalControl = alpha_long and ret.alphaLongitudinalAvailable

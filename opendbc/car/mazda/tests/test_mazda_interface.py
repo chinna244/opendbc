@@ -120,6 +120,15 @@ class TestMazdaEpsSwap:
     # longitudinal keeps its own bit
     assert bool(CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.LONG.value) == CP.openpilotLongitudinalControl
 
+
+  def test_tja_mads_is_cx5_2022_only(self):
+    flag = MazdaSafetyFlags.TJA_MADS.value
+    assert car_params(CAR.MAZDA_CX5_2022).safetyConfigs[0].safetyParam & flag
+    # An EPS swap does not prove the same TJA button / CRZ_BTNS layout.
+    assert not (car_params(CAR.MAZDA_CX5, car_fw=eps_fw(SWAPPED_EPS_FW)).safetyConfigs[0].safetyParam & flag)
+    assert not (car_params(CAR.MAZDA_CX9_2021).safetyConfigs[0].safetyParam & flag)
+    assert not (car_params(CAR.MAZDA_CX5, car_fw=eps_fw(STOCK_CX5_EPS_FW)).safetyConfigs[0].safetyParam & flag)
+
   @pytest.mark.parametrize("candidate", [CAR.MAZDA_CX5, CAR.MAZDA_CX9, CAR.MAZDA_3, CAR.MAZDA_6])
   def test_docs_are_generated_without_firmware(self, candidate):
     # car_fw is empty when building CARS.md, so the docs must keep advertising dashcam mode

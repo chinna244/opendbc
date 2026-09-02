@@ -136,6 +136,11 @@ class MazdaSafetyFlags(IntFlag):
   LONG = 1
   # Selects the steer-to-zero EPS envelope in panda safety.
   STEER_TO_ZERO_EPS = 2
+  TJA_MADS = 4
+
+
+def has_tja_mads(CP) -> bool:
+  return any(int(sc.safetyParam) & MazdaSafetyFlags.TJA_MADS for sc in CP.safetyConfigs)
 
 
 class WMI(StrEnum):
@@ -209,6 +214,8 @@ class Buttons:
   SET_MINUS = 2
   RESUME = 3
   CANCEL = 4
+  # CX-5 2022 MRCC master is an active-low BIT1/BIT1_INV pair on CRZ_BTNS.
+  MRCC_OFF = 5
 
 
 def match_fw_to_car_fuzzy(live_fw_versions, vin, offline_fw_versions) -> set[str]:

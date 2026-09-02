@@ -309,6 +309,10 @@ void set_mads_params(bool enable_mads, bool disengage_lateral_on_brake, bool pau
   mads_set_alternative_experience(&alternative_experience);
 }
 
+bool get_op_controls_allowed_requests_lateral(void){
+  return get_mads_state()->op_controls_allowed_requests_lateral;
+}
+
 void set_heartbeat_engaged_mads(bool c){
   heartbeat_engaged_mads = c;
 }

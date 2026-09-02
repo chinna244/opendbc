@@ -287,6 +287,13 @@ int safety_fwd_hook(int bus_num, int addr) {
   return blocked ? -1 : destination_bus;
 }
 
+void safety_fwd_modify(int bus_num, CANPacket_t *msg) {
+  if ((current_hooks != NULL) && (current_hooks->fwd_modify != NULL)) {
+    current_hooks->fwd_modify(bus_num, msg);
+  }
+}
+
+
 // Given a CRC-8 poly, generate a static lookup table to use with a fast CRC-8
 // algorithm. Called at init time for safety modes using CRC-8.
 void gen_crc_lookup_table_8(uint8_t poly, uint8_t crc_lut[]) {
@@ -474,6 +481,9 @@ int set_safety_hooks(uint16_t mode, uint16_t param) {
   reset_sample(&curvature_state.meas);
 
   controls_allowed = false;
+  // Default: op_controls_allowed rising may request lateral. Car init (e.g. Mazda
+  // TJA_MADS) may disable this after hooks are selected.
+  mads_set_op_controls_allowed_requests_lateral(true);
   relay_malfunction_reset();
   safety_rx_checks_invalid = false;
 

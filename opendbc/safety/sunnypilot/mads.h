@@ -41,6 +41,10 @@ inline EdgeTransition m_get_edge_transition(const bool current, const bool last)
 }
 
 inline void m_mads_state_init(void) {
+  // Car safety modes configure this (e.g. Mazda TJA_MADS). Preserve across MADS
+  // feature enable/disable so set_mads_params cannot re-arm cruise as a lateral source.
+  const bool op_controls_allowed_requests_lateral = m_mads_state.op_controls_allowed_requests_lateral;
+
   m_mads_state.is_vehicle_moving = NULL;
   m_mads_state.acc_main.current = NULL;
   m_mads_state.mads_button.current = MADS_BUTTON_UNAVAILABLE;
@@ -61,6 +65,7 @@ inline void m_mads_state_init(void) {
 
   m_mads_state.controls_requested_lateral = false;
   controls_allowed_lateral = false;
+  m_mads_state.op_controls_allowed_requests_lateral = op_controls_allowed_requests_lateral;
 }
 
 inline void m_update_button_state(ButtonStateTracking *button_state) {
@@ -83,10 +88,23 @@ inline void m_update_binary_state(BinaryStateTracking *state) {
 inline void m_update_control_state(void) {
   bool allowed = true;
 
-  // Initial control requests from button or ACC transitions
+  // Initial control requests from button or ACC transitions.
+  // op_controls_allowed rising is optional: Mazda TJA_MADS disables it so MRCC
+  // engagement (pcm cruise) cannot authorize lateral without a TJA press.
+  const bool op_allowed_lat_request = m_mads_state.op_controls_allowed_requests_lateral &&
+                                      (m_mads_state.op_controls_allowed.transition == MADS_EDGE_RISING);
+
+  // A fresh physical MADS request starts a new heartbeat-agreement window. Without
+  // this reset, mismatch samples left over from a recent disable can revoke lateral
+  // controls immediately after a quick off->on button cycle, before the new heartbeat
+  // reaches panda. A genuinely missing heartbeat still disengages after three new checks.
+  if (m_mads_state.mads_button.transition == MADS_EDGE_RISING) {
+    heartbeat_engaged_mads_mismatches = 0U;
+  }
+
   if ((m_mads_state.acc_main.transition == MADS_EDGE_RISING) ||
       (m_mads_state.mads_button.transition == MADS_EDGE_RISING) ||
-      (m_mads_state.op_controls_allowed.transition == MADS_EDGE_RISING)) {
+      op_allowed_lat_request) {
     m_mads_state.controls_requested_lateral = true;
   }
 
@@ -162,6 +180,10 @@ extern inline void mads_set_system_state(const bool enabled, const bool disengag
   m_mads_state.system_enabled = enabled;
   m_mads_state.disengage_lateral_on_brake = disengage_lateral_on_brake;
   m_mads_state.pause_lateral_on_brake = pause_lateral_on_brake;
+}
+
+inline void mads_set_op_controls_allowed_requests_lateral(const bool enable) {
+  m_mads_state.op_controls_allowed_requests_lateral = enable;
 }
 
 inline void mads_exit_controls(const DisengageReason reason) {

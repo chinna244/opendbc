@@ -2,7 +2,7 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, DT_CTRL, create_button_events, structs, uds
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
-from opendbc.car.mazda.values import DBC, LKAS_LIMITS, CarControllerParams, MazdaFlags
+from opendbc.car.mazda.values import DBC, LKAS_LIMITS, CarControllerParams, MazdaFlags, has_tja_mads
 from opendbc.sunnypilot.car.mazda.carstate_ext import CarStateExt
 
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -39,9 +39,18 @@ class CarState(CarStateBase, CarStateExt):
     self.cancel_button = 0
     self.resume_button = 0
     self.main_button = 0
+    self.tja_button = 0
+    self.mode_x = 0
+    self.mode_y = 0
+    # Active-low wheel MRCC master (CRZ_BTNS.BIT1). Parsed from bus 0 only.
+    self.mrcc_button = 0
 
     self.cruise_available = False
     self.cruise_enabled = False
+    # Unfiltered PEDALS state for the narrow TJA->MRCC side-effect cleanup. Unlike
+    # cruise_available, this must reflect an accepted MRCC-off tap while the brake is
+    # held so a second TJA press does not mistake the cached state for pre-armed MRCC.
+    self.mrcc_armed_raw = False
     self.cruise_enabled_blocked = True
     self.brake_pressed_prev = False
     self.stock_radar_silent_frames = 0
@@ -156,6 +165,10 @@ class CarState(CarStateBase, CarStateExt):
     else:
       self.lkas_allowed_speed = True
 
+    acc_armed = cp.vl["PEDALS"]["ACC_OFF"] == 1
+    acc_active = cp.vl["PEDALS"]["ACC_ACTIVE"] == 1
+    self.mrcc_armed_raw = acc_armed or acc_active
+
     # Require fresh CAM_LANEINFO because missing and stale parser values can appear settled.
     if len(cp_cam.vl_all["CAM_LANEINFO"]["LANE_LINES"]) > 0:
       self.cam_laneinfo_seen = True
@@ -175,8 +188,6 @@ class CarState(CarStateBase, CarStateExt):
     if self.CP.openpilotLongitudinalControl:
       # After radar teardown, derive cruise state from PEDALS. Hold the previous state through
       # brake-only samples where both cruise bits are transiently low.
-      acc_armed = cp.vl["PEDALS"]["ACC_OFF"] == 1
-      acc_active = cp.vl["PEDALS"]["ACC_ACTIVE"] == 1
       brake_free = not ret.brakePressed and not self.brake_pressed_prev
       # Retain wheel-cancel context until PEDALS reflects the main-state change.
       if cp.vl["CRZ_BTNS"]["CAN_OFF"] == 1:
@@ -267,6 +278,7 @@ class CarState(CarStateBase, CarStateExt):
     prev_cancel_button = self.cancel_button
     prev_resume_button = self.resume_button
     prev_main_button = self.main_button
+    prev_tja_button = self.tja_button
     self.distance_button = cp.vl["CRZ_BTNS"]["DISTANCE_LESS"]
     # SET_P is the wheel's increase button; RES is a distinct resume button.
     self.accel_button = cp.vl["CRZ_BTNS"]["SET_P"]
@@ -274,15 +286,28 @@ class CarState(CarStateBase, CarStateExt):
     # Publish CAN_OFF so ICBM does not transmit over a physical cancel press.
     self.cancel_button = cp.vl["CRZ_BTNS"]["CAN_OFF"]
     self.resume_button = cp.vl["CRZ_BTNS"]["RES"]
-    self.main_button = int(cp.vl["CRZ_BTNS"]["MODE_X"] == 1 and cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
+    self.mode_x = int(cp.vl["CRZ_BTNS"]["MODE_X"] == 1)
+    self.mode_y = int(cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
+    self.tja_button = int(cp.vl["CRZ_BTNS"]["TJA_BUTTON"] == 1)
+    # BIT1 is active-low. The pt parser is bus 0, so panda TX loopback (src 128) never
+    # updates this; a 0 here is the wheel, not our synthetic MRCC-off frame.
+    self.mrcc_button = int(cp.vl["CRZ_BTNS"]["BIT1"] == 0)
+    self.main_button = int(self.mode_x and self.mode_y)
 
+    # TJA_MADS: physical TJA is the only MADS toggle (ButtonType.lkas). MODE_X/Y are
+    # copied onto OP CRZ_BTNS TX but must not emit ButtonType.mainCruise.
+    extra_events = (
+      create_button_events(self.tja_button, prev_tja_button, {1: ButtonType.lkas})
+      if has_tja_mads(self.CP) else
+      create_button_events(self.main_button, prev_main_button, {1: ButtonType.mainCruise})
+    )
     ret.buttonEvents = [
       *create_button_events(self.distance_button, prev_distance_button, {1: ButtonType.gapAdjustCruise}),
       *create_button_events(self.accel_button, prev_accel_button, {1: ButtonType.accelCruise}),
       *create_button_events(self.decel_button, prev_decel_button, {1: ButtonType.decelCruise}),
       *create_button_events(self.cancel_button, prev_cancel_button, {1: ButtonType.cancel}),
       *create_button_events(self.resume_button, prev_resume_button, {1: ButtonType.resumeCruise}),
-      *create_button_events(self.main_button, prev_main_button, {1: ButtonType.mainCruise}),
+      *extra_events,
     ]
 
     CarStateExt.update(self, ret, ret_sp, can_parsers)
