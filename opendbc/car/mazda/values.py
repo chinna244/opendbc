@@ -40,6 +40,7 @@ class CarControllerParams:
   # CAM_LANEINFO runs near 2 Hz, so its freshness window must exceed one period.
   CAM_LANEINFO_PERIOD_T = 0.563
   CAM_LANEINFO_FRESH_T = 1.5
+  CAM_LANEINFO_TIMEOUT_T = 1.5
 
   # Stock body-latched releases use a nine-frame RESUME_UNLATCHING pulse.
   RESUME_UNLATCH_LATCHED_T = 0.18  # s, 9 wire frames, the latched-family mode

@@ -12,6 +12,7 @@ STOCK_RADAR_ALIVE_FRAMES = int(CarControllerParams.STOCK_RADAR_ALIVE_T / DT_CTRL
 STOCK_RADAR_GUARD_FRAMES = round(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CTRL)
 CANCEL_CONTEXT_FRAMES = int(CarControllerParams.CANCEL_CONTEXT_T / DT_CTRL)
 CAM_LANEINFO_FRESH_FRAMES = int(CarControllerParams.CAM_LANEINFO_FRESH_T / DT_CTRL)
+CAM_LANEINFO_STALE_FRAMES = int(CarControllerParams.CAM_LANEINFO_TIMEOUT_T / DT_CTRL)
 
 
 class CarState(CarStateBase, CarStateExt):
@@ -57,6 +58,8 @@ class CarState(CarStateBase, CarStateExt):
     self.radar_was_silenced = False
     self.cancel_context_frames = 0
     self.cam_laneinfo_seen = False
+    self.cam_laneinfo_raw: bytes | None = None
+    self.cam_laneinfo_stale_frames = CAM_LANEINFO_STALE_FRAMES + 1
     self.cam_laneinfo_silent_frames = 0
     self.cam_empty_seen = False
     self.radar_session_refused = False
@@ -76,6 +79,10 @@ class CarState(CarStateBase, CarStateExt):
   def stock_radar_gone(self) -> bool:
     # This silence duration establishes radar ownership rather than a dropped frame.
     return self.stock_radar_silent_frames >= STOCK_RADAR_GUARD_FRAMES
+
+  @property
+  def cam_laneinfo_live(self) -> bool:
+    return self.cam_laneinfo_raw is not None and self.cam_laneinfo_stale_frames <= CAM_LANEINFO_STALE_FRAMES
 
   def update_steer_undelivered(self, v_ego_raw: float, lkas_request: float, lkas_blocked: bool, lkas_track_state: bool) -> None:
     # Latch sustained zero LKAS_EFFECTIVE for a real request before the camera faults. Clear

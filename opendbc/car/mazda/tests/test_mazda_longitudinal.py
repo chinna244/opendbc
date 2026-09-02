@@ -418,3 +418,33 @@ def test_disengaged_emits_stock_patterns(cc, cs, available, brake_pressed, prefi
   cc.frame = 0
   sends = step_long(cc, cs, long_active=False, long_state=OFF, available=available, brake_pressed=brake_pressed)
   assert frame(sends, CRZ_INFO).hex().startswith(prefix)
+
+
+def test_crz_ctrl_standby_marker_experiment(cc, cs):
+  off = dict(stock_radar_alive=False, fsc_settled=True, long_active=False, available=False,
+             mrcc_armed_raw=False, cruise_available=False, cruise_enabled=False, lead_visible=False)
+  for extra, want_bus0 in (
+    (dict(mads_active=False), "0201010000000000"),
+    (dict(mads_active=True), "0201010020000000"),
+    (dict(mads_active=True, mrcc_armed_raw=True, cruise_available=True, available=True), "02010b0000000000"),
+  ):
+    for _ in range(100):
+      step_long(cc, cs, **{**off, **extra})
+    dat0 = dat2 = None
+    for _ in range(CarControllerParams.LONG_STEP):
+      sends = step_long(cc, cs, **{**off, **extra})
+      dat0 = frame(sends, CRZ_CTRL, 0) or dat0
+      dat2 = frame(sends, CRZ_CTRL, 2) or dat2
+    assert dat0.hex() == want_bus0
+    if want_bus0 == "0201010020000000":
+      assert dat2.hex() == "0201010000000000"
+
+  active = dict(mads_active=True, long_active=True, enabled=True, cruise_engaged=True,
+                mrcc_armed_raw=True, cruise_available=True, cruise_enabled=True, available=True)
+  for _ in range(100):
+    step_long(cc, cs, **{**off, **active})
+  dat = None
+  for _ in range(CarControllerParams.LONG_STEP):
+    dat = frame(step_long(cc, cs, **{**off, **active}), CRZ_CTRL, 0) or dat
+  assert int(parse_frame(CRZ_CTRL, dat)["CRZ_ACTIVE"]) == 1
+  assert dat[4] & 0x20 == 0
