@@ -198,15 +198,13 @@ def test_release_command_holds_through_the_debounce_then_jumps(cc, cs):
   assert all(cmd == -1300 for cmd, _, _ in debounce), \
     f"command moved off the hold while STOPPING was asserted: {sorted({c for c, _, _ in debounce})}"
 
-  # nothing was latched, so no unlatch bit goes out at all
+  # Never-latched releases do not send an unlatch pulse.
   assert not any(unl for _, _, unl in rows), "a never-latched release pulsed"
   assert max(cmd for cmd, _, _ in rows) > 500, "command never ramped up after the release"
 
 
 def test_near_zero_hold_release_emits_no_pulse(cc, cs):
-  # a no-lead hold relaxes the plan to ~0, so the release ramp would cross zero in the first
-  # pulse frame -- the shape behind the routes 000000fe t+44.54 / 00000100 t+353.18 latches.
-  # Nothing is latched here, so the release now carries no unlatch bit for it to land in.
+  # A near-zero hold remains a never-latched release and must not send an unlatch pulse.
   for _ in range(seconds(0.5)):
     step_long(cc, cs, long_state=STOPPING, accel=-0.5, standstill=False)
   for _ in range(seconds(2.0)):
@@ -219,18 +217,14 @@ def test_near_zero_hold_release_emits_no_pulse(cc, cs):
 
 
 def test_release_keeps_climbing_until_the_car_actually_moves(cc, cs):
-  """Route 00000009--ad9e22f986 t+452.9 (EPS-swapped CX-9): the release ran correctly, the
-  ramp caught the plan at +0.47 with a vision lead 2.5 m ahead, handed the command back --
-  and the car sat dead still for 1.5 s until the driver used the pedal. Mazda runs ki=0, so
-  LongControl's pid state emits a_target verbatim and nothing ever escalates. The ramp must
-  keep climbing past the plan while the car has not moved."""
+  """Continue the bounded release ramp while stopped because Mazda longitudinal has no integrator."""
   lead = dict(lead_visible=True, lead_d_rel=2.5, lead_v_rel=0.0)
   for _ in range(seconds(0.5)):
     step_long(cc, cs, long_state=STOPPING, accel=-1.024, standstill=False, **lead)
   for _ in range(seconds(2.0)):
     step_long(cc, cs, long_state=STOPPING, accel=-1.024, standstill=True, **lead)
 
-  # the plan asks for exactly the creep the CX-9 could not move on, and the car stays stopped
+  # Keep the simulated car stopped under a plan command below breakaway authority.
   peak = -10.
   for _ in range(seconds(2.0)):
     step_long(cc, cs, accel=0.47, standstill=True, **lead)
@@ -238,27 +232,23 @@ def test_release_keeps_climbing_until_the_car_actually_moves(cc, cs):
   assert peak > 0.47 + 0.2, f"command plateaued at the plan and never asked harder: {peak:.2f}"
   assert peak <= CarControllerParams.ACCEL_BREAKAWAY_MAX + 1e-6, f"climbed past the cap: {peak:.2f}"
   assert peak <= 0.47 + CarControllerParams.ACCEL_BREAKAWAY_OVERSHOOT + 1e-6, f"climbed past the plan-relative cap: {peak:.2f}"
-  # the override sits on top of the plan, so it is bounded by what stock itself commands
-  # pulling away from a stop: over all 31 stock stop->go episodes the breakaway command
-  # spans +0.405..+1.425 (latched median +0.958), so this must not exceed stock's own worst
+  # Bound the override by the measured stock breakaway range.
   assert CarControllerParams.ACCEL_BREAKAWAY_MAX <= 1.45, "breakaway ceiling past stock's own max"
 
-  # once it moves, the plan owns the command again
+  # Return command ownership to the plan after movement begins.
   for _ in range(seconds(0.5)):
     step_long(cc, cs, accel=0.47, standstill=False, **lead)
   assert cc.accel_last == pytest.approx(0.47, abs=0.01)
 
 
 @pytest.mark.parametrize("plan, cap", [
-  # a small plan behind a barely-rolling lead is a nudge above the plan, not a launch
+  # A small plan permits only the configured relative margin.
   (0.11, 0.11 + CarControllerParams.ACCEL_BREAKAWAY_OVERSHOOT),
-  # a big plan is bounded by stock's worst breakaway alone
+  # A large plan remains bounded by stock breakaway authority.
   (1.1, CarControllerParams.ACCEL_BREAKAWAY_MAX),
 ], ids=["small_plan", "big_plan"])
 def test_breakaway_is_bounded_relative_to_the_plan(cc, cs, plan, cap):
-  """Route 00000132 t+207: a lead 3.9 m ahead barely rolling, plan +0.11, and the still-
-  stopped ramp climbed to +1.16 before the car moved. The override is a nudge above the
-  plan, not a launch to the absolute ceiling (values.py ACCEL_BREAKAWAY_OVERSHOOT)."""
+  """Bound breakaway by both stock authority and the plan-relative margin."""
   lead = dict(lead_visible=True, lead_d_rel=3.9, lead_v_rel=0.2)
   for _ in range(seconds(2.0)):
     step_long(cc, cs, long_state=STOPPING, accel=-1.024, standstill=True, **lead)
@@ -267,7 +257,7 @@ def test_breakaway_is_bounded_relative_to_the_plan(cc, cs, plan, cap):
     step_long(cc, cs, accel=plan, standstill=True, **lead)
     peak = max(peak, cc.accel_last)
   assert peak == pytest.approx(cap, abs=0.02), f"peak {peak:.2f} vs cap {cap:.2f}"
-  # the plan-relative cap still clears stock's own first-quartile latched breakaway (+0.744, 34 episodes)
+  # The relative cap remains above the measured first-quartile stock breakaway command.
   assert 0.11 + CarControllerParams.ACCEL_BREAKAWAY_OVERSHOOT > 0.744
 
 
@@ -316,9 +306,7 @@ def test_breakaway_gives_up_so_a_stuck_car_is_not_leaned_on(cc, cs):
 
 
 def test_breakaway_never_climbs_against_a_latched_body(cc, cs):
-  """The freeze that keeps the command pinned while GEAR.BRAKE_HOLD is still set (route
-  00000115 t+381.3, camera faulted 90 ms into the pulse) outranks the breakaway climb: a
-  body-latched hold is pulsed, never leaned on."""
+  """Body-latched holds remain pinned until the body acknowledges the release pulse."""
   for _ in range(seconds(2.0)):
     step_long(cc, cs, long_state=STOPPING, accel=-1.3, standstill=True, brake_hold=True, **LEAD_4M)
   assert cc.stop_and_go.car_has_hold
@@ -347,30 +335,26 @@ def test_never_latched_release_speaks_the_stock_wire_grammar(cc, cs):
   assert not any(stop and unl for _, stop, unl in rows), "stop bits and pulse on one frame"
   drop = next(i for i, (_, stop, _) in enumerate(rows) if not stop)
   post = rows[drop:]
-  # the relax jump: no post-drop frame ever carries hold-grade braking again
+  # No post-release frame may return to hold-grade braking.
   assert all(cmd >= -280 for cmd, _, _ in post), f"command stayed at hold depth after the drop: {min(c for c, _, _ in post)}"
   assert post[0][0] <= -180, f"release did not start inside the stock band: {post[0][0]}"
   assert not any(unl for _, _, unl in rows), "a never-latched release pulsed"
-  # the ramp: stock's +25 raw per wire frame, straight through the drive-off
+  # Match stock's 25-count-per-wire-frame release ramp.
   ramping = [c for c, _, _ in post][:20]
   assert all(20 <= b - a <= 30 for a, b in zip(ramping, ramping[1:], strict=False)), f"off the stock ramp: {ramping}"
 
 
 @pytest.mark.parametrize("drop_wire_frames", [1, 2, 3])
 def test_latched_release_speaks_the_stock_pulse_shape(cc, cs, drop_wire_frames):
-  # a body-latched hold releases with a 9-wire-frame pulse: the command sits pinned at the
-  # relaxed -1 raw for as long as the body still reports GEAR.BRAKE_HOLD (as in every latched
-  # release of the census -- climbing before the drop faulted the camera 90 ms in, route
-  # 00000115 t+381.3), then climbs stock's ~+25 raw per frame ramp, peaking inside stock's
-  # family and never past the +0.25 ceiling (census: 6-11 frames, hold drop 1-3 frames in,
-  # cmd -1 climbing to +24..+342)
+  # Hold the relaxed command until body ownership clears, then follow stock's release ramp
+  # within its measured pulse ceiling.
   for _ in range(seconds(0.5)):
     step_long(cc, cs, long_state=STOPPING, accel=-1.5, standstill=False, **LEAD_4M)
   for _ in range(seconds(2.0)):
     step_long(cc, cs, long_state=STOPPING, accel=-1.3, standstill=True, brake_hold=True, **LEAD_4M)
   assert cc.accel_last == pytest.approx(CarControllerParams.ACCEL_HOLD_LATCHED, rel=1e-6, abs=1e-12)
 
-  # the body reacts to the pulse: BRAKE_HOLD drops 1-3 wire frames after it starts (census)
+  # Model the measured one-to-three-frame body response.
   rows = []
   pulse_started = None
   window = RELEASE_DEBOUNCE_FRAMES + RESUME_UNLATCH_LATCHED_FRAMES + seconds(1.0)
@@ -386,11 +370,10 @@ def test_latched_release_speaks_the_stock_pulse_shape(cc, cs, drop_wire_frames):
   pulse = [(cmd, held) for cmd, unl, held in rows if unl]
   cap = round(CarControllerParams.ACCEL_RESUME_PULSE_MAX * 1000)
   assert len(pulse) == RESUME_UNLATCH_LATCHED_FRAMES // 2, f"pulse ran {len(pulse)} wire frames"
-  # the contract the route 115 fault turned on: no pulse frame moves off the relaxed hold
-  # while the body still reports its latch
+  # Keep every pulse frame pinned while the body still reports its latch.
   pinned = [cmd for cmd, held in pulse if held]
   assert len(pinned) == drop_wire_frames and all(cmd == -1 for cmd in pinned), f"command moved under the latched hold: {pinned}"
-  # then the ramp: stock's +25 raw per wire frame from the relaxed hold
+  # Ramp from the relaxed hold at stock's wire rate.
   ramp = [cmd for cmd, held in pulse if not held]
   assert -1 <= ramp[0] <= 15, f"ramp must start off the relaxed hold: {ramp[0]}"
   assert all(20 <= b - a <= 30 for a, b in zip(ramp, ramp[1:], strict=False)), f"off the stock ramp: {ramp}"
@@ -399,9 +382,7 @@ def test_latched_release_speaks_the_stock_pulse_shape(cc, cs, drop_wire_frames):
 
 
 def test_latched_release_pulse_starts_at_the_release(cc, cs):
-  """Routes 0000011d and 0000012c: the body ignores silence and a positive nudge alike,
-  and answers the pulse within 2-3 wire frames. The pulse fires with the release, so the
-  resume happens when the plan commands it."""
+  """Start the unlatch pulse with the plan-driven release."""
   for _ in range(seconds(0.5)):
     step_long(cc, cs, long_state=STOPPING, accel=-1.5, standstill=False, **LEAD_4M)
   for _ in range(seconds(2.0)):

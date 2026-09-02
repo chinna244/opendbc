@@ -25,9 +25,7 @@ def decode_accel_cmd_raw(dat):
 
 
 def test_alert_command_relays_state_but_not_the_tja_churn(packer):
-  # camera error and line state pass through to the dash; the camera's own TJA/CTS state
-  # machine churns against steering it did not command (442 TJA_TRANSITION toggles in 22
-  # min, route 0000010b) and relaying it flapped the dash, so those two fields stay zeroed
+  # Preserve camera error and lane state, but clear TJA state that does not own the command.
   cam_msg = {"LINE_VISIBLE": 1, "LINE_NOT_VISIBLE": 0, "LANE_LINES": 2, "BIT1": 1,
              "BIT2": 0, "BIT3": 0, "NO_ERR_BIT": 0, "ERR_BIT": 1,
              "TJA": 4, "TJA_TRANSITION": 3, "S1": 1, "S1_HBEAM": 0}
@@ -48,9 +46,7 @@ def test_crz_info_standby_matches_stock(packer, counter):
 @pytest.mark.parametrize("brake_pressed, byte4, base", [(False, 0xc4, 0xd9), (True, 0xc0, 0xdd)])
 @pytest.mark.parametrize("counter", range(16))
 def test_crz_info_armed_idle_matches_stock(packer, brake_pressed, byte4, base, counter):
-  # armed-idle pegs the command like standby (47,752/47,752 stock armed-idle frames carry
-  # raw 8190) and follows the brake on ACC_SET_ALLOWED; the zero-command armed-idle this
-  # used to emit exists nowhere in the stock corpus
+  # Armed idle uses stock's raw 8190 sentinel and gates ACC_SET_ALLOWED with the brake.
   checksum = (base - counter) & 0xff
   expected = f"01ffe3ff{byte4:02x}80{counter:02x}{checksum:02x}"
   dat = mazdacan.create_acc_command(packer, 0, counter, 0.0, long_active=False, acc_available=True,
@@ -65,8 +61,7 @@ def test_crz_info_armed_idle_matches_stock(packer, brake_pressed, byte4, base, c
   (-1.024, True, False, 5, "01ffe18006841503"),   # standstill hold, raw -1024 + stop bits
   (-0.001, False, False, 9, "01ffe1ffe68009b0"),  # latched hold, raw -1
   (0.0, False, True, 11, "01ffe20006804b8c"),     # resume unlatch pulse
-  # wire-attested twin: stock drive_0b's first pulse frame is 01ffe1ffe68040b9 -- the
-  # checksum matches the counter-0 hold frame (b9) because the unlatch bit is not summed
+  # The unlatch bit is excluded, so this checksum matches the counter-zero hold frame.
   (-0.001, False, True, 0, "01ffe1ffe68040b9"),
 ])
 def test_crz_info_engaged_golden_bytes(packer, accel, stopping, unlatching, counter, expected):
@@ -136,8 +131,7 @@ def test_radar_frames_counter_and_lead_track():
 def test_lead_track_constant_bytes_match_the_stock_release_capture():
   # the template's measurement fields are zeroed, so a zero-range lead reproduces it exactly
   assert mazdacan.create_lead_track(0., 0.) == mazdacan.LEAD_TRACK_TEMPLATE
-  # the status pair the camera watches: drive_0b's occupied-slot 1c/00, never the
-  # empty-slot c0 in byte 5 the old capture carried
+  # Preserve the camera's occupied-slot status bytes.
   assert mazdacan.LEAD_TRACK_TEMPLATE[4] & 0x1f == 0x1c
   assert mazdacan.LEAD_TRACK_TEMPLATE[5] == 0x00
 

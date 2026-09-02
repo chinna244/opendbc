@@ -61,8 +61,7 @@ class TestMazdaEpsSwap:
     assert not car_params(CAR.MAZDA_CX5, alpha_long=True).alphaLongitudinalAvailable
 
   def test_swapped_eps_keeps_the_real_vehicle_specs(self):
-    # the whole point of fixing detection is that the user no longer forces MAZDA_CX5_2022 and
-    # inherits its mass, steer ratio and tire stiffness
+    # EPS detection must not replace the chassis-specific physical parameters.
     swapped = car_params(CAR.MAZDA_CX5, car_fw=eps_fw(SWAPPED_EPS_FW))
     cx5_2022 = car_params(CAR.MAZDA_CX5_2022)
     assert swapped.mass != cx5_2022.mass

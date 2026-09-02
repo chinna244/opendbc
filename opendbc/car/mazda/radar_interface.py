@@ -12,9 +12,8 @@ from opendbc.car import Bus, structs
 from opendbc.car.interfaces import RadarInterfaceBase
 from opendbc.car.mazda.values import DBC
 
-# 6 radar tracks on 0x361-0x366 at 10 Hz on bus 0, each with distance, angle and relative
-# velocity. 0x365-0x366 use an undecoded RELV_OBJ encoding and are excluded: without a valid
-# vRel radard cannot track them. See docs/zoompilot/mazda-longitudinal.md, "Radar gap guard".
+# Six tracks arrive on 0x361-0x366 at 10 Hz. Exclude 0x365 and 0x366 until their relative
+# velocity encoding is known; radard requires a valid vRel.
 RADAR_TRACK_ADDRS = list(range(0x361, 0x367))
 RADAR_USABLE_ADDRS = set(range(0x361, 0x365))  # only tracks with reliable RELV
 RADAR_TRIGGER_MSG = RADAR_TRACK_ADDRS[-1]  # 0x366, last in the burst
@@ -23,8 +22,7 @@ SENTINEL_ANG = 2046 * 0.015625  # 31.96875 deg, raw 2046
 SENTINEL_RELV = -16 * 0.0625    # -1.0 m/s, raw -16
 
 
-# The tracks are addressed by id: the DBC keeps upstream's message names for 0x361-0x366 and
-# adds DIST_OBJ, ANG_OBJ and RELV_OBJ to each of them.
+# Track IDs preserve the existing DBC message names for 0x361-0x366.
 def _create_radar_can_parser(car_fingerprint):
   messages = [(addr, 10) for addr in RADAR_TRACK_ADDRS]
   return CANParser(DBC[car_fingerprint][Bus.radar], messages, 0)
@@ -64,8 +62,7 @@ class RadarInterface(RadarInterfaceBase):
       ang = msg['ANG_OBJ']
       relv = msg['RELV_OBJ']
 
-      # an empty slot sets all three fields to their sentinels; each sentinel alone is a
-      # reachable real value, so require the full triple
+      # Each sentinel is individually valid, so require the complete empty-slot signature.
       slot_empty = dist == SENTINEL_DIST and ang == SENTINEL_ANG and relv == SENTINEL_RELV
       if slot_empty or addr not in RADAR_USABLE_ADDRS:
         if addr in self.pts:

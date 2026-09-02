@@ -49,8 +49,7 @@ SESSION_DFLT_DAT = bytes([0x02, 0x10, 0x01, 0, 0, 0, 0, 0])
 TESTER_PRESENT_DAT = bytes([0x02, 0x3e, 0x80, 0, 0, 0, 0, 0])
 
 
-# ---------------------------------------------------------------------------
-# CarParams and the port's objects
+# CarParams and port objects
 
 def car_params(candidate=CAR.MAZDA_CX5_2022, alpha_long=False, car_fw=None) -> structs.CarParams:
   return CarInterface.get_params(candidate, gen_empty_fingerprint(), car_fw or [],
@@ -84,7 +83,6 @@ def car_controller(alpha_long=True, candidate=CAR.MAZDA_CX5_2022) -> CarControll
   return CarController({Bus.pt: DBC_NAME}, CP, CP_SP)
 
 
-# ---------------------------------------------------------------------------
 # capnp messages
 
 def car_state(standstill=False, gas=False, brake_pressed=False, v_ego=0., driver_torque=0.,
@@ -133,8 +131,7 @@ def car_control_sp(handback=False, lead_d_rel=12.0, lead_v_rel=0.0, send_button=
   return cc_sp
 
 
-# ---------------------------------------------------------------------------
-# the port's CarState, seeded without a bus
+# CarState seeded without a bus
 
 def set_car_state(cs: CarState, out=None, *, brake_hold=False, stock_radar_alive=False, stock_radar_gone=None,
                   fsc_settled=True, radar_was_silenced=False, radar_session_refused=False, steer_undelivered=False,
@@ -217,8 +214,7 @@ def step_long(cc: CarController, cs: CarState, **kwargs):
   return sends
 
 
-# ---------------------------------------------------------------------------
-# frames on the wire
+# Wire frames
 
 def packer() -> CANPacker:
   return CANPacker(DBC_NAME)
@@ -267,7 +263,6 @@ def lead_track(dat) -> tuple[float, float]:
   return v["DIST_OBJ"], v["RELV_OBJ"]
 
 
-# ---------------------------------------------------------------------------
 # fixtures
 
 @pytest.fixture(name="packer")

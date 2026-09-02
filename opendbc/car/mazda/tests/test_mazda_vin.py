@@ -145,8 +145,7 @@ class TestMazdaVinMatch:
     assert match_fw_to_car_fuzzy({(0x7e0, None): {engine}}, make_vin('JM3', 'TC', 'M'), FW_VERSIONS) == {str(CAR.MAZDA_CX9_2021)}
 
   def test_unsupported_chassis_vin_does_not_match_on_the_engine(self):
-    # a BP car whose PCM carried over a BN-era calibration must not silently
-    # become MAZDA_3: the VIN positively identified an unsupported model
+    # A recognized unsupported chassis must not match through an older PCM calibration.
     engine = FW_VERSIONS[CAR.MAZDA_3][(Ecu.engine, 0x7e0, None)][0]
     live = {(0x7e0, None): {engine}, (0x760, None): {UNKNOWN_ABS_FW}}
     assert match_fw_to_car_fuzzy(live, make_vin('JM1', 'BP', 'K'), FW_VERSIONS) == set()

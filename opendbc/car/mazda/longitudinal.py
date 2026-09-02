@@ -17,12 +17,11 @@ RADAR_BUS = 0
 
 
 def create_radar_session_msg(session_type: int) -> CanData:
-  """UDS DIAGNOSTIC_SESSION_CONTROL, fire-and-forget single frame.
+  """Build a fire-and-forget UDS DIAGNOSTIC_SESSION_CONTROL frame.
 
-  The radar does not support COMMUNICATION_CONTROL (0x28 replies NRC 0x11), so disable_ecu()
-  cannot be used. A programming session stops all of its periodic frames; it stays silent as
-  long as tester present keeps arriving and falls back to the default session on its ~5 s S3
-  timeout otherwise. The programming session disables AEB while in effect."""
+  The radar does not support COMMUNICATION_CONTROL. A programming session disables its
+  periodic traffic and AEB until tester-present traffic stops or the S3 timeout expires.
+  """
   return CanData(RADAR_ADDR, bytes([0x02, uds.SERVICE_TYPE.DIAGNOSTIC_SESSION_CONTROL, session_type, 0x00, 0x00, 0x00, 0x00, 0x00]), RADAR_BUS)
 
 
@@ -37,14 +36,10 @@ RADAR_SESSION_LIMIT_FRAMES = int(CarControllerParams.RADAR_SESSION_LIMIT_T / DT_
 
 
 class RadarSessionManager:
-  """Sequences the radar in and out of its UDS programming session.
+  """Move the radar into and out of its UDS programming session.
 
-  Setup waits for the FSC camera's cold-boot radar-presence check (silencing too early latches
-  an i-ACTIVSENSE fault); the verdict is invisible until first motion, so the gate is carstate's
-  settle timer. The hand-back runs from the control loop because pandad blocks TX within ~100 ms
-  of an onroad cycle starting, and the restart is requested once the stock radar is heard again.
-  A refused or unanswered session request gives up for the drive and stock keeps the bus.
-  See docs/zoompilot/mazda-longitudinal.md, "Radar takeover".
+  Takeover waits for the FSC cold-boot check and begins only while stopped because it disables
+  stock AEB. Refused or unanswered requests leave the stock radar in control for the drive.
   """
 
   def __init__(self):
@@ -58,27 +53,22 @@ class RadarSessionManager:
     prev_state = self.state
     if handback:
       if self.state == RadarSessionState.SILENCING:
-        # nothing was torn down yet; just stop touching the bus
+        # No hand-back is needed before takeover begins.
         self.state = RadarSessionState.STOCK
       elif self.state == RadarSessionState.SILENCED:
         self.state = RadarSessionState.HANDBACK
       elif self.state == RadarSessionState.HANDBACK and \
            (stock_radar_alive or self.state_frames >= RADAR_SESSION_LIMIT_FRAMES):
-        # heard again, or never coming back: stop waiting so the restart proceeds. The radar
-        # stays stock for the rest of the process, in case the assert drops before exit and
-        # would otherwise read as a withdrawal and re-silence it right before shutdown.
+        # Finish hand-back after recovery or timeout and keep radar ownership stock.
         self.state = RadarSessionState.STOCK
         self.handback_completed = True
     else:
       if self.state == RadarSessionState.HANDBACK:
-        # hand-back withdrawn (toggle flipped back before the restart): the radar is
-        # stock again, so re-run the normal takeover
+        # Restart takeover if hand-back is withdrawn before the process restarts.
         self.state = RadarSessionState.STOCK
       if self.state == RadarSessionState.STOCK and gate_passed and not self.handback_completed:
-        # silencing disables AEB, so like every disable_ecu caller it only starts pre-motion;
-        # adopting an already-quiet radar disables nothing and proceeds anywhere. "Quiet" is
-        # the guard-long silence, not the alive window: a stock radar drops a few frames in a
-        # row now and then, and adopting on one of those made us a second master.
+        # Begin silencing only before motion. Adopt an already quiet radar only after the full
+        # ownership guard, not a normal short gap in stock traffic.
         if stock_radar_gone:
           self.state = RadarSessionState.SILENCED
         elif standstill and not self.silencing_failed:
@@ -91,10 +81,8 @@ class RadarSessionManager:
           self.state = RadarSessionState.STOCK
           self.silencing_failed = True
       elif self.state == RadarSessionState.SILENCED and stock_radar_alive:
-        # The radar is broadcasting again under our synthetic frames (S3 recovery, or never
-        # really silenced). Our frames stop either way; the session request is gated like the
-        # first teardown since it disables AEB. Moving, stock keeps the bus (carstate raises
-        # accFaulted) until the next stop.
+        # Stop synthetic traffic if stock traffic returns. While moving, stock keeps the bus
+        # until takeover can safely restart at standstill.
         self.state = RadarSessionState.SILENCING if (standstill and not self.silencing_failed) else RadarSessionState.STOCK
 
     self.state_frames = 0 if self.state != prev_state else self.state_frames + 1
@@ -109,12 +97,10 @@ BREAKAWAY_FRAMES = int(CarControllerParams.ACCEL_BREAKAWAY_T / DT_CTRL)
 
 
 class StandstillHold:
-  """Holds the car stopped until the plan asks to move, the way Toyota and Honda do it: the
-  standstill request comes straight off the plan and car feedback, with no timers in the path,
-  and the hold command is the plan's own (LongControl parks at CP.stopAccel, the stock hold
-  value). The relax off that hold is the car's decision: stock lets go the instant the body ECU
-  latches its own brake hold (GEAR.BRAKE_HOLD). `holding` is recomputed every frame.
-  See docs/zoompilot/mazda-longitudinal.md, "Stop-and-go".
+  """Hold the car until the plan or driver requests movement.
+
+  The plan supplies the hold command. It relaxes when the body ECU takes brake ownership,
+  matching the stock stop-and-go sequence.
   """
 
   def __init__(self):
@@ -127,7 +113,7 @@ class StandstillHold:
     self.release_frames = 0
     self.latched_release = False
     self.just_released = False
-    self.latched_frames = 0  # frames since a latched release with the body still holding
+    self.latched_frames = 0  # frames waiting for the body ECU to release its hold
     self.repulsed = False
 
   def update(self, long_engaged: bool, stopping: bool, standstill: bool,
@@ -138,25 +124,18 @@ class StandstillHold:
       return
 
     was_holding = self.holding
-    # the plan's request to move is debounced so a one-frame blip cannot fire a phantom
-    # release pulse at a standstill; the driver's pedal outranks the hold immediately
+    # Debounce plan movement requests; driver throttle releases the hold immediately.
     self.release_frames = self.release_frames + 1 if plan_accel > 0. else 0
     plan_wants_go = self.release_frames >= RELEASE_DEBOUNCE_FRAMES
-    # the plan asking for acceleration releases the hold, and so does the driver's pedal, as
-    # Toyota's PCM does. Holding the stop bits against the throttle until the car moved put
-    # an out-of-protocol release on the bus; stock keeps STOPPING strictly to the final creep.
+    # Keep STOPPING off once the plan or driver requests acceleration.
     release = gas_pressed or plan_wants_go
     self.holding = not release and (stopping or standstill)
 
     if self.unlatch_frames > 0:
       self.unlatch_frames -= 1
-    # one pulse per release, as stock, never restarted while one is still playing. A gas-ended
-    # hold gets no pulse: stock's captured gas-ended hold drops the stop bits with none.
-    # See docs/zoompilot/mazda-longitudinal.md, "Gas-pedal release".
+    # Send one unlatch pulse per plan-driven body-latched release. Throttle releases use none.
     if was_holding and not self.holding and standstill and not gas_pressed and self.unlatch_frames == 0:
-      # car_has_hold still carries last frame's value: whether the body owned the brakes going
-      # into this release is whether there is anything to unlatch. A latched release pulses
-      # immediately; the body answers nothing else.
+      # The previous frame records whether the body owned a hold that must be unlatched.
       self.latched_release = self.car_has_hold
       if self.latched_release:
         self.unlatch_frames = RESUME_UNLATCH_LATCHED_FRAMES
@@ -164,10 +143,7 @@ class StandstillHold:
       self.latched_frames = 0
       self.repulsed = False
 
-    # A latched release the body did not answer (GEAR.BRAKE_HOLD still set, release standing):
-    # the carcontroller keeps the command pinned at the relaxed hold while the body holds, so
-    # without this the car would sit under a positive plan until the driver's pedal. One
-    # retry, the same tuple as the first pulse, then give up.
+    # Retry one unanswered body-latched release so a positive plan cannot remain blocked.
     if self.latched_release and not self.holding and standstill and brake_hold and not gas_pressed:
       self.latched_frames += 1
       if self.latched_frames >= RESUME_REPULSE_FRAMES and not self.repulsed and self.unlatch_frames == 0:
@@ -176,36 +152,29 @@ class StandstillHold:
     else:
       self.latched_frames = 0
 
-    # the body only owns the brakes while we are still asking it to hold
+    # Body ownership is valid only while the controller still requests a hold.
     self.car_has_hold = self.holding and standstill and brake_hold
 
   @property
   def stop_bits(self) -> bool:
-    # CRZ_INFO stop flags are held through the approach and the hold, and clear when the body
-    # takes over. A re-hold while a pulse is still playing waits it out: stock never puts
-    # STOPPING and RESUME_UNLATCHING on the wire together.
+    # Keep STOPPING and RESUME_UNLATCHING mutually exclusive, including during a re-hold.
     return self.holding and not self.car_has_hold and self.unlatch_frames == 0
 
   @property
   def resume_unlatching(self) -> bool:
-    # only ever armed at a latched release
     return self.unlatch_frames > 0
 
   @property
   def acc_active_2(self) -> bool:
-    # stock drops ACC_ACTIVE_2 together with the command relax
+    # Stock clears ACC_ACTIVE_2 when the command relaxes.
     return not self.car_has_hold
 
 
 class AdvertisedLead:
-  """The lead we tell the camera about: CRZ_CTRL's two lead fields and the 0x364 track slot.
+  """Maintain consistent lead state across CRZ_CTRL and the 0x364 track.
 
-  Stock pairs all three absolutely, so they are read off one piece of state. The state is
-  perception, not control: a stock radar reports its objects engaged or not, and tying the
-  advertisement to engagement made a real lead vanish from the bus mid-creep and the camera
-  run its collision display. Visibility is debounced (a marginal vision lead flickers faster
-  than any radar track) and the last real measurement is coasted across a vision gap, the way
-  a radar coasts a track. See docs/zoompilot/mazda-longitudinal.md, "Advertised lead".
+  Advertisement follows perception rather than engagement. Visibility is debounced and the
+  last measurement is propagated through short vision gaps like a radar track.
   """
 
   def __init__(self):
@@ -228,11 +197,10 @@ class AdvertisedLead:
     if 0. < d_rel <= mazdacan.DIST_OBJ_MAX:
       self._measured = (d_rel, v_rel)
     elif not self.visible:
-      # expiring here bounds the coast to the debounce window and keeps a stale measurement
-      # from resurfacing on reacquisition
+      # Expire stale state after the debounce window.
       self._measured = None
     elif self._measured is not None:
-      # propagate through the gap rather than repeating one frozen frame (create_lead_track)
+      # Propagate range through the gap instead of repeating a frozen track.
       d, v = self._measured
       self._measured = (d + v * DT_CTRL, v)
     self.real_lead = self._measured if self.visible else None
@@ -245,9 +213,7 @@ class AdvertisedLead:
 
   @property
   def ctrl_phase(self) -> int:
-    # RADAR_LEAD_RELATIVE_DISTANCE is stock's 1-5 closeness bucket: 2 following, 3 near a
-    # hold (stock's dominant standstill value); faults key on the triple disagreeing, not on
-    # the bucket value
+    # Use stock's relative-distance buckets and keep all lead fields consistent.
     if not self.has_lead:
       return 0
     return 3 if self.holding else 2

@@ -343,10 +343,8 @@ class TestMazdaLongitudinalSafety(TestMazdaSteerToZeroEpsSafety, common.Longitud
           self.assertTrue(self._tx(common.make_msg(bus, addr, 8, dat)))
 
   def test_synthetic_lead_radar_track_allowed_disengaged(self):
-    # DIST_OBJ and RELV_OBJ are free fields; the template bytes must match. The non-template
-    # frames are real on-road emissions (route 6bb2dc61c4), which a byte-exact check silently
-    # dropped -- 982 asked, 0 transmitted -- starving the camera of the track. The slot is
-    # perception, not actuation, so it flows with controls_allowed low the way a stock radar
+    # Permit the measurement fields while requiring the occupied-track template. The slot is
+    # perception, not actuation, so it remains valid with controls_allowed low like stock radar
     # reports objects with cruise off.
     lead_frames = [
       "0a4e00001c000000",  # stopped lead at 10.25 m
@@ -420,9 +418,8 @@ class TestMazdaLongitudinalSafety(TestMazdaSteerToZeroEpsSafety, common.Longitud
     return self.packer.make_can_msg_safety("PEDALS", 0, values)
 
   def test_acc_main_waits_for_the_radar_mastery_latch(self):
-    # Routes 116/117 (2026-08-27): MADS keys lateral off acc_main_on's rising edge, and the
-    # software gates its availability on 1 s of stock-radar silence. The panda cannot rx the
-    # stock CRZ_INFO (deliberately not an rx check: it goes stale at the teardown), so it
+    # MADS uses acc_main_on's rising edge while software waits for stock-radar silence. panda
+    # cannot receive stock CRZ_INFO because it goes stale at teardown, so it
     # mirrors the latch off the observable stand-in: our own first synthetic CRZ_INFO tx
     # (= the teardown landing) plus 1 s of the 50 Hz PEDALS clock. Both machines then arm on
     # the same frame; before that, MRCC-armed PEDALS must not raise acc_main_on, or the edge

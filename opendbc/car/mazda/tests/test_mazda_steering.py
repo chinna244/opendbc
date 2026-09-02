@@ -72,11 +72,7 @@ class TestCarControllerParams:
 
   def test_steer_delta_matches_the_eps_rate_limit_at_this_steer_step(self):
     params = cx5_2022_params()
-    # The EPS rate limit is per unit TIME (~1200 units/s), while STEER_DELTA_UP/DOWN are per
-    # frame, so the two are only matched at STEER_STEP = 1. Changing one without the other
-    # silently rescales the commanded slew rate. Both directions: the measured rail is
-    # symmetric (p99 and p99.9 of the delivered step are 12 either way), and a winddown above
-    # it only lets the command run ahead of the wheel.
+    # Per-frame controller deltas must match the 100 Hz EPS hardware slew in both directions.
     rate_hz = 1.0 / DT_CTRL / CarControllerParams.STEER_STEP
     assert params.STEER_DELTA_UP * rate_hz == pytest.approx(1200, rel=0.01)
     assert params.STEER_DELTA_DOWN * rate_hz == pytest.approx(1200, rel=0.01)

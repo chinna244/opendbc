@@ -30,9 +30,7 @@ SETTLED = bytes([0x42, 0b00000001, 0, 0, 0, 0, 0, 0])       # markers clear: set
 BIT2_LATCHED = bytes([0x41, 0b00100001, 0, 0, 0, 0, 0, 0])  # BIT2 stuck high for a whole cycle
 FAULTED = bytes([0x42, 0b00000001, 0, 0, 0, 0x01, 0, 0])    # ERR_BIT (bit 40) set
 
-# CAM_LANEINFO's real cadence: tests feed it at the longest measured period (values.py), not
-# per control frame. Feeding it at 100 Hz masked a freshness window shorter than the message
-# period (the gate never settled on the car while every test passed).
+# Exercise CAM_LANEINFO at its longest measured period so freshness tests match the bus cadence.
 CAM_LANEINFO_PERIOD_FRAMES = int(CarControllerParams.CAM_LANEINFO_PERIOD_T / DT_CTRL)
 
 SETTLE_T = CarControllerParams.FSC_SETTLE_T
@@ -59,9 +57,7 @@ def feed(CI, i, *msgs):
 
 @pytest.mark.parametrize("alpha_long", [False, True])
 def test_carstate_runs_with_real_parsers(alpha_long):
-  # vl_all, unlike vl, has no lazy message registration: every message read through it
-  # must be listed in get_can_parsers. The op-long FSC settle gate crashed card on its
-  # first update when CAM_LANEINFO was missing from the cam parser (KeyError, 2026-07-29).
+  # vl_all requires every accessed message to be registered by get_can_parsers.
   CI = car_interface(alpha_long)
   assert CI.CP.openpilotLongitudinalControl == alpha_long
   for _ in range(10):
@@ -89,20 +85,15 @@ class TestFscSettleGate:
     assert feed_laneinfo(CI, SETTLED, 1.5)
 
   def test_a_latched_bit2_does_not_block_the_teardown_forever(self):
-    # One CX-5 2022 cold-booted with BIT2 high and NO_ERR_BIT clear for an entire ignition
-    # cycle (36.5 s, route 7c735af5fce56485|00000011). BIT2 was in the gate, so the radar was
-    # never silenced and the two-master guard held accFaulted for the whole drive.
+    # BIT2 may remain high for an entire ignition cycle without indicating an incomplete boot.
     assert feed_laneinfo(car_interface(), BIT2_LATCHED, SETTLE_T * 1.5)
 
   def test_settles_at_the_longest_observed_camera_period(self):
-    # feed_laneinfo runs at the longest measured period, the worst case the freshness window
-    # has to ride through: a shorter window zeroes the settle counter on every gap and the
-    # gate never opens (the regression that shipped in baf0f383c3 with CAM_LANEINFO_FRESH_T = 0.5)
+    # The freshness window must span the longest measured CAM_LANEINFO period.
     assert feed_laneinfo(car_interface(), SETTLED, SETTLE_T * 1.5)
 
   def test_camera_dropout_resets_the_settle_timer(self):
-    # the window is a freshness gate, not decoration: a genuine dropout, well past any real
-    # inter-frame gap, must start the settle timer over
+    # A genuine camera dropout restarts the settle timer.
     CI = car_interface()
     feed_laneinfo(CI, SETTLED, SETTLE_T * 0.8)
     feed_laneinfo(CI, None, CarControllerParams.CAM_LANEINFO_FRESH_T + 0.5)
@@ -228,12 +219,7 @@ class TestTwoMasterGuard:
     assert ret.cruiseState.available
 
   def test_availability_trails_the_pandas_radar_latch(self):
-    # The panda mirrors this guard off our first synthetic CRZ_INFO tx (at most the alive
-    # window plus one LONG_STEP after the last stock frame) plus its 50-frame PEDALS window;
-    # MADS must not arm here before the panda accepts torque (values.py STOCK_RADAR_GUARD_T
-    # derivation, safety test_panda_arms_lateral_before_the_carstate_guard_lifts). Silence
-    # exactly as long as the panda's worst case must still read unavailable, and the alive
-    # window itself must have expired long before the guard.
+    # carstate availability must follow panda's matching radar-ownership guard.
     panda_latch = (CarControllerParams.STOCK_RADAR_ALIVE_T + CarControllerParams.LONG_STEP * DT_CTRL +
                    CarControllerParams.PANDA_RADAR_SILENT_T)
     assert panda_latch < GUARD_T
@@ -253,18 +239,14 @@ class TestTwoMasterGuard:
     ret, n = feed_guard(CI, GUARD_T + 0.5, radar_alive=False, start_frame=n)
     ret, n = feed_guard(CI, 0.5, radar_alive=True, start_frame=n)
     assert ret.accFaulted
-    # availability keys on the latched "was silenced", so a transient return does not
-    # yank lateral out from under MADS on top of the fault
+    # A transient radar return reports a fault without revoking latched availability.
     assert ret.cruiseState.available
-    # silence restores the clean state
     ret, n = feed_guard(CI, GUARD_T + 0.5, radar_alive=False, start_frame=n)
     assert not ret.accFaulted
     assert ret.cruiseState.available
 
   def test_stock_engagement_inside_the_guard_is_not_reported(self):
-    # The radar is still master during the boot phase, so a stock MRCC engage is not ours to
-    # report. Availability was already gated; leaking enabled through it opened MADS with
-    # every off-switch shut (route 00000057).
+    # Do not expose stock MRCC engagement before radar ownership transfers.
     ret, _ = feed_guard(car_interface(), 5.0, radar_alive=True, acc_active=True)
     assert not ret.cruiseState.available
     assert not ret.cruiseState.enabled
@@ -431,25 +413,22 @@ class TestSteerUndeliveredLatch:
 
   def test_rejected_request_latches_then_alerts(self):
     rig = UndeliveredRig()
-    # delivered: no latch however long it runs
     for _ in range(100):
       rig.step(600, 600, 0)
     assert not rig.CS.steer_undelivered
-    # the EPS blocks and applies nothing to a real request: latch after STEER_UNDELIVERED_FRAMES
+    # Latch after the configured number of zero-delivery frames.
     for _ in range(rig.params.STEER_UNDELIVERED_FRAMES - 1):
       ret = rig.step(600, 0, 1)
     assert not rig.CS.steer_undelivered
     ret = rig.step(600, 0, 1)
     assert rig.CS.steer_undelivered
     assert not ret.steerFaultTemporary
-    # the driver is told a second in, above manoeuvring speed (the entry frame counts once
-    # for the latch and once for the hold, as the controller's version did)
+    # Alert only after the additional configured hold time.
     for _ in range(rig.params.STEER_UNDELIVERED_ALERT_FRAMES - 2):
       ret = rig.step(0, 0, 1)
     assert not ret.steerFaultTemporary
     ret = rig.step(0, 0, 1)
     assert ret.steerFaultTemporary
-    # the block ending releases both
     ret = rig.step(600, 600, 0)
     assert not rig.CS.steer_undelivered
     assert not ret.steerFaultTemporary
@@ -471,28 +450,20 @@ class TestSteerUndeliveredLatch:
     assert not ret.steerFaultTemporary
 
   def test_launch_block_stays_silent_however_fast_it_goes(self):
-    # routes 0000014f seg 14/16 and 00000150 seg 9: a block the EPS carried from standstill
-    # (LKAS_TRACK_STATE set) released at 6.3-6.5 m/s on a 2 m/s2 launch, past the 12 mph gate,
-    # and the alert soft-disabled lateral for nothing. The EPS releases that block about a
-    # second after 3 m/s, so its release speed tracks the launch and no gate clears it. Over
-    # 3980 segments every one of the 48 launch alerts had TRACK_STATE set throughout and all
-    # three blocks that began at speed (148 seg 10 among them) had it clear.
+    # LKAS_TRACK_STATE identifies normal standby blocks that can persist into a brisk launch.
     rig = UndeliveredRig()
     hold = rig.params.STEER_UNDELIVERED_FRAMES + rig.params.STEER_UNDELIVERED_ALERT_FRAMES + 50
     for _ in range(hold):
       ret = rig.step(600, 0, 1, speed_kph=25., track_state=1)
     assert rig.CS.steer_undelivered  # the command is still zeroed, only the banner is withheld
     assert not ret.steerFaultTemporary
-    # the EPS dropping its standby flag while still blocked is the abnormal block, and speaks
+    # Clearing standby while still blocked makes the condition alertable.
     ret = rig.step(0, 0, 1, speed_kph=25., track_state=0)
     assert ret.steerFaultTemporary
 
   def test_driver_steering_with_the_request_still_latches(self):
-    # route 00000148 seg 10: driver torque in the request's direction never unwinds the
-    # command, so a pressed blocked run spends the camera's budget exactly like a hands-off
-    # one -- 203 frames at up to 1148 counts, all undelivered. steeringPressed must not gate
-    # the latch. (A driver overpowering the request unwinds the command below the minimum
-    # through apply_driver_steer_torque_limits, so that case never reaches the EPS's report.)
+    # Driver torque in the requested direction does not reduce the command and must not gate
+    # non-delivery detection.
     rig = UndeliveredRig()
     for _ in range(rig.params.STEER_UNDELIVERED_FRAMES + 5):
       rig.step(600, 0, 1, driver_torque=20)
@@ -500,8 +471,7 @@ class TestSteerUndeliveredLatch:
 
   @pytest.mark.parametrize("v", [0.0, 1.0, "just_below_alert_speed"])
   def test_no_alert_at_or_near_standstill(self, v):
-    # an EPS that applies nothing while the car is rolled around is normal, not a fault, and
-    # a chime for it would fire on most low-speed manoeuvres. The command is still withheld.
+    # Zero delivery is normal at maneuvering speed, although the command remains withheld.
     rig = UndeliveredRig()
     if v == "just_below_alert_speed":
       v = rig.params.STEER_UNDELIVERED_ALERT_MIN_SPEED - 0.5
@@ -511,8 +481,7 @@ class TestSteerUndeliveredLatch:
     assert rig.CS.steer_undelivered, f"did not latch at {v} m/s"
 
   def test_accelerating_out_of_a_block_that_never_releases_does_alert(self):
-    # route 00000148 crossed 5.9 -> 7.6 m/s with the block set and zero delivery throughout;
-    # that is the case the driver must hear about, so the speed gate has to arm on the way up
+    # A persistent block becomes alertable when vehicle speed crosses the threshold.
     rig = UndeliveredRig()
     for _ in range(300):
       ret = rig.step(600, 0, 1, speed_kph=2.0 * CV.MS_TO_KPH)

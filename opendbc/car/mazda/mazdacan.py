@@ -1,10 +1,8 @@
 from opendbc.car.can_definitions import CanData
 from opendbc.car.mazda.values import Buttons
 
-# Radar frames the body ECU expects to keep receiving for stop-and-go to work. Byte-exact
-# captures from a 0x764 radar with no objects in view; only the counter nibble in the last
-# byte changes. 0x364 carries the lead we are following, if any.
-# See docs/zoompilot/mazda-longitudinal.md, "Track frame content".
+# Captured empty radar tracks required by the body ECU for stop-and-go. Only the counter
+# nibble changes; 0x364 carries the advertised lead when present.
 RADAR_STATIC_MSG = (0x499, bytes.fromhex("0008c00000000000"))
 RADAR_TRACK_MSGS = {
   0x361: bytes.fromhex("fff7fefe1fc00080"),
@@ -15,32 +13,25 @@ RADAR_TRACK_MSGS = {
   0x366: bytes.fromhex("fff7fe7ffbff3fc0"),
 }
 LEAD_TRACK_ADDR = 0x364
-# An occupied track slot's constant bytes, from a stock latched hold release with a lead in
-# 0x364 alone. The measurement fields are zeroed because create_lead_track rewrites DIST_OBJ
-# and RELV_OBJ every frame; the status pair 1c/00 keeps it clear of the empty-slot signature.
+# Constant bytes for an occupied 0x364 track. create_lead_track replaces its measurements.
 LEAD_TRACK_TEMPLATE = bytes.fromhex("000e00001c000000")
 DIST_OBJ_SCALE = 0.0625   # m per bit, DIST_OBJ and RELV_OBJ share it
 DIST_OBJ_MAX = 255.875    # m, the full-scale DIST_OBJ reading a track can carry
 
 
 def crz_info_checksum(dat: bytes) -> int:
-  # Inverted sum of the first seven bytes, with both event bits left out: STOPPING (byte 5)
-  # and RESUME_UNLATCHING (byte 6). Verified against 1.67M stock frames, zero mismatches.
-  # Summing the unlatch bit made every pulse invalid by 0x40 and latched the camera's SCBS.
-  # See docs/zoompilot/mazda-longitudinal.md, "CRZ_INFO checksum".
+  # Invert the sum of the first seven bytes, excluding STOPPING and RESUME_UNLATCHING.
   return (0xFF - ((sum(dat[:7]) - (dat[5] & 0x04) - (dat[6] & 0x40)) & 0xFF)) & 0xFF
 
 
 def create_acc_command(packer, bus, counter, accel, *, long_active, acc_available,
                        brake_pressed=False, stopping=False, resume_unlatching=False):
-  # CRZ_INFO stands in for the disabled radar's accel command frame. Only an engaged frame
-  # carries a live command: armed-idle pegs the command field like the main-off standby, adds
-  # bit 47, and advertises ACC_SET_ALLOWED whenever the brake is up so the dash accepts SET.
+  # CRZ_INFO replaces the disabled radar's acceleration command and armed-idle state.
   values = {
     "ERROR_STATUS": 1,
     "STATIC_1": 0x7ff,
     "CTR": counter % 16,
-    "ACCEL_CMD": accel if long_active else 4.094,  # not controlling pegs raw 8190
+    "ACCEL_CMD": accel if long_active else 4.094,  # stock non-controlling sentinel
     "NEW_SIGNAL_7": int(long_active or acc_available),
   }
   if long_active:
@@ -60,9 +51,7 @@ def create_acc_command(packer, bus, counter, accel, *, long_active, acc_availabl
 
 
 def create_crz_ctrl(packer, bus, long_active, acc_available, gap_setting, radar_has_lead, stop_go_phase, acc_active_2):
-  # CRZ_CTRL stands in for the disabled radar's cruise-state frame. stop_go_phase mirrors
-  # stock's stop-and-go progression through RADAR_LEAD_RELATIVE_DISTANCE (see the DBC
-  # comment); gap_setting mirrors the driver's distance setting on the dash.
+  # CRZ_CTRL replaces radar cruise state and mirrors stop phase and driver gap selection.
   values = {
     "MSG_1_INV": 1,
     "MSG_1_INV_COPY": 1,
@@ -78,11 +67,10 @@ def create_crz_ctrl(packer, bus, long_active, acc_available, gap_setting, radar_
 
 
 def create_lead_track(d_rel: float, v_rel: float) -> bytes:
-  """Place the lead we are following on the track slot the camera reads.
+  """Encode the advertised lead in the camera's track slot.
 
-  A stock radar re-measures every track every 100 ms, so range and range rate move with the
-  lead even at a standstill; a frozen frame under a drive-off is content no radar ever emits.
-  RELV_OBJ carries the same sign as vRel, positive opening.
+  Range must advance with relative velocity between measurements. RELV_OBJ uses positive
+  values for an opening lead.
   """
   dist = round(min(max(d_rel, 0.), DIST_OBJ_MAX) / DIST_OBJ_SCALE)
   relv = round(min(max(v_rel, -64.), 63.9375) / DIST_OBJ_SCALE) & 0x7ff
@@ -164,9 +152,8 @@ def create_steering_control(packer, CP, frame, apply_torque, lkas):
 
 
 def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool):
-  # pass the camera's own state through untouched, as Toyota's create_ui_command does; the TJA
-  # mode fields stay zeroed because the camera's TJA state machine churns against steering it
-  # did not command and relaying it flapped the dash lane indicators
+  # Preserve camera LKAS state. Keep TJA modes clear because its state machine does not own
+  # the injected steering command.
   values = {s: cam_msg[s] for s in [
     "LINE_VISIBLE",
     "LINE_NOT_VISIBLE",
