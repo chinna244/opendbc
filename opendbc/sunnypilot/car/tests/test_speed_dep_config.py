@@ -10,8 +10,8 @@ from opendbc.car import gen_empty_fingerprint
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, MazdaFlags
 from opendbc.car.structs import CarParams
-from opendbc.sunnypilot.car.interfaces import (get_speed_dep_config_for_car, get_steer_max_schedule, get_steer_rail_schedule,
-                                             get_steer_slew_schedule)
+from opendbc.sunnypilot.car.interfaces import (get_speed_dep_config, get_speed_dep_config_for_car, get_steer_max_schedule,
+                                             get_steer_rail_schedule, get_steer_slew_schedule)
 
 CX5_2022_SCHEDULE = ([0.0, 14.2, 14.5], [1200.0, 1200.0, 800.0])
 
@@ -53,6 +53,12 @@ class TestSteerMaxSchedule:
     # the schedule's step must sit inside a bin span, or per-count interp cannot place it
     assert cfg['speed_bp'][2] < 14.2
     assert 14.5 < cfg['speed_bp'][3]
+
+  def test_seed_version_is_a_non_negative_int(self):
+    """Every entry's seed_version (0 when absent) is an int the cache field can carry."""
+    for name, entry in get_speed_dep_config().items():
+      v = entry.get('seed_version', 0)
+      assert isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 2**31, name
 
   def test_inactive_entry_stays_empty(self):
     assert get_speed_dep_config_for_car(brand_cp(**STOCK_MAZDA)) == {}

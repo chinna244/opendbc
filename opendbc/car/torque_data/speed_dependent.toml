@@ -4,9 +4,17 @@
 #   speed_bp    — speed breakpoints in m/s (bin centers)
 #   laf_bp      — latAccelFactor at each speed
 #   friction_bp — friction coefficient at each speed
+#   seed_version — integer, bump it to replace every device's learned bins with
+#                  the seeds. Absent means 0.
 #
 # The online learner (torque estimator) runs independent SVD fits per speed bin.
 # laf_bp/friction_bp provide starting values and define +/-30% sanity bounds.
+#
+# A device keeps its learned bin values and points across boots (LiveTorqueParametersSP)
+# and does not re-seed when laf_bp/friction_bp change: the restore only rejects a cached
+# value that falls outside the new +/-30% bounds. To push a refreshed seed set onto
+# every install, bump seed_version with it; the cache carries the version it was
+# learned under and a mismatch restarts learning from the new seeds, points included.
 #
 # Values from comma 4 device-learned data.
 
@@ -23,9 +31,15 @@
 # highway bins are learned now, no longer carrying 08-03 seed values. Bin 1's
 # LAF (2.53 -> 2.93) had drifted toward the old +30% sanity edge; this refresh
 # re-centers the bounds on it.
+# Refreshed 2026-09-02 from the same car's LiveTorqueParametersSP cache (danger-unstable
+# 02653a663, 1.0k-5.2k points per bin). Bins 6.5-21.0 are that cache's per-bin fits; the
+# 28.0 and 35.0 bins had not gone valid again since the cache restarted (836 and 0 points)
+# and keep the 08-19 values. seed_version 1 retires every device's cache learned under
+# the 08-19 seeds.
 speed_bp    = [6.5, 9.5, 12.0, 16.4, 21.0, 28.0, 35.0]
-laf_bp      = [2.43, 2.93, 2.37, 1.21, 1.16, 1.53, 1.76]
-friction_bp = [0.156, 0.142, 0.124, 0.153, 0.139, 0.122, 0.108]
+laf_bp      = [2.42, 2.86, 2.29, 1.21, 1.22, 1.53, 1.76]
+friction_bp = [0.160, 0.143, 0.124, 0.145, 0.133, 0.122, 0.108]
+seed_version = 1
 
 [MAZDA_CX9_2021]
 # Measured on an EPS-SWAPPED CX-9 2021 running the CX-5 2022 donor EPS
