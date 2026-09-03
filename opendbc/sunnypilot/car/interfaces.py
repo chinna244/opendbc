@@ -197,7 +197,7 @@ def setup_interfaces(CI, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
   _initialize_radar_tracks(CP, CP_SP, can_recv, can_send)
   _initialize_stop_and_go(CP, CP_SP, params_dict)
   _initialize_toyota(CP, CP_SP, params_dict)
-  _initialize_mazda(CP, CP_SP, params_dict)
+  _initialize_mazda(CP, CP_SP)
 
 
 def _initialize_custom_longitudinal_tuning(CI, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
@@ -276,7 +276,7 @@ def _initialize_toyota(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params
       CP_SP.flags |= ToyotaFlagsSP.STOP_AND_GO_HACK.value
 
 
-def _initialize_mazda(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_dict: dict[str, str]) -> None:
+def _initialize_mazda(CP: structs.CarParams, CP_SP: structs.CarParamsSP) -> None:
+  # Always-on for Mazda TJA_MADS platforms; no Params toggle.
   if CP.brand == "mazda" and has_tja_mads(CP):
-    if int(params_dict.get("MazdaExperimentalMadsWhiteHud", 0)) == 1:
-      CP_SP.flags |= MazdaFlagsSP.EXPERIMENTAL_MADS_WHITE_HUD.value
+    CP_SP.flags |= MazdaFlagsSP.EXPERIMENTAL_MADS_WHITE_HUD.value
