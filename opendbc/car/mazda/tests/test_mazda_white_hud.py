@@ -88,6 +88,42 @@ def test_transition_raw_normalizes_to_allowlisted_packed_base():
   assert bytes(a ^ b for a, b in zip(LANE_VISIBLE_4102, out, strict=True)) == WHITE_TJA_XOR
 
 
+# Observed CX-5 2022 FSC frames: byte3 0x02 (unnamed) with/without TJA_TRANSITION.
+# Normalization must clear 0x0E so these resolve to existing trusted bases.
+# Do NOT add the raw frames to the 14-payload allowlist.
+@pytest.mark.parametrize(("raw_hex", "base_hex"), [
+  ("4102000600001040", "4102000000001040"),  # TJA_TRANSITION=1 | unnamed 0x02
+  ("4102000200001040", "4102000000001040"),  # unnamed 0x02 only
+  ("4201000a00001040", "4201000000001040"),  # TJA_TRANSITION=2 | unnamed 0x02
+  ("4201000c00001040", "4201000000001040"),  # TJA_TRANSITION=3 (existing)
+])
+def test_unnamed_byte3_02_normalizes_to_trusted_base(raw_hex, base_hex):
+  raw = bytes.fromhex(raw_hex)
+  base = bytes.fromhex(base_hex)
+  assert raw not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert base in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert mazdacan.white_hud_allowlist_base(raw) == base
+  assert mazdacan.is_white_hud_normalized_base(raw, base)
+  out = mazdacan.apply_mads_white_hud(raw, base, True)
+  assert bytes(a ^ b for a, b in zip(base, out, strict=True)) == WHITE_TJA_XOR
+
+
+@pytest.mark.parametrize("raw_hex", [
+  "4102000700001040",  # unnamed 0x01 residual after 0x0E clear
+  "4201000980001040",  # unnamed 0x01 residual + extra byte4 bit
+  "4102000980001040",  # unnamed 0x01 residual + extra byte4 bit
+  "5201000000001040",  # different byte0 (0x52); unrelated FSC state
+])
+def test_untrusted_residuals_remain_fail_closed(raw_hex):
+  raw = bytes.fromhex(raw_hex)
+  assert raw not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert mazdacan.white_hud_allowlist_base(raw) is None
+  assert not mazdacan.is_white_hud_normalized_base(raw, LANE_VISIBLE_4102)
+  assert not mazdacan.is_white_hud_normalized_base(raw, OFF)
+  assert mazdacan.apply_mads_white_hud(raw, LANE_VISIBLE_4102, True) == LANE_VISIBLE_4102
+  assert mazdacan.apply_mads_white_hud(raw, OFF, True) == OFF
+
+
 def test_normalize_mask_matches_mazda_2017_dbc():
   from opendbc.can.dbc import DBC
   be_bits = [j + i * 8 for i in range(64) for j in range(7, -1, -1)]
@@ -99,10 +135,18 @@ def test_normalize_mask_matches_mazda_2017_dbc():
     for bit in be_bits[idx:idx + sig.size]:
       byte, b = divmod(bit, 8)
       field_bits |= 1 << (8 * (7 - byte) + b)
-  keep = ((1 << 64) - 1) ^ field_bits
-  assert keep == mazdacan.CAM_LANEINFO_TJA_NORMALIZE_MASK
-  assert (keep >> (8 * (7 - mazdacan._CAM_LANEINFO_TJA_BYTE))) & 0xFF == 0xFF ^ mazdacan._CAM_LANEINFO_TJA_BITS
-  assert (keep >> (8 * (7 - mazdacan._CAM_LANEINFO_TRANS_BYTE))) & 0xFF == 0xFF ^ mazdacan._CAM_LANEINFO_TRANS_BITS
+  dbc_keep = ((1 << 64) - 1) ^ field_bits
+  # The mask intentionally also clears byte-3 bit 1 (0x02), an unnamed FSC state bit
+  # observed alongside TJA_TRANSITION transitions. Verify DBC bits are a strict subset.
+  assert (mazdacan.CAM_LANEINFO_TJA_NORMALIZE_MASK & ~dbc_keep) == 0, (
+    "Mask must only clear bits that are either DBC-defined or the audited unnamed 0x02 bit"
+  )
+  # The only extra cleared bit beyond DBC is byte-3 0x02.
+  extra_cleared = dbc_keep & ~mazdacan.CAM_LANEINFO_TJA_NORMALIZE_MASK
+  unnamed_02_64 = 0x02 << 32  # byte 3 (index 3) of a 64-bit big-endian word
+  assert extra_cleared == unnamed_02_64, f"Unexpected extra cleared bits: {extra_cleared:#018x}"
+  assert (mazdacan.CAM_LANEINFO_TJA_NORMALIZE_MASK >> (8 * (7 - mazdacan._CAM_LANEINFO_TJA_BYTE))) & 0xFF == 0xFF ^ mazdacan._CAM_LANEINFO_TJA_BITS
+  assert (mazdacan.CAM_LANEINFO_TJA_NORMALIZE_MASK >> (8 * (7 - mazdacan._CAM_LANEINFO_TRANS_BYTE))) & 0xFF == 0xFF ^ mazdacan._CAM_LANEINFO_TRANS_BITS
 
 
 @pytest.mark.parametrize("base", SAFE_BASES)
