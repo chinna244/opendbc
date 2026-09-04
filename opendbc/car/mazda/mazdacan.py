@@ -219,14 +219,15 @@ MADS_HUD_WHITE_TJA_XOR = bytes.fromhex("0000000020000000")
 # CAM_LANEINFO motorola bit positions from mazda_2017.dbc. TJA start 38 size 3 is
 # byte 4 bits 6-4 (0x70); TJA_TRANSITION start 27 size 2 is byte 3 bits 3-2 (0x0C).
 # CANPacker: TJA=2 → byte4 0x20, TJA_TRANSITION=1 → byte3 0x04.
-# Byte 3 bit 1 (0x02) is an unnamed FSC state bit observed alongside TJA_TRANSITION
-# transitions on CX-5 2022; it is safe to normalize with the same mask.
+# Byte 3 bits 1..0 (0x03) are unnamed FSC transition-state bits observed on CX-5 2022
+# after TJA_TRANSITION; they are safe to normalize with the same mask. Do not clear
+# byte4 0x80 (…0980001040 family) or unrelated byte0 family bits.
 _CAM_LANEINFO_TJA_BYTE = 4
 _CAM_LANEINFO_TJA_BITS = 0x70
 _CAM_LANEINFO_TRANS_BYTE = 3
-_CAM_LANEINFO_TRANS_BITS = 0x0E  # 0x0C (TJA_TRANSITION) | 0x02 (unnamed state bit)
-# 64-bit big-endian keep-mask: clear TJA, TJA_TRANSITION, and unnamed byte-3 bit 1.
-CAM_LANEINFO_TJA_NORMALIZE_MASK = 0xFFFFFFF18FFFFFFF
+_CAM_LANEINFO_TRANS_BITS = 0x0F  # 0x0C (TJA_TRANSITION) | 0x02 | 0x01 (unnamed)
+# 64-bit big-endian keep-mask: clear TJA, TJA_TRANSITION, and unnamed byte-3 0x03.
+CAM_LANEINFO_TJA_NORMALIZE_MASK = 0xFFFFFFF08FFFFFFF
 _MADS_HUD_SAFE_BASE_BY_INT = {
   int.from_bytes(b, "big") & CAM_LANEINFO_TJA_NORMALIZE_MASK: b
   for b in MADS_HUD_SAFE_BASE_PAYLOADS
@@ -234,13 +235,13 @@ _MADS_HUD_SAFE_BASE_BY_INT = {
 
 
 def cam_laneinfo_matches_normalized(raw: bytes, packed: bytes) -> bool:
-  """True when raw and packed differ only in TJA / TJA_TRANSITION / unnamed byte-3 0x02."""
+  """True when raw and packed differ only in TJA / TJA_TRANSITION / unnamed byte-3 0x03."""
   return ((int.from_bytes(raw, "big") ^ int.from_bytes(packed, "big")) &
           CAM_LANEINFO_TJA_NORMALIZE_MASK) == 0
 
 
 def white_hud_allowlist_base(fsc_raw: bytes | None) -> bytes | None:
-  """Return the 14-base payload FSC matches with TJA / TJA_TRANSITION / unnamed 0x02 ignored."""
+  """Return the 14-base payload FSC matches with TJA / TJA_TRANSITION / unnamed 0x03 ignored."""
   if fsc_raw is None or len(fsc_raw) != 8:
     return None
   return _MADS_HUD_SAFE_BASE_BY_INT.get(
