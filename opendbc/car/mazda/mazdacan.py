@@ -212,6 +212,10 @@ MADS_HUD_SAFE_BASE_PAYLOADS = frozenset({
   bytes.fromhex("4122000000001040"),
   # Route 20: byte-7 counter nibble on 4361000000000040 (same pattern as 1060).
   bytes.fromhex("4361000000000060"),
+  # Route 52 night CX-5 2022: same LINE_VISIBLE families with S1_HBEAM=1 (headlights /
+  # auto-HBM active). Named fields otherwise match 4102/4122…1040; TJA XOR only.
+  bytes.fromhex("4102000000004040"),
+  bytes.fromhex("4122000000004040"),
 })
 # OFF→WHITE is TJA 0→2 only (DBC TJA motorola start 38). XOR this into an allowed
 # base; never replace the whole frame with MADS_HUD_WHITE.
