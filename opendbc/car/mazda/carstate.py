@@ -33,6 +33,7 @@ class CarState(CarStateBase, CarStateExt):
     self.steer_undelivered_frames = 0
     self.steer_undelivered = False
     self.steer_undelivered_alert = False
+    self.lkas_block_origin_speed: float | None = None
 
     self.distance_button = 0
     self.accel_button = 0
@@ -78,7 +79,11 @@ class CarState(CarStateBase, CarStateExt):
       self.steer_undelivered_frames = 0
       self.steer_undelivered = False
       self.steer_undelivered_alert = False
-    elif not self.steer_undelivered:
+      self.lkas_block_origin_speed = None
+    elif self.lkas_block_origin_speed is None:
+      self.lkas_block_origin_speed = v_ego_raw
+
+    if lkas_blocked and not self.steer_undelivered:
       if self.lkas_effective == 0 and abs(lkas_request) > self.params.STEER_UNDELIVERED_MIN:
         self.steer_undelivered_frames += 1
         self.steer_undelivered = self.steer_undelivered_frames >= self.params.STEER_UNDELIVERED_FRAMES
@@ -86,12 +91,15 @@ class CarState(CarStateBase, CarStateExt):
         self.steer_undelivered_frames = 0
 
     if self.steer_undelivered:
-      # Alert only for a sustained road-speed block. LKAS_TRACK_STATE identifies normal
-      # low-speed standby, which can remain set briefly during a brisk launch.
+      # Alert only for a sustained road-speed block that began rolling. LKAS_TRACK_STATE
+      # identifies normal low-speed standby, which can remain set briefly during a brisk
+      # launch; the origin speed catches the standby blocks it does not, the ones carried
+      # from a stop through a slow crawl until TRACK_STATE clears with the block still on.
       self.steer_undelivered_frames += 1
       if (not self.steer_undelivered_alert and not lkas_track_state and
           self.steer_undelivered_frames >= self.params.STEER_UNDELIVERED_FRAMES + self.params.STEER_UNDELIVERED_ALERT_FRAMES and
-          v_ego_raw >= self.params.STEER_UNDELIVERED_ALERT_MIN_SPEED):
+          v_ego_raw >= self.params.STEER_UNDELIVERED_ALERT_MIN_SPEED and
+          self.lkas_block_origin_speed >= self.params.STEER_UNDELIVERED_ALERT_ORIGIN_SPEED):
         self.steer_undelivered_alert = True
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:

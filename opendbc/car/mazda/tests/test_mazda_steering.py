@@ -159,6 +159,12 @@ class TestCarControllerParams:
     assert params.STEER_UNDELIVERED_ALERT_MIN_SPEED > 4.97
     assert params.STEER_UNDELIVERED_ALERT_MIN_SPEED < 5.9
     assert params.STEER_UNDELIVERED_ALERT_MIN_SPEED < 15. * CV.MPH_TO_MS
+    # 1660 of 1915 LKAS_BLOCK episodes in 64 h begin below 0.5 m/s (the EPS's standby from a
+    # stop, read through wheel-speed quantisation); every latched block that began above it
+    # and armed the alert was a fault, the slowest of them route 00000148's at 4.6 m/s
+    # (tools/mazda_long/replay_undelivered_alert.py)
+    assert params.STEER_UNDELIVERED_ALERT_ORIGIN_SPEED > 0.5
+    assert params.STEER_UNDELIVERED_ALERT_ORIGIN_SPEED < 4.6
 
 
 def test_carstate_undelivered_latch_zeroes_the_steer_command(stock_cc, stock_cs):

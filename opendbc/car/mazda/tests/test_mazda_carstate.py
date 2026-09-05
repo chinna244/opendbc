@@ -482,15 +482,45 @@ class TestSteerUndeliveredLatch:
     assert not ret.steerFaultTemporary, f"alerted at {v} m/s"
     assert rig.CS.steer_undelivered, f"did not latch at {v} m/s"
 
-  def test_accelerating_out_of_a_block_that_never_releases_does_alert(self):
-    # A persistent block becomes alertable when vehicle speed crosses the threshold.
+  def test_accelerating_out_of_a_block_that_began_rolling_does_alert(self):
+    # A persistent block that began above the origin speed becomes alertable when vehicle
+    # speed crosses the threshold.
     rig = UndeliveredRig()
+    v0 = rig.params.STEER_UNDELIVERED_ALERT_ORIGIN_SPEED + 1.0
     for _ in range(300):
-      ret = rig.step(600, 0, 1, speed_kph=2.0 * CV.MS_TO_KPH)
+      ret = rig.step(600, 0, 1, speed_kph=v0 * CV.MS_TO_KPH)
     assert not ret.steerFaultTemporary
     for _ in range(5):
       ret = rig.step(600, 0, 1, speed_kph=7.0 * CV.MS_TO_KPH)
     assert ret.steerFaultTemporary
+
+  def test_block_carried_from_a_stop_never_alerts_however_long_it_lasts(self):
+    # The EPS's standby from a stop can outlive TRACK_STATE through a slow crawl (9 blocks
+    # of 13 to 44 s in 64 h of drives, none a fault). The origin speed, not the state bit,
+    # separates them from a dropout; the command stays zeroed either way.
+    rig = UndeliveredRig()
+    for _ in range(50):
+      rig.step(600, 0, 1, speed_kph=0.0, track_state=1)
+    for _ in range(600):
+      ret = rig.step(600, 0, 1, speed_kph=7.0 * CV.MS_TO_KPH, track_state=0)
+    assert rig.CS.steer_undelivered
+    assert not ret.steerFaultTemporary
+    # A release resets the origin, so the next block is judged on its own start.
+    rig.step(600, 600, 0, speed_kph=7.0 * CV.MS_TO_KPH)
+    hold = rig.params.STEER_UNDELIVERED_FRAMES + rig.params.STEER_UNDELIVERED_ALERT_FRAMES + 5
+    for _ in range(hold):
+      ret = rig.step(600, 0, 1, speed_kph=7.0 * CV.MS_TO_KPH, track_state=0)
+    assert ret.steerFaultTemporary
+
+  def test_origin_is_the_speed_at_the_blocks_first_frame(self):
+    # Creeping when the block begins reads as a stop; rolling reads as a dropout.
+    for v0, expect in ((0.3, False), (2.0, True)):
+      rig = UndeliveredRig()
+      for _ in range(2):  # the parser applies a frame on the update after it arrives
+        rig.step(600, 0, 1, speed_kph=v0 * CV.MS_TO_KPH, track_state=0)
+      for _ in range(rig.params.STEER_UNDELIVERED_FRAMES + rig.params.STEER_UNDELIVERED_ALERT_FRAMES + 5):
+        ret = rig.step(600, 0, 1, speed_kph=7.0 * CV.MS_TO_KPH, track_state=0)
+      assert ret.steerFaultTemporary == expect, f"origin {v0} m/s"
 
 
 class TestTjaButtonEvents:

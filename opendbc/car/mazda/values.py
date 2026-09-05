@@ -96,6 +96,9 @@ class CarControllerParams:
       # low-speed standby blocks identified by LKAS_TRACK_STATE.
       self.STEER_UNDELIVERED_ALERT_FRAMES = 80    # 0.8 s at 100 Hz, on top of the latch's 0.2
       self.STEER_UNDELIVERED_ALERT_MIN_SPEED = 12. * CV.MPH_TO_MS
+      # A block that began below this speed is the EPS's standby from a stop, whatever
+      # LKAS_TRACK_STATE says later in it; only a block that began rolling can be a dropout.
+      self.STEER_UNDELIVERED_ALERT_ORIGIN_SPEED = 1.0  # m/s
 
       # Use a sample window and margin to stay inside panda's fresher driver-torque envelope.
       self.STEER_DRIVER_SAMPLES = 10
