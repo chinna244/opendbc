@@ -8,7 +8,7 @@ from opendbc.car.structs import CarParams, CarParamsT
 from opendbc.car.fingerprints import eliminate_incompatible_cars, all_legacy_fingerprint_cars
 from opendbc.car.fw_versions import ObdCallback, get_fw_versions_ordered, get_present_ecus, match_fw_to_car
 from opendbc.car.mock.values import CAR as MOCK
-from opendbc.car.values import BRANDS
+from opendbc.car.values import BRANDS, platform_from_vin
 from opendbc.car.vin import get_vin, is_valid_vin, VIN_UNKNOWN
 
 from opendbc.sunnypilot.car.interfaces import setup_interfaces as sunnypilot_interfaces
@@ -167,6 +167,16 @@ def get_car(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multip
   CP.carFw = car_fw
   CP.fingerprintSource = source
   CP.fuzzyFingerprint = not exact_match
+
+  if fixed_fingerprint and vin != VIN_UNKNOWN:
+    # A carried-forward CarPlatformBundle can disagree with the physical car after a
+    # hardware swap or a branch switch without reinstall. A swap cannot change the VIN,
+    # so a VIN that identifies exactly one other platform is worth a loud line in the log.
+    vin_platform = platform_from_vin(vin)
+    if vin_platform is not None and vin_platform != candidate:
+      carlog.warning({"event": "platformBundleVinMismatch", "bundle": str(candidate), "vin_platform": vin_platform,
+                      "hint": "the selected platform bundle does not match the VIN's platform"})
+
   CP_SP = CarInterface.get_params_sp(CP, candidate, fingerprints, car_fw, alpha_long_allowed, is_release_sp, docs=False)
 
   sunnypilot_interfaces(CarInterface, CP, CP_SP, init_params_list_sp, can_recv, can_send)

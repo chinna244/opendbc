@@ -10,6 +10,7 @@ from opendbc.car import structs
 from opendbc.car.fw_versions import match_fw_to_car
 from opendbc.car.mazda.fingerprints import FW_VERSIONS
 from opendbc.car.mazda.values import CAR, STEER_TO_ZERO_EPS_FW, match_fw_to_car_fuzzy
+from opendbc.car.values import platform_from_vin
 from opendbc.car.vin import VIN_UNKNOWN
 
 # a steer-to-zero EPS a swap donates; the CX-5 2022 list also carries legacy firmware now
@@ -65,6 +66,19 @@ class TestMazdaVinMatch:
   def test_real_listing_vins(self, vin, expected):
     expected_platforms = {str(expected)} if expected is not None else set()
     assert match_fw_to_car_fuzzy({}, vin, FW_VERSIONS) == expected_platforms
+
+  def test_the_support_log_vin_resolves(self):
+    # the KE body from the alpha-long support log, running behind a carried-forward
+    # CX-5 2022 platform bundle: the resolver must name its own platform
+    assert platform_from_vin('JM3KE4DYXG0877243') == str(CAR.MAZDA_CX5_KE)
+
+  @pytest.mark.parametrize("vin, expected", REAL_VINS)
+  def test_platform_from_vin_matches_the_fuzzy_matcher(self, vin, expected):
+    assert platform_from_vin(vin) == (str(expected) if expected is not None else None)
+
+  def test_platform_from_vin_rejects_unknown(self):
+    assert platform_from_vin(VIN_UNKNOWN) is None
+    assert platform_from_vin('JM3KE4DYXG08772') is None  # short
 
   def test_wrong_wmi_does_not_match(self):
     assert match_fw_to_car_fuzzy({}, make_vin('JM6', 'TC', 'M'), FW_VERSIONS) == set()

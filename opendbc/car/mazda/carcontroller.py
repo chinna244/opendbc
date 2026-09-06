@@ -32,6 +32,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # scale and the non-delivery latch belong to the steer-to-zero firmware alone.
     self.eps_2022 = bool(CP.flags & MazdaFlags.EPS_HW)
     self.steer_to_zero = bool(CP.flags & MazdaFlags.STEER_TO_ZERO_EPS)
+    # The teardown replays this radar's own dialect, not the 2022 captures.
+    self.g46l = bool(CP.flags & MazdaFlags.G46L_RADAR)
     self.apply_torque_last = 0
     self.driver_torque_samples: deque[float] = deque(maxlen=self.params.STEER_DRIVER_SAMPLES if self.eps_2022 else 1)
     self.sent_torque: deque[int] = deque(maxlen=self.params.STEER_ECHO_HISTORY if self.eps_2022 else 1)
@@ -253,7 +255,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     if radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:
       for bus in LONG_BUSES:
-        can_sends.extend(mazdacan.create_radar_frames(bus, self.radar_counter, self.lead_adv.lead))
+        can_sends.extend(mazdacan.create_radar_frames(bus, self.radar_counter, self.lead_adv.lead, g46l=self.g46l))
       self.radar_counter += 1
 
     if radar_master and self.frame % CarControllerParams.LONG_STEP == 0:

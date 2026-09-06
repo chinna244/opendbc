@@ -59,11 +59,17 @@ static bool mazda_radar_was_silenced = false;
 
 // Pin replaced-radar traffic to captured stock patterns where possible.
 
+// Each radar generation sends its own static capture; the controller picks the dialect (mazdacan.py)
 static bool mazda_radar_static_msg_valid(const CANPacket_t *msg) {
-  return (msg->data[0] == 0x00U) && (msg->data[1] == 0x08U) &&
-         (msg->data[2] == 0xc0U) && (msg->data[3] == 0x00U) &&
-         (msg->data[4] == 0x00U) && (msg->data[5] == 0x00U) &&
-         (msg->data[6] == 0x00U) && (msg->data[7] == 0x00U);
+  bool capture_2022 = (msg->data[0] == 0x00U) && (msg->data[1] == 0x08U) &&
+                      (msg->data[2] == 0xc0U) && (msg->data[3] == 0x00U) &&
+                      (msg->data[4] == 0x00U) && (msg->data[5] == 0x00U) &&
+                      (msg->data[6] == 0x00U) && (msg->data[7] == 0x00U);
+  bool capture_g46l = (msg->data[0] == 0x00U) && (msg->data[1] == 0x98U) &&
+                      (msg->data[2] == 0x40U) && (msg->data[3] == 0x00U) &&
+                      (msg->data[4] == 0x00U) && (msg->data[5] == 0x00U) &&
+                      (msg->data[6] == 0x00U) && (msg->data[7] == 0x00U);
+  return capture_2022 || capture_g46l;
 }
 
 static bool mazda_empty_radar_track_msg_valid(const CANPacket_t *msg) {

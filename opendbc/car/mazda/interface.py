@@ -1,11 +1,23 @@
 #!/usr/bin/env python3
 from opendbc.car import Bus, get_safety_config, structs
+from opendbc.car.carlog import carlog
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.carstate import CarState
+from opendbc.car.mazda.fingerprints import FW_VERSIONS
 from opendbc.car.mazda.radar_interface import RadarInterface
-from opendbc.car.mazda.values import CAR, DBC, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaFlags, MazdaSafetyFlags
+from opendbc.car.mazda.values import CAR, DBC, G46L_RADAR_FW, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaFlags, MazdaSafetyFlags
+
+# Radar firmware whose bus publishes the 0x361-0x366 track dialect: every radar the
+# database lists except the G46L, which it lists for fingerprinting even though that
+# radar never sends tracks on bus 0. Stored null-stripped so UDS response padding of any
+# length compares equal. A talking radar outside this set behind a claiming platform (an
+# EPS-swapped older body with a carried-forward bundle) gets the vision-only path; a
+# silent one (empty fw query) keeps the platform's word.
+TRACK_RADAR_FW = {fw.rstrip(b'\x00') for fw in set().union(
+  *(fw.get((structs.CarParams.Ecu.fwdRadar, 0x764, None), []) for fw in FW_VERSIONS.values())
+)} - G46L_RADAR_FW
 
 
 class CarInterface(CarInterfaceBase):
@@ -18,7 +30,10 @@ class CarInterface(CarInterfaceBase):
     ret.brand = "mazda"
     ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.mazda)]
 
-    ret.radarUnavailable = Bus.radar not in DBC[candidate]
+    # A talking radar outside the track dialects sends no tracks we can parse: run
+    # vision-only instead of starving radarTracks behind a parser that never goes valid.
+    foreign_radar = any(fw.ecu == 'fwdRadar' and fw.fwVersion.rstrip(b'\x00') not in TRACK_RADAR_FW for fw in car_fw)
+    ret.radarUnavailable = Bus.radar not in DBC[candidate] or foreign_radar
 
     # Every gen1 Mazda EPS is the same hardware; only the firmware differs. Steer-to-zero follows
     # the EPS firmware, so a donor-EPS swap carries it and older firmware in a 2022 body loses it.
@@ -36,8 +51,18 @@ class CarInterface(CarInterfaceBase):
       ret.flags |= MazdaFlags.LEGACY_FW_EPS.value
       ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.LEGACY_FW_EPS.value
 
-    # Offer alpha longitudinal only with the EPS that retains lateral control through a stop.
-    ret.alphaLongitudinalAvailable = steer_to_zero and not ret.radarUnavailable
+    # The G46L is the one foreign radar whose dialect alpha-long can replay (mazdacan.py).
+    # Detected with nulls stripped so UDS response padding cannot break the match.
+    g46l_radar = any(fw.ecu == 'fwdRadar' and fw.fwVersion.rstrip(b'\x00') in G46L_RADAR_FW for fw in car_fw)
+    if g46l_radar:
+      ret.flags |= MazdaFlags.G46L_RADAR.value
+
+    # Alpha-long silences the radar and stands in for it, so it needs the radar's dialect,
+    # not its tracks: offer it wherever the platform's radar speaks the 2022 family dialect
+    # (its DBC claims a radar bus) or the detected radar is the G46L whose own replay exists.
+    # The EPS gate stays: a stock older EPS cuts lateral below 45 kph, so stop-and-go would
+    # run unsteered.
+    ret.alphaLongitudinalAvailable = steer_to_zero and (Bus.radar in DBC[candidate] or g46l_radar)
     ret.openpilotLongitudinalControl = alpha_long and ret.alphaLongitudinalAvailable
     if ret.openpilotLongitudinalControl:
       ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.LONG.value
@@ -49,6 +74,10 @@ class CarInterface(CarInterfaceBase):
 
     # Older EPS firmware enforces hands-off and low-speed steering lockouts.
     ret.dashcamOnly = candidate not in (CAR.MAZDA_CX5_2022, CAR.MAZDA_CX9_2021) and not steer_to_zero
+
+    carlog.info({"event": "mazdaRadarVerdict", "radarUnavailable": ret.radarUnavailable,
+                 "platformClaim": Bus.radar in DBC[candidate], "foreignRadarFw": foreign_radar,
+                 "g46lRadar": g46l_radar, "steerToZeroEps": steer_to_zero})
 
     ret.enableBsm = 0x477 in fingerprint[0]
 

@@ -170,6 +170,11 @@ class MazdaFlags(IntFlag):
   # Everything keyed on the measured hardware rather than on what the firmware permits.
   EPS_HW = STEER_TO_ZERO_EPS | LEGACY_FW_EPS
 
+  # The 2016.5-era radar kept by an EPS-swapped older body. fingerprints.py lists it for
+  # fingerprinting, but it never sends tracks on bus 0; alpha-long replays its own dialect
+  # instead of the 2022 captures (mazdacan.py).
+  G46L_RADAR = 4
+
 
 class MazdaSafetyFlags(IntFlag):
   LONG = 1
@@ -248,6 +253,15 @@ class LKAS_LIMITS:
 STEER_TO_ZERO_EPS_FW = {
   b'KBST-3210X-A-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
   b'KSD5-3210X-C-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+}
+
+# The 2016.5-era radar kept by an EPS-swapped older body. fingerprints.py lists it for
+# fingerprinting, but it never publishes 0x361-0x366 on bus 0: the interface keeps it off
+# the track dialects (vision-only under stock longitudinal), and alpha-long replays this
+# radar's own dialect instead of the 2022 templates (mazdacan.py). Stored unpadded; the
+# interface matches with nulls stripped so response padding cannot break it.
+G46L_RADAR_FW = {
+  b'G46L-67XA1-C',
 }
 
 
