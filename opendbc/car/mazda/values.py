@@ -199,14 +199,14 @@ class MazdaPlatformConfig(PlatformConfig):
 class CAR(Platforms):
   MAZDA_CX5_KE = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-5 2012-16")],
-    MazdaCarSpecs(mass=3561 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=15.5),
+    MazdaCarSpecs(mass=3433 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=18.1),  #steerRatio copied from 22 CX-5, same hardware
     # This radar does not publish 0x361-0x366 tracks on bus 0.
     dbc_dict={Bus.pt: 'mazda_2017'},
     wmis={WMI.JAPAN_CROSSOVER}, chassis_codes={'KE'}, years={'C', 'D', 'E', 'F', 'G'},  # 2012-16
   )
   MAZDA_CX5 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-5 2017-21")],
-    MazdaCarSpecs(mass=3655 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=15.5),
+    MazdaCarSpecs(mass=3655 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=18.1),  #steerRatio copied from 22 CX-5, same hardware
     wmis={WMI.JAPAN_CROSSOVER}, chassis_codes={'KF'}, years={'H', 'J', 'K', 'L', 'M'},  # 2017-21
   )
   MAZDA_CX9 = MazdaPlatformConfig(
