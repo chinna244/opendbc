@@ -22,3 +22,14 @@ seed_version = 1
 speed_bp    = [6.5, 9.5, 12.0, 16.4, 21.0, 28.0, 35.0]
 laf_bp      = [2.67, 2.70, 2.56, 1.53, 1.28, 1.72, 1.97]
 friction_bp = [0.161, 0.154, 0.116, 0.163, 0.136, 0.128, 0.108]
+
+[MAZDA_CX5_KE]
+# Apply these values only to a KE with a detected CX-5 2022 donor EPS. The stock EPS
+# uses a flat 800-count scale and a 45 kph steering floor.
+requires_steer_to_zero = true
+# The CX-5 2022 table copied unchanged: the donor EPS is the EPS those bins were learned
+# under, and no KE has its own fit yet. seed_version mirrors the source table.
+speed_bp    = [6.5, 9.5, 12.0, 16.4, 21.0, 28.0, 35.0]
+laf_bp      = [2.42, 2.86, 2.29, 1.21, 1.22, 1.53, 1.76]
+friction_bp = [0.160, 0.143, 0.124, 0.145, 0.133, 0.122, 0.108]
+seed_version = 1
