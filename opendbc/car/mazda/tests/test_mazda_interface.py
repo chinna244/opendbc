@@ -64,11 +64,11 @@ class TestMazdaEpsSwap:
     assert not car_params(CAR.MAZDA_CX5, alpha_long=True).alphaLongitudinalAvailable
 
   def test_swapped_eps_keeps_the_real_vehicle_specs(self):
-    # EPS detection must not replace the chassis-specific physical parameters.
+    # EPS detection must not replace the chassis-specific physical parameters. steerRatio
+    # no longer separates the platforms: the pre-2022 racks run the 2022's 18.1 too.
     swapped = car_params(CAR.MAZDA_CX5, car_fw=eps_fw(SWAPPED_EPS_FW))
     cx5_2022 = car_params(CAR.MAZDA_CX5_2022)
     assert swapped.mass != cx5_2022.mass
-    assert swapped.steerRatio != cx5_2022.steerRatio
     assert swapped.tireStiffnessFactor != cx5_2022.tireStiffnessFactor
 
   def test_supported_platforms_are_unchanged(self):
