@@ -103,6 +103,21 @@ class TestMazdaEpsSwap:
   def test_stock_long_still_reads_the_radar_tracks(self):
     assert not car_params(CAR.MAZDA_CX9_2021, alpha_long=True).radarUnavailable
 
+  def test_ke_runs_vision_only_under_a_swapped_eps(self):
+    # the first-generation radar speaks no track dialect, so the platform promises no
+    # radar bus: the lead comes from the model and no teardown is offered, while the
+    # EPS swap still lifts the steering lockouts
+    stock = car_params(CAR.MAZDA_CX5_KE)
+    assert stock.radarUnavailable
+    assert stock.dashcamOnly
+
+    swapped = car_params(CAR.MAZDA_CX5_KE, car_fw=eps_fw(SWAPPED_EPS_FW))
+    assert swapped.radarUnavailable
+    assert not swapped.dashcamOnly
+    assert swapped.minSteerSpeed == 0
+    assert swapped.steerActuatorDelay == pytest.approx(0.14, abs=5e-8)
+    assert not swapped.alphaLongitudinalAvailable
+
   @pytest.mark.parametrize("candidate, car_fw, alpha_long, expected", [
     (CAR.MAZDA_CX5_2022, None, False, True),
     (CAR.MAZDA_CX5_2022, None, True, True),
@@ -124,7 +139,7 @@ class TestMazdaEpsSwap:
     # longitudinal keeps its own bit
     assert bool(CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.LONG.value) == CP.openpilotLongitudinalControl
 
-  @pytest.mark.parametrize("candidate", [CAR.MAZDA_CX5, CAR.MAZDA_CX9, CAR.MAZDA_3, CAR.MAZDA_6])
+  @pytest.mark.parametrize("candidate", [CAR.MAZDA_CX5_KE, CAR.MAZDA_CX5, CAR.MAZDA_CX9, CAR.MAZDA_3, CAR.MAZDA_6])
   def test_docs_are_generated_without_firmware(self, candidate):
     # car_fw is empty when building CARS.md, so the docs must keep advertising dashcam mode
     from opendbc.car import gen_empty_fingerprint

@@ -72,7 +72,7 @@ class TestMazdaVinMatch:
   @pytest.mark.parametrize("wmi, chassis_code, year_code", [
     ('JM1', 'BP', 'K'),  # Mazda 3 2019+
     ('JM3', 'DM', 'N'),  # CX-30
-    ('JM3', 'KE', 'H'),  # pre-2017 CX-5
+    ('JM3', 'KE', 'H'),  # a CX-5 KE past the last supported model year
     ('7MM', 'VA', 'P'),  # CX-50
     ('JM3', 'TC', 'T'),  # a CX-9 past the last supported model year
   ])
@@ -95,6 +95,11 @@ class TestMazdaVinMatch:
     assert match_fw_to_car_fuzzy({}, make_vin('3MZ', 'GL', 'K'), FW_VERSIONS) == set()   # GL never built in Mexico
     assert match_fw_to_car_fuzzy({}, make_vin('JM3', 'KF', 'G'), FW_VERSIONS) == set()   # 2016 KF predates the port
     assert match_fw_to_car_fuzzy({}, make_vin('JM3', 'KF', 'N'), FW_VERSIONS) == {str(CAR.MAZDA_CX5_2022)}
+
+  @pytest.mark.parametrize("year_code", ['C', 'D', 'E', 'F', 'G'])
+  def test_ke_model_years_name_the_ke_platform(self, year_code):
+    # the first-generation CX-5, one platform across its whole 2012-16 run
+    assert match_fw_to_car_fuzzy({}, make_vin('JM3', 'KE', year_code), FW_VERSIONS) == {str(CAR.MAZDA_CX5_KE)}
 
   def test_engine_firmware_alone_is_not_evidence_without_a_decodable_vin(self):
     # an Oceania export VIN (real report): no model year, no known WMI; the
@@ -217,6 +222,18 @@ class TestMatchFwToCarVinFallback:
     assert exact_match
     assert matches == {str(CAR.MAZDA_CX9_2021)}
 
+  def test_reported_ke_exact_matches_on_its_body_ecus(self):
+    # the 2016.5 report: a 2022 CX-5 EPS swap riding on first-generation body ECUs.
+    # The swap firmware stays under MAZDA_CX5_2022; the body ECUs alone exact-match
+    # the chassis, and no EPS entry exists to contradict the swap
+    donor_eps = FW_VERSIONS[CAR.MAZDA_CX5_2022][(Ecu.eps, 0x730, None)][1]  # KSD5, the reported swap
+    car_fw = [_car_fw(ecu, addr, versions[0])
+              for (ecu, addr, _), versions in FW_VERSIONS[CAR.MAZDA_CX5_KE].items()]
+    car_fw.append(_car_fw(Ecu.eps, 0x730, donor_eps))
+    exact_match, matches = match_fw_to_car(car_fw, make_vin('JM3', 'KE', 'G'))
+    assert exact_match
+    assert matches == {str(CAR.MAZDA_CX5_KE)}
+
   def test_oceania_eps_swap_matches_on_the_engine_behind_the_donor_eps(self):
     # the reported car: Oceania VIN (never decodes), donor EPS, and chassis ECUs
     # unknown to the North American database. Two recognised ECUs: the engine
@@ -291,3 +308,17 @@ class TestMatchFwToCarVinFallback:
     else:
       assert not exact_match
       assert matches == {str(expected)}, vin
+
+  def test_ke_names_by_vin_through_a_donor_eps(self):
+    # a KE with dealer-updated body ECUs still names by VIN through the swap; the
+    # donor EPS is the one ECU the database knows
+    donor_eps = FW_VERSIONS[CAR.MAZDA_CX5_2022][(Ecu.eps, 0x730, None)][0]
+    car_fw = [
+      _car_fw(Ecu.eps, 0x730, donor_eps),
+      _car_fw(Ecu.engine, 0x7e0, UNKNOWN_ENGINE_FW),
+      _car_fw(Ecu.abs, 0x760, UNKNOWN_ABS_FW),
+      _car_fw(Ecu.transmission, 0x7e1, UNKNOWN_TRANS_FW),
+    ]
+    exact_match, matches = match_fw_to_car(car_fw, make_vin('JM3', 'KE', 'G'))
+    assert not exact_match
+    assert matches == {str(CAR.MAZDA_CX5_KE)}
