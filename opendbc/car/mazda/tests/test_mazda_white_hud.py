@@ -52,18 +52,21 @@ def test_allowlist_payload_only_flips_white_tja_bits(base):
   assert mazdacan.is_mads_white_hud(out)
 
 
-def test_allowlist_stays_sixteen_stable_bases():
-  assert len(mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS) == 16
+def test_allowlist_stays_eighteen_stable_bases():
+  assert len(mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS) == 18
   assert bytes.fromhex("4202000000001040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
   assert bytes.fromhex("4102000400001040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
   assert NEARBY_4221_10E0 not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
   # Night/high-beam LINE_VISIBLE twins of 4102/4122…1040 (route 52).
   assert bytes.fromhex("4102000000004040") in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
   assert bytes.fromhex("4122000000004040") in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
-  # Do not widen to byte7 counter / byte4 0x80 / unrelated families yet.
-  assert bytes.fromhex("4122000000004060") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  # Route 5a: high-beam counter twin + AHB lamps-not-HBM LINE_VISIBLE base.
+  assert bytes.fromhex("4221000000004060") in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert bytes.fromhex("4122000000000040") in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  # Do not widen to byte4 0x80 / unrelated families yet.
   assert bytes.fromhex("4122000980004040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
   assert bytes.fromhex("0122000000000040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert bytes.fromhex("4221000980004040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
 
 
 @pytest.mark.parametrize(("fsc_raw", "packed_dat", "enabled", "expected"), [
@@ -95,9 +98,6 @@ def test_transition_raw_normalizes_to_allowlisted_packed_base():
   assert bytes(a ^ b for a, b in zip(LANE_VISIBLE_4102, out, strict=True)) == WHITE_TJA_XOR
 
 
-# Observed CX-5 2022 FSC frames: unnamed byte3 0x02/0x01 with/without TJA_TRANSITION.
-# Normalization must clear 0x0F so these resolve to existing trusted bases.
-# Do NOT add the raw transition frames to the allowlist.
 def test_night_hbm_line_visible_bases_allowlisted():
   # Route 52: S1_HBEAM=1 twins of existing LINE_VISIBLE 4102/4122…1040 bases.
   for base_hex in ("4102000000004040", "4122000000004040"):
@@ -113,6 +113,24 @@ def test_night_hbm_line_visible_bases_allowlisted():
   assert mazdacan.is_white_hud_normalized_base(raw, base)
 
 
+def test_route5a_counter_and_ahb_off_hbm_bases_allowlisted():
+  for base_hex in ("4221000000004060", "4122000000000040"):
+    base = bytes.fromhex(base_hex)
+    assert base in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+    out = mazdacan.apply_mads_white_hud(base, base, True)
+    assert bytes(a ^ b for a, b in zip(base, out, strict=True)) == WHITE_TJA_XOR
+    assert mazdacan.is_mads_white_hud(out)
+  # 4060 differs from trusted 4040 only in audited byte-7 counter nibble.
+  assert bytes(a ^ b for a, b in zip(
+    bytes.fromhex("4221000000004040"),
+    bytes.fromhex("4221000000004060"),
+    strict=True,
+  )) == bytes.fromhex("0000000000000020")
+
+
+# Observed CX-5 2022 FSC frames: unnamed byte3 0x02/0x01 with/without TJA_TRANSITION.
+# Normalization must clear 0x0F so these resolve to existing trusted bases.
+# Do NOT add the raw transition frames to the allowlist.
 @pytest.mark.parametrize(("raw_hex", "base_hex"), [
   ("4102000600001040", "4102000000001040"),  # TJA_TRANSITION=1 | unnamed 0x02
   ("4102000200001040", "4102000000001040"),  # unnamed 0x02 only

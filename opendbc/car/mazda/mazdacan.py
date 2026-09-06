@@ -216,6 +216,10 @@ MADS_HUD_SAFE_BASE_PAYLOADS = frozenset({
   # auto-HBM active). Named fields otherwise match 4102/4122…1040; TJA XOR only.
   bytes.fromhex("4102000000004040"),
   bytes.fromhex("4122000000004040"),
+  # Route 5a night: byte-7 counter nibble on high-beam 4221…4040 (same 0x40/0x60 pattern).
+  bytes.fromhex("4221000000004060"),
+  # Route 5a: LINE_VISIBLE=1 + BIT2=1 with S1=0/S1_HBEAM=0 (AHB set, lamps not high-beam).
+  bytes.fromhex("4122000000000040"),
 })
 # OFF→WHITE is TJA 0→2 only (DBC TJA motorola start 38). XOR this into an allowed
 # base; never replace the whole frame with MADS_HUD_WHITE.
