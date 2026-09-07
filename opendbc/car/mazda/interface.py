@@ -7,15 +7,15 @@ from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.carstate import CarState
 from opendbc.car.mazda.fingerprints import FW_VERSIONS
 from opendbc.car.mazda.radar_interface import RadarInterface
-from opendbc.car.mazda.values import CAR, DBC, G46L_RADAR_FW, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaFlags, MazdaSafetyFlags
+from opendbc.car.mazda.values import CAR, DBC, LKAS_LIMITS, REPLAY_RADAR_DIALECTS, STEER_TO_ZERO_EPS_FW, MazdaFlags, MazdaSafetyFlags
 
 # Radar firmware whose bus publishes the 0x361-0x366 track dialect: every radar the
-# database lists except the G46L, which it lists for fingerprinting even though that
-# radar never sends tracks on bus 0. Stored null-stripped so UDS response padding of any
-# length compares equal.
+# database lists except the registered replay dialects, which it lists for fingerprinting
+# even though those radars never send tracks on bus 0. Stored null-stripped so UDS
+# response padding of any length compares equal.
 TRACK_RADAR_FW = {fw.rstrip(b'\x00') for fw in set().union(
   *(fw.get((structs.CarParams.Ecu.fwdRadar, 0x764, None), []) for fw in FW_VERSIONS.values())
-)} - G46L_RADAR_FW
+)} - frozenset().union(*(d.fw for d in REPLAY_RADAR_DIALECTS))
 
 
 class CarInterface(CarInterfaceBase):
@@ -49,17 +49,19 @@ class CarInterface(CarInterfaceBase):
       ret.flags |= MazdaFlags.LEGACY_FW_EPS.value
       ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.LEGACY_FW_EPS.value
 
-    # The G46L is the one foreign radar whose dialect alpha-long can replay (mazdacan.py).
-    g46l_radar = any(fw.ecu == 'fwdRadar' and fw.fwVersion.rstrip(b'\x00') in G46L_RADAR_FW for fw in car_fw)
-    if g46l_radar:
-      ret.flags |= MazdaFlags.G46L_RADAR.value
+    # Resolve the detected radar to a registered replay dialect (mazdacan.py replays
+    # its own wire behavior, not the 2022 captures).
+    radar_fw = {fw.fwVersion.rstrip(b'\x00') for fw in car_fw if fw.ecu == 'fwdRadar'}
+    dialect = next((d for d in REPLAY_RADAR_DIALECTS if radar_fw & d.fw), None)
+    if dialect is not None:
+      ret.flags |= int(dialect.flag)
 
     # Alpha-long silences the radar and stands in for it, so it needs the radar's dialect,
     # not its tracks: offer it wherever the platform's radar speaks the 2022 family dialect
-    # (its DBC claims a radar bus) or the detected radar is the G46L whose own replay exists.
+    # (its DBC claims a radar bus) or the detected radar has a registered replay dialect.
     # The EPS gate stays: a stock older EPS cuts lateral below 45 kph, so stop-and-go would
     # run unsteered.
-    ret.alphaLongitudinalAvailable = steer_to_zero and (Bus.radar in DBC[candidate] or g46l_radar)
+    ret.alphaLongitudinalAvailable = steer_to_zero and (Bus.radar in DBC[candidate] or dialect is not None)
     ret.openpilotLongitudinalControl = alpha_long and ret.alphaLongitudinalAvailable
     if ret.openpilotLongitudinalControl:
       ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.LONG.value
@@ -76,7 +78,7 @@ class CarInterface(CarInterfaceBase):
 
     carlog.info({"event": "mazdaRadarVerdict", "radarUnavailable": ret.radarUnavailable,
                  "platformClaim": Bus.radar in DBC[candidate], "foreignRadarFw": foreign_radar,
-                 "g46lRadar": g46l_radar, "steerToZeroEps": steer_to_zero})
+                 "replayDialect": dialect.name if dialect is not None else None, "steerToZeroEps": steer_to_zero})
 
     ret.enableBsm = 0x477 in fingerprint[0]
 

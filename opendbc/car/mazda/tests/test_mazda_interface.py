@@ -14,7 +14,7 @@ from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.fingerprints import FW_VERSIONS
 from opendbc.car.mazda.tests.conftest import DBC_NAME, car_params, car_params_sp
-from opendbc.car.mazda.values import CAR, DBC, G46L_RADAR_FW, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaFlags, MazdaSafetyFlags
+from opendbc.car.mazda.values import CAR, DBC, G46L, LKAS_LIMITS, REPLAY_RADAR_DIALECTS, STEER_TO_ZERO_EPS_FW, MazdaFlags, MazdaSafetyFlags
 
 Ecu = structs.CarParams.Ecu
 
@@ -49,7 +49,7 @@ def radar_fw(version: bytes) -> structs.CarParams.CarFw:
 # The 2016.5-era radar a first-gen body keeps through an EPS swap, padded to the 24-byte
 # fw field the UDS query returns (the padding length is load-bearing: the G46L is listed
 # in fingerprints.py, and a longer test padding once masked an exact-match miss)
-G46L_FW = sorted(G46L_RADAR_FW)[0] + b'\x00' * (24 - len(sorted(G46L_RADAR_FW)[0]))
+G46L_FW = sorted(G46L.fw)[0] + b'\x00' * (24 - len(sorted(G46L.fw)[0]))
 
 
 class TestMazdaEpsSwap:
@@ -295,6 +295,29 @@ class TestForeignRadar:
     # must not flip a claiming platform into vision-only
     CP = car_params(CAR.MAZDA_CX5_2022, car_fw=eps_fw(SWAPPED_EPS_FW))
     assert not CP.radarUnavailable
+
+class TestReplayRadarRegistry:
+  """One home per dialect: the registry, its captures, and a flag bit nothing else claims."""
+
+  def test_dialect_bits_claim_exactly_one_flag(self):
+    # single-bit members sharing a dialect's bit must be the dialect's own flag alone:
+    # the rebase onto the danger-unstable promotion once left LEGACY_FW_EPS and
+    # G46L_RADAR both on bit 4, and every legacy-firmware car read as carrying the dialect
+    assert len({d.flag for d in REPLAY_RADAR_DIALECTS}) == len(REPLAY_RADAR_DIALECTS)
+    for d in REPLAY_RADAR_DIALECTS:
+      sharers = [m.name for m in MazdaFlags if m.value & d.flag and bin(m.value).count('1') == 1]
+      assert len(sharers) == 1, (d.name, sharers)
+
+  def test_dialect_firmware_stays_off_the_track_set(self):
+    from opendbc.car.mazda.interface import TRACK_RADAR_FW
+    for d in REPLAY_RADAR_DIALECTS:
+      assert not d.fw & TRACK_RADAR_FW
+
+  def test_every_dialect_has_a_registered_capture(self):
+    from opendbc.car.mazda import mazdacan
+    for d in REPLAY_RADAR_DIALECTS:
+      assert d in mazdacan.RADAR_STATIC_CAPTURES
+
 
   def test_the_platforms_own_radar_fw_stays_parsed(self):
     # TRACK_RADAR_FW is derived from the fingerprint database; the CX-5 2022's own radar

@@ -170,8 +170,8 @@ class MazdaFlags(IntFlag):
   # Everything keyed on the measured hardware rather than on what the firmware permits.
   EPS_HW = STEER_TO_ZERO_EPS | LEGACY_FW_EPS
 
-  # The 2016.5-era radar; see G46L_RADAR_FW below for what makes it special.
-  G46L_RADAR = 4
+  # The G46L replay dialect's bit; see REPLAY_RADAR_DIALECTS below.
+  G46L_RADAR = 8
 
 
 class MazdaSafetyFlags(IntFlag):
@@ -253,12 +253,28 @@ STEER_TO_ZERO_EPS_FW = {
   b'KSD5-3210X-C-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
 }
 
+@dataclass(frozen=True)
+class RadarDialect:
+  """A radar dialect the teardown can stand in for, beyond the 2022 track family.
+
+  A talking radar outside TRACK_RADAR_FW gets the vision-only path; the dialects
+  registered here are the ones whose own wire behavior alpha-long can replay. Adding
+  one: register it, claim its MazdaFlags bit, add its static capture to mazdacan.py's
+  RADAR_STATIC_CAPTURES and to mazda_radar_static_msg_valid in panda safety, and mirror
+  the capture in the safety tests.
+  """
+  name: str
+  fw: frozenset[bytes]   # null-stripped firmware strings that speak this dialect
+  flag: int              # the MazdaFlags bit that marks it in CarParams.flags
+  sends_tracks: bool     # False = static-only; the lead rides CRZ_CTRL alone
+
+
 # The 2016.5-era radar kept by an EPS-swapped older body. Listed for fingerprinting, but
 # it never publishes 0x361-0x366 on bus 0. Stored unpadded; matched with nulls stripped so
 # UDS response padding cannot break it.
-G46L_RADAR_FW = {
-  b'G46L-67XA1-C',
-}
+G46L = RadarDialect(name='G46L', fw=frozenset((b'G46L-67XA1-C',)),
+                    flag=MazdaFlags.G46L_RADAR, sends_tracks=False)
+REPLAY_RADAR_DIALECTS = (G46L,)
 
 
 class Buttons:

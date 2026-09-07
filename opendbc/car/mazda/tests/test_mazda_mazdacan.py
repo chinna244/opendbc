@@ -10,6 +10,7 @@ reproduce stock captures byte for byte; the hex values below come from real rada
 import pytest
 
 from opendbc.car.mazda import mazdacan
+from opendbc.car.mazda.values import G46L
 from opendbc.car.mazda.tests.conftest import CAM_LANEINFO, LEAD_TRACK, parse_frame
 
 
@@ -131,7 +132,7 @@ def test_radar_frames_counter_and_lead_track():
 def test_g46l_radar_frames_are_the_static_capture_alone():
   # the G46L never sends track messages, lead or not: the lead rides CRZ_CTRL alone
   for lead in (None, (10.25, 0.)):
-    frames = mazdacan.create_radar_frames(0, 15, lead, g46l=True)
+    frames = mazdacan.create_radar_frames(0, 15, lead, dialect=G46L)
     assert [(f.address, f.dat.hex(), f.src) for f in frames] == [(0x499, "0098400000000000", 0)]
 
 
