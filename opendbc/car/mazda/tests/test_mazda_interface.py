@@ -157,11 +157,13 @@ class TestMazdaEpsSwap:
 
   @pytest.mark.parametrize("candidate", [CAR.MAZDA_CX5_KE, CAR.MAZDA_CX5, CAR.MAZDA_CX9, CAR.MAZDA_3, CAR.MAZDA_6])
   def test_docs_are_generated_without_firmware(self, candidate):
-    # car_fw is empty when building CARS.md, so the docs must keep advertising dashcam mode
+    # car_fw is empty in docs mode, and the car picker consumes docs mode: a firmware-gated
+    # platform must stay selectable there. dashcamOnly is a measured-hardware call, so the
+    # on-device EPS check keeps the gate; docs describe the stock car from the platform table.
     from opendbc.car import gen_empty_fingerprint
     from opendbc.car.mazda.interface import CarInterface
     CP = CarInterface.get_params(candidate, gen_empty_fingerprint(), [], alpha_long=False, is_release=False, docs=True)
-    assert CP.dashcamOnly
+    assert not CP.dashcamOnly
 
 
 class TestMazdaLegacyFwEps:

@@ -73,7 +73,9 @@ class CarInterface(CarInterfaceBase):
       ret.longitudinalActuatorDelay = 0.36  # measured ~0.3 s dead time + ~0.3 s first-order lag
 
     # Older EPS firmware enforces hands-off and low-speed steering lockouts.
-    ret.dashcamOnly = candidate not in (CAR.MAZDA_CX5_2022, CAR.MAZDA_CX9_2021) and not steer_to_zero
+    # Docs mode carries no real EPS firmware, so leave dashcamOnly at the default.
+    if not docs:
+      ret.dashcamOnly = candidate not in (CAR.MAZDA_CX5_2022, CAR.MAZDA_CX9_2021) and not steer_to_zero
 
     carlog.info({"event": "mazdaRadarVerdict", "radarUnavailable": ret.radarUnavailable,
                  "platformClaim": Bus.radar in DBC[candidate], "foreignRadarFw": foreign_radar,
