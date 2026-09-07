@@ -14,7 +14,7 @@ from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.fingerprints import FW_VERSIONS
 from opendbc.car.mazda.tests.conftest import DBC_NAME, car_params, car_params_sp
-from opendbc.car.mazda.values import CAR, DBC, G46L, LKAS_LIMITS, REPLAY_RADAR_DIALECTS, STEER_TO_ZERO_EPS_FW, MazdaFlags, MazdaSafetyFlags
+from opendbc.car.mazda.values import CAR, DBC, G46L_RADAR_FW, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaFlags, MazdaSafetyFlags
 
 Ecu = structs.CarParams.Ecu
 
@@ -48,7 +48,7 @@ def radar_fw(version: bytes) -> structs.CarParams.CarFw:
 
 # padded to the 24-byte fw field the UDS query returns; the padding length is
 # load-bearing — a longer test padding once masked an exact-match miss
-_g46l_stem = sorted(G46L.fw)[0]
+_g46l_stem = sorted(G46L_RADAR_FW)[0]
 G46L_FW = _g46l_stem + b'\x00' * (24 - len(_g46l_stem))
 
 
@@ -243,16 +243,16 @@ class TestMazdaLegacyFwEps:
     assert set(FW_VERSIONS[CAR.MAZDA_CX5_2022][(Ecu.eps, 0x730, None)]) == STEER_TO_ZERO_EPS_FW | {LEGACY_FW_EPS}
 
 class TestForeignRadar:
-  """A talking radar whose firmware no platform lists, behind any platform the bundle picks.
+  """The G46L is the one radar known never to publish 0x361-0x366 on bus 0.
 
-  An EPS-swapped older body keeps its first-gen radar, and a carried-forward platform
-  bundle can claim a radar bus the physical car cannot fill. Parsing must not starve
-  behind that claim (radard waits on a parser that never goes valid), and alpha-long must
-  key on the radar's dialect, not its tracks: the G46L is the one foreign radar whose
-  replay exists (mazdacan.py).
+  A carried-forward platform bundle can claim a radar bus the physical car cannot fill;
+  parsing that bus would starve radarTracks behind a parser that never goes valid. The
+  G46L gets the vision-only path, and alpha-long keys on the radar's dialect, not its
+  tracks (mazdacan.py replays the G46L's own). Every other radar keeps the platform's
+  word, so an unlisted newer revision of a working radar loses nothing.
   """
 
-  def test_foreign_radar_runs_vision_only_behind_a_radar_claim(self):
+  def test_g46l_runs_vision_only_behind_a_radar_claim(self):
     # the support-ticket car: a 2016 KE body with the swapped 2022 EPS, forced to the
     # CX-5 2022 platform by a carried-forward bundle. The G46L answers the fw query but
     # never sends 0x361-0x366, so parsing its bus would starve radarTracks forever
@@ -276,13 +276,12 @@ class TestForeignRadar:
     stock = car_params(CAR.MAZDA_CX5_KE, car_fw=[radar_fw(G46L_FW)], alpha_long=True)
     assert not stock.alphaLongitudinalAvailable
 
-  def test_unknown_foreign_radar_offers_no_new_dialect(self):
-    # vision-only applies whatever the platform claims, but only the G46L adds an offer
-    # beyond the claim: an unknown radar behind a platform without a radar bus has no
-    # replay alpha-long could use
+  def test_an_unknown_radar_keeps_the_stock_parse_path(self):
+    # an unlisted newer revision of a working radar must not silently lose its tracks:
+    # only the G46L is known not to publish them, so everything else keeps the claim
     unknown = [radar_fw(b'KK00-67X00-A' + b'\x00' * 16)]
-    claiming = car_params(CAR.MAZDA_CX5_2022, car_fw=unknown, alpha_long=True)
-    assert claiming.radarUnavailable
+    claiming = car_params(CAR.MAZDA_CX5_2022, car_fw=unknown)
+    assert not claiming.radarUnavailable
     assert claiming.alphaLongitudinalAvailable
 
     non_claiming = car_params(CAR.MAZDA_CX5_KE, car_fw=eps_fw(SWAPPED_EPS_FW) + unknown, alpha_long=True)
@@ -291,44 +290,21 @@ class TestForeignRadar:
     assert not non_claiming.openpilotLongitudinalControl
 
   def test_silent_radar_keeps_the_platform_claim(self):
-    # only a talking foreign radar degrades: a fw query that never reached the radar
-    # must not flip a claiming platform into vision-only
+    # a fw query that never reached the radar must not flip a claiming platform into
+    # vision-only
     CP = car_params(CAR.MAZDA_CX5_2022, car_fw=eps_fw(SWAPPED_EPS_FW))
     assert not CP.radarUnavailable
 
-class TestReplayRadarRegistry:
-  """One home per dialect: the registry, its captures, and a flag bit nothing else claims."""
-
-  def test_dialect_bits_claim_exactly_one_flag(self):
-    # single-bit members sharing a dialect's bit must be the dialect's own flag alone:
-    # the rebase onto the danger-unstable promotion once left LEGACY_FW_EPS and
-    # G46L_RADAR both on bit 4, and every legacy-firmware car read as carrying the dialect
-    assert len({d.flag for d in REPLAY_RADAR_DIALECTS}) == len(REPLAY_RADAR_DIALECTS)
-    for d in REPLAY_RADAR_DIALECTS:
-      sharers = [m.name for m in MazdaFlags if m.value & d.flag and bin(m.value).count('1') == 1]
-      assert len(sharers) == 1, (d.name, sharers)
-
-  def test_dialect_firmware_stays_off_the_track_set(self):
-    from opendbc.car.mazda.interface import TRACK_RADAR_FW
-    for d in REPLAY_RADAR_DIALECTS:
-      assert not d.fw & TRACK_RADAR_FW
-
-  def test_dialect_firmware_sets_are_pairwise_disjoint(self):
-    # two dialects listing the same string would make resolution silently pick the first
-    seen: set[bytes] = set()
-    for d in REPLAY_RADAR_DIALECTS:
-      assert not d.fw & seen, d.name
-      seen |= d.fw
-
-  def test_every_dialect_has_a_registered_capture(self):
-    from opendbc.car.mazda import mazdacan
-    for d in REPLAY_RADAR_DIALECTS:
-      assert d in mazdacan.RADAR_STATIC_CAPTURES
-
+  def test_g46l_flag_bit_is_unshared(self):
+    # single-bit members sharing the G46L bit must be its own flag alone: the rebase onto
+    # the danger-unstable promotion once left LEGACY_FW_EPS and G46L_RADAR both on bit 4,
+    # and every legacy-firmware car read as carrying the G46L dialect
+    sharers = [m.name for m in MazdaFlags if m.value & MazdaFlags.G46L_RADAR and bin(m.value).count('1') == 1]
+    assert sharers == ['G46L_RADAR']
 
   def test_the_platforms_own_radar_fw_stays_parsed(self):
-    # TRACK_RADAR_FW is derived from the fingerprint database; the CX-5 2022's own radar
-    # firmware must keep the track-parsing path
+    # only the G46L set disables parsing: the CX-5 2022's own radar firmware must keep
+    # the track path
     own_fw = sorted(FW_VERSIONS[CAR.MAZDA_CX5_2022][(Ecu.fwdRadar, 0x764, None)])[0]
     CP = car_params(CAR.MAZDA_CX5_2022, car_fw=[radar_fw(own_fw)])
     assert not CP.radarUnavailable

@@ -9,7 +9,7 @@ from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.longitudinal import (BREAKAWAY_FRAMES, RADAR_ADDR, AdvertisedLead, RadarSessionManager,
                                             RadarSessionState, StandstillHold, create_radar_session_msg)
-from opendbc.car.mazda.values import CarControllerParams, Buttons, MazdaFlags, REPLAY_RADAR_DIALECTS
+from opendbc.car.mazda.values import CarControllerParams, Buttons, MazdaFlags
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
 
@@ -32,7 +32,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # scale and the non-delivery latch belong to the steer-to-zero firmware alone.
     self.eps_2022 = bool(CP.flags & MazdaFlags.EPS_HW)
     self.steer_to_zero = bool(CP.flags & MazdaFlags.STEER_TO_ZERO_EPS)
-    self.radar_dialect = next((d for d in REPLAY_RADAR_DIALECTS if CP.flags & d.flag), None)
+    self.g46l = bool(CP.flags & MazdaFlags.G46L_RADAR)
     self.apply_torque_last = 0
     self.driver_torque_samples: deque[float] = deque(maxlen=self.params.STEER_DRIVER_SAMPLES if self.eps_2022 else 1)
     self.sent_torque: deque[int] = deque(maxlen=self.params.STEER_ECHO_HISTORY if self.eps_2022 else 1)
@@ -254,7 +254,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     if radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:
       for bus in LONG_BUSES:
-        can_sends.extend(mazdacan.create_radar_frames(bus, self.radar_counter, self.lead_adv.lead, dialect=self.radar_dialect))
+        can_sends.extend(mazdacan.create_radar_frames(bus, self.radar_counter, self.lead_adv.lead, g46l=self.g46l))
       self.radar_counter += 1
 
     if radar_master and self.frame % CarControllerParams.LONG_STEP == 0:

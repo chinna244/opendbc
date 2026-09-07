@@ -5,16 +5,8 @@ from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.carstate import CarState
-from opendbc.car.mazda.fingerprints import FW_VERSIONS
 from opendbc.car.mazda.radar_interface import RadarInterface
-from opendbc.car.mazda.values import CAR, DBC, LKAS_LIMITS, REPLAY_RADAR_DIALECTS, STEER_TO_ZERO_EPS_FW, MazdaFlags, MazdaSafetyFlags
-
-# Radar firmware whose bus publishes the 0x361-0x366 track dialect: every radar the
-# database lists except the registered replay dialects — listed for fingerprinting, but
-# they never send tracks on bus 0. Stored null-stripped so UDS padding cannot break it.
-TRACK_RADAR_FW = {fw.rstrip(b'\x00') for fw in set().union(
-  *(fw.get((structs.CarParams.Ecu.fwdRadar, 0x764, None), []) for fw in FW_VERSIONS.values())
-)} - frozenset().union(*(d.fw for d in REPLAY_RADAR_DIALECTS))
+from opendbc.car.mazda.values import CAR, DBC, G46L_RADAR_FW, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaFlags, MazdaSafetyFlags, platform_from_vin
 
 
 class CarInterface(CarInterfaceBase):
@@ -27,10 +19,14 @@ class CarInterface(CarInterfaceBase):
     ret.brand = "mazda"
     ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.mazda)]
 
-    # A talking radar outside the track dialects sends no tracks we can parse: run
-    # vision-only instead of starving radarTracks behind a parser that never goes valid.
-    foreign_radar = any(fw.ecu == 'fwdRadar' and fw.fwVersion.rstrip(b'\x00') not in TRACK_RADAR_FW for fw in car_fw)
-    ret.radarUnavailable = Bus.radar not in DBC[candidate] or foreign_radar
+    # The G46L is the one radar known never to publish 0x361-0x366 on bus 0: parsing its
+    # claimed bus would starve radarTracks behind a parser that never goes valid, so it runs
+    # vision-only. Any other radar keeps the platform's word — an unlisted newer revision of
+    # a working radar must not silently lose its tracks.
+    g46l_radar = any(fw.ecu == 'fwdRadar' and fw.fwVersion.rstrip(b'\x00') in G46L_RADAR_FW for fw in car_fw)
+    if g46l_radar:
+      ret.flags |= MazdaFlags.G46L_RADAR.value
+    ret.radarUnavailable = Bus.radar not in DBC[candidate] or g46l_radar
 
     # Every gen1 Mazda EPS is the same hardware; only the firmware differs. Steer-to-zero follows
     # the EPS firmware, so a donor-EPS swap carries it and older firmware in a 2022 body loses it.
@@ -48,18 +44,12 @@ class CarInterface(CarInterfaceBase):
       ret.flags |= MazdaFlags.LEGACY_FW_EPS.value
       ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.LEGACY_FW_EPS.value
 
-    # The registry's dialects are the ones mazdacan can replay as-is, not the 2022 captures.
-    radar_fw = {fw.fwVersion.rstrip(b'\x00') for fw in car_fw if fw.ecu == 'fwdRadar'}
-    dialect = next((d for d in REPLAY_RADAR_DIALECTS if radar_fw & d.fw), None)
-    if dialect is not None:
-      ret.flags |= int(dialect.flag)
-
     # Alpha-long silences the radar and stands in for it, so it needs the radar's dialect,
     # not its tracks: offer it wherever the platform's radar speaks the 2022 family dialect
-    # (its DBC claims a radar bus) or the detected radar has a registered replay dialect.
+    # (its DBC claims a radar bus) or the detected radar is the G46L whose own replay exists.
     # The EPS gate stays: a stock older EPS cuts lateral below 45 kph, so stop-and-go would
     # run unsteered.
-    ret.alphaLongitudinalAvailable = steer_to_zero and (Bus.radar in DBC[candidate] or dialect is not None)
+    ret.alphaLongitudinalAvailable = steer_to_zero and (Bus.radar in DBC[candidate] or g46l_radar)
     ret.openpilotLongitudinalControl = alpha_long and ret.alphaLongitudinalAvailable
     if ret.openpilotLongitudinalControl:
       ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.LONG.value
@@ -74,9 +64,8 @@ class CarInterface(CarInterfaceBase):
     if not docs:
       ret.dashcamOnly = candidate not in (CAR.MAZDA_CX5_2022, CAR.MAZDA_CX9_2021) and not steer_to_zero
 
-    carlog.info({"event": "mazdaRadarVerdict", "radarUnavailable": ret.radarUnavailable,
-                 "platformClaim": Bus.radar in DBC[candidate], "foreignRadarFw": foreign_radar,
-                 "replayDialect": dialect.name if dialect is not None else None, "steerToZeroEps": steer_to_zero})
+    carlog.debug({"event": "mazdaRadarVerdict", "radarUnavailable": ret.radarUnavailable,
+                  "platformClaim": Bus.radar in DBC[candidate], "g46lRadar": g46l_radar, "steerToZeroEps": steer_to_zero})
 
     ret.enableBsm = 0x477 in fingerprint[0]
 
@@ -94,5 +83,12 @@ class CarInterface(CarInterfaceBase):
   def _get_params_sp(stock_cp: structs.CarParams, ret: structs.CarParamsSP, candidate, fingerprint: dict[int, dict[int, int]],
                      car_fw: list[structs.CarParams.CarFw], alpha_long: bool, is_release_sp: bool, docs: bool) -> structs.CarParamsSP:
     ret.intelligentCruiseButtonManagementAvailable = True
+
+    # A carried-forward CarPlatformBundle can disagree with the physical car after a
+    # hardware swap or a branch switch without reinstall.
+    vin_platform = platform_from_vin(stock_cp.carVin)
+    if vin_platform is not None and vin_platform != str(candidate):
+      carlog.warning({"event": "platformBundleVinMismatch", "bundle": str(candidate), "vin_platform": vin_platform,
+                      "hint": "the selected platform bundle does not match the VIN's platform"})
 
     return ret
