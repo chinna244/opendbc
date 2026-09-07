@@ -52,9 +52,8 @@ def test_allowlist_payload_only_flips_white_tja_bits(base):
   assert mazdacan.is_mads_white_hud(out)
 
 
-def test_allowlist_stays_eighteen_stable_bases():
-  assert len(mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS) == 18
-  assert bytes.fromhex("4202000000001040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+def test_allowlist_stays_twenty_eight_stable_bases():
+  assert len(mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS) == 28
   assert bytes.fromhex("4102000400001040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
   assert NEARBY_4221_10E0 not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
   # Night/high-beam LINE_VISIBLE twins of 4102/4122…1040 (route 52).
@@ -63,10 +62,19 @@ def test_allowlist_stays_eighteen_stable_bases():
   # Route 5a: high-beam counter twin + AHB lamps-not-HBM LINE_VISIBLE base.
   assert bytes.fromhex("4221000000004060") in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
   assert bytes.fromhex("4122000000000040") in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
-  # Do not widen to byte4 0x80 / unrelated families yet.
+  # Route 5c LL=3/4 + counter/BIT1/S1/LANE_LINES twins (routes 45/46/52/58/5c).
+  for base_hex in (
+    "4103000000001040", "4104000000001040",
+    "4102000000001060", "4102000000004060", "4122000000001060", "4122000000004060",
+    "0122000000000040", "0122000000004040",
+    "4202000000001040", "4102000000000040",
+  ):
+    assert bytes.fromhex(base_hex) in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  # Do not widen to byte4 0x80 / hands+LDW residuals.
   assert bytes.fromhex("4122000980004040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
-  assert bytes.fromhex("0122000000000040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
   assert bytes.fromhex("4221000980004040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert bytes.fromhex("4102000000001043") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert bytes.fromhex("4102000000001045") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
 
 
 @pytest.mark.parametrize(("fsc_raw", "packed_dat", "enabled", "expected"), [
@@ -126,6 +134,42 @@ def test_route5a_counter_and_ahb_off_hbm_bases_allowlisted():
     bytes.fromhex("4221000000004060"),
     strict=True,
   )) == bytes.fromhex("0000000000000020")
+
+
+def test_route5c_ll34_and_related_safe_twins_allowlisted():
+  # Ten audited idle twins: LL=3/4, byte-7 counters, BIT1=0, LANE_LINES=2, S1=0.
+  new_bases = (
+    "4103000000001040", "4104000000001040",
+    "4102000000001060", "4102000000004060", "4122000000001060", "4122000000004060",
+    "0122000000000040", "0122000000004040",
+    "4202000000001040", "4102000000000040",
+  )
+  for base_hex in new_bases:
+    base = bytes.fromhex(base_hex)
+    assert base in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+    out = mazdacan.apply_mads_white_hud(base, base, True)
+    assert bytes(a ^ b for a, b in zip(base, out, strict=True)) == WHITE_TJA_XOR
+    assert mazdacan.is_mads_white_hud(out)
+  # LL=3/4 differ from trusted 4102…1040 only in LANE_LINES.
+  assert bytes(a ^ b for a, b in zip(
+    bytes.fromhex("4102000000001040"),
+    bytes.fromhex("4103000000001040"),
+    strict=True,
+  )) == bytes.fromhex("0001000000000000")
+  assert bytes(a ^ b for a, b in zip(
+    bytes.fromhex("4102000000001040"),
+    bytes.fromhex("4104000000001040"),
+    strict=True,
+  )) == bytes.fromhex("0006000000000000")
+  # Counter nibble only.
+  assert bytes(a ^ b for a, b in zip(
+    bytes.fromhex("4122000000004040"),
+    bytes.fromhex("4122000000004060"),
+    strict=True,
+  )) == bytes.fromhex("0000000000000020")
+  # Transition noise on LL=3/4 still normalizes to the new bases.
+  assert mazdacan.white_hud_allowlist_base(bytes.fromhex("4103000c00001040")) == bytes.fromhex("4103000000001040")
+  assert mazdacan.white_hud_allowlist_base(bytes.fromhex("4104000a00001040")) == bytes.fromhex("4104000000001040")
 
 
 # Observed CX-5 2022 FSC frames: unnamed byte3 0x02/0x01 with/without TJA_TRANSITION.
@@ -218,7 +262,7 @@ def test_non_tja_bit_flip_fail_closes():
       assert mazdacan.cam_laneinfo_matches_normalized(flipped, OFF)
     else:
       assert not mazdacan.cam_laneinfo_matches_normalized(flipped, OFF)
-      # Leave the 14-base allowlist unless this flip lands on another audited payload.
+      # Leave the allowlist unless this flip lands on another audited payload.
       if flipped not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS:
         assert not mazdacan.is_white_hud_normalized_base(flipped, OFF)
 
@@ -246,6 +290,7 @@ def test_white_hud_helpers_do_not_construct_canparser(monkeypatch):
 
 def test_normalized_match_rss_does_not_grow_with_gc_disabled():
   import gc
+
   def rss_mb():
     with open("/proc/self/status") as f:
       for line in f:
@@ -273,8 +318,9 @@ def test_nonzero_tja_or_transition_frames_are_not_allowlisted():
   assert mazdacan.apply_mads_white_hud(tja_trans, tja_trans, True) == tja_trans
 
 
-def test_unpacked_lane_lines_variant_420200_remains_blocked():
-  rare = bytes.fromhex("4202000000001040")
+def test_unaudited_lane_lines_variant_410500_remains_blocked():
+  # LANE_LINES=5 not observed as a safe twin; keep fail-closed.
+  rare = bytes.fromhex("4105000000001040")
   assert rare not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
   assert not mazdacan.is_white_hud_normalized_base(rare, rare)
   assert mazdacan.apply_mads_white_hud(rare, rare, True) == rare

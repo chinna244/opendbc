@@ -220,6 +220,23 @@ MADS_HUD_SAFE_BASE_PAYLOADS = frozenset({
   bytes.fromhex("4221000000004060"),
   # Route 5a: LINE_VISIBLE=1 + BIT2=1 with S1=0/S1_HBEAM=0 (AHB set, lamps not high-beam).
   bytes.fromhex("4122000000000040"),
+  # Route 5c: LINE_VISIBLE=1 with LANE_LINES=3/4 (partial/single-line FSC encodings).
+  # Same BIT1/BIT3/S1 pattern as trusted 4102…1040; TJA XOR only.
+  bytes.fromhex("4103000000001040"),
+  bytes.fromhex("4104000000001040"),
+  # Byte-7 0x40/0x60 counter twins of allowlisted 4102/4122 LINE_VISIBLE families
+  # (routes 45/46 observed 4102…1060; 4060/4122…1060 close the same audited nibble).
+  bytes.fromhex("4102000000001060"),
+  bytes.fromhex("4102000000004060"),
+  bytes.fromhex("4122000000001060"),
+  bytes.fromhex("4122000000004060"),
+  # BIT1=0 twins of allowlisted 4122…0040 / 4122…4040 (routes 52/58).
+  bytes.fromhex("0122000000000040"),
+  bytes.fromhex("0122000000004040"),
+  # LANE_LINES=2 twin of trusted 4201…1040 (LINE_NOT_VISIBLE family).
+  bytes.fromhex("4202000000001040"),
+  # S1=0 twin of trusted 4102…1040.
+  bytes.fromhex("4102000000000040"),
 })
 # OFF→WHITE is TJA 0→2 only (DBC TJA motorola start 38). XOR this into an allowed
 # base; never replace the whole frame with MADS_HUD_WHITE.
@@ -249,7 +266,7 @@ def cam_laneinfo_matches_normalized(raw: bytes, packed: bytes) -> bool:
 
 
 def white_hud_allowlist_base(fsc_raw: bytes | None) -> bytes | None:
-  """Return the 14-base payload FSC matches with TJA / TJA_TRANSITION / unnamed 0x03 ignored."""
+  """Return the allowlisted base FSC matches with TJA / TJA_TRANSITION / unnamed 0x03 ignored."""
   if fsc_raw is None or len(fsc_raw) != 8:
     return None
   return _MADS_HUD_SAFE_BASE_BY_INT.get(
