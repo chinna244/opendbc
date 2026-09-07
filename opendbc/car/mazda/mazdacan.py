@@ -153,7 +153,7 @@ def create_steering_control(packer, CP, frame, apply_torque, lkas):
 
 def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool):
   # Preserve camera LKAS state. Keep TJA modes clear because its state machine does not own
-  # the injected steering command.
+  # the injected steering command. White HUD (apply_mads_white_hud) sets TJA via XOR when enabled.
   values = {s: cam_msg[s] for s in [
     "LINE_VISIBLE",
     "LINE_NOT_VISIBLE",
@@ -178,6 +178,121 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool)
     "LDW_WARN_RL": 0,
   })
   return packer.make_can_msg("CAM_LANEINFO", 0, values)
+
+
+MADS_HUD_OFF = bytes.fromhex("4201000000001040")
+MADS_HUD_WHITE = bytes.fromhex("4201000020001040")
+# Route 13 CX-5 2022: every observed FSC CAM_LANEINFO idle-family frame that only
+# differs from OFF in BIT1/BIT2/S1/S1_HBEAM. Explicit hex allowlist — do not widen
+# to a field-based rule until more routes are audited.
+MADS_HUD_SAFE_BASE_PAYLOADS = frozenset({
+  bytes.fromhex("4201000000001040"),
+  # Route 1c CX-5 2022: FSC counter nibble in byte 7 toggles 0x40/0x60; every named
+  # CAM_LANEINFO field matches 4201000000001040 and TJA XOR leaves byte 7 untouched.
+  bytes.fromhex("4201000000001060"),
+  bytes.fromhex("4221000000004040"),
+  bytes.fromhex("4221000000001040"),
+  # Same unnamed byte-7 0x40/0x60 nibble on the 4221 family (DBC bit 61). All 17
+  # named CAM_LANEINFO fields match 4221000000001040; WHITE XOR leaves byte 7 as 0x60.
+  bytes.fromhex("4221000000001060"),
+  bytes.fromhex("4201000000004040"),
+  bytes.fromhex("0221000000000040"),
+  bytes.fromhex("4201000000000040"),
+  bytes.fromhex("4221000000000040"),
+  bytes.fromhex("0221000000001040"),
+  # LINE_VISIBLE=1 idle-family frames (routes 1a/1b/19); TJA XOR only, no field replacement.
+  bytes.fromhex("4361000000000040"),
+  bytes.fromhex("4102000000001040"),
+  # Route 20: LINE_VISIBLE=1 + BIT2=1 while auto-HBM setting is on (lamps may stay low).
+  bytes.fromhex("4122000000001040"),
+  # Route 20: byte-7 counter nibble on 4361000000000040 (same pattern as 1060).
+  bytes.fromhex("4361000000000060"),
+  # Route 52 night CX-5 2022: same LINE_VISIBLE families with S1_HBEAM=1 (headlights /
+  # auto-HBM active). Named fields otherwise match 4102/4122…1040; TJA XOR only.
+  bytes.fromhex("4102000000004040"),
+  bytes.fromhex("4122000000004040"),
+  # Route 5a night: byte-7 counter nibble on high-beam 4221…4040 (same 0x40/0x60 pattern).
+  bytes.fromhex("4221000000004060"),
+  # Route 5a: LINE_VISIBLE=1 + BIT2=1 with S1=0/S1_HBEAM=0 (AHB set, lamps not high-beam).
+  bytes.fromhex("4122000000000040"),
+  # Route 5c: LINE_VISIBLE=1 with LANE_LINES=3/4 (partial/single-line FSC encodings).
+  # Same BIT1/BIT3/S1 pattern as trusted 4102…1040; TJA XOR only.
+  bytes.fromhex("4103000000001040"),
+  bytes.fromhex("4104000000001040"),
+  # Byte-7 0x40/0x60 counter twins of allowlisted 4102/4122 LINE_VISIBLE families
+  # (routes 45/46 observed 4102…1060; 4060/4122…1060 close the same audited nibble).
+  bytes.fromhex("4102000000001060"),
+  bytes.fromhex("4102000000004060"),
+  bytes.fromhex("4122000000001060"),
+  bytes.fromhex("4122000000004060"),
+  # BIT1=0 twins of allowlisted 4122…0040 / 4122…4040 (routes 52/58).
+  bytes.fromhex("0122000000000040"),
+  bytes.fromhex("0122000000004040"),
+  # LANE_LINES=2 twin of trusted 4201…1040 (LINE_NOT_VISIBLE family).
+  bytes.fromhex("4202000000001040"),
+  # S1=0 twin of trusted 4102…1040.
+  bytes.fromhex("4102000000000040"),
+})
+# OFF→WHITE is TJA 0→2 only (DBC TJA motorola start 38). XOR this into an allowed
+# base; never replace the whole frame with MADS_HUD_WHITE.
+MADS_HUD_WHITE_TJA_XOR = bytes.fromhex("0000000020000000")
+# CAM_LANEINFO motorola bit positions from mazda_2017.dbc. TJA start 38 size 3 is
+# byte 4 bits 6-4 (0x70); TJA_TRANSITION start 27 size 2 is byte 3 bits 3-2 (0x0C).
+# CANPacker: TJA=2 → byte4 0x20, TJA_TRANSITION=1 → byte3 0x04.
+# Byte 3 bits 1..0 (0x03) are unnamed FSC transition-state bits observed on CX-5 2022
+# after TJA_TRANSITION; they are safe to normalize with the same mask. Do not clear
+# byte4 0x80 (…0980001040 family) or unrelated byte0 family bits.
+_CAM_LANEINFO_TJA_BYTE = 4
+_CAM_LANEINFO_TJA_BITS = 0x70
+_CAM_LANEINFO_TRANS_BYTE = 3
+_CAM_LANEINFO_TRANS_BITS = 0x0F  # 0x0C (TJA_TRANSITION) | 0x02 | 0x01 (unnamed)
+# 64-bit big-endian keep-mask: clear TJA, TJA_TRANSITION, and unnamed byte-3 0x03.
+CAM_LANEINFO_TJA_NORMALIZE_MASK = 0xFFFFFFF08FFFFFFF
+_MADS_HUD_SAFE_BASE_BY_INT = {
+  int.from_bytes(b, "big") & CAM_LANEINFO_TJA_NORMALIZE_MASK: b
+  for b in MADS_HUD_SAFE_BASE_PAYLOADS
+}
+
+
+def cam_laneinfo_matches_normalized(raw: bytes, packed: bytes) -> bool:
+  """True when raw and packed differ only in TJA / TJA_TRANSITION / unnamed byte-3 0x03."""
+  return ((int.from_bytes(raw, "big") ^ int.from_bytes(packed, "big")) &
+          CAM_LANEINFO_TJA_NORMALIZE_MASK) == 0
+
+
+def white_hud_allowlist_base(fsc_raw: bytes | None) -> bytes | None:
+  """Return the allowlisted base FSC matches with TJA / TJA_TRANSITION / unnamed 0x03 ignored."""
+  if fsc_raw is None or len(fsc_raw) != 8:
+    return None
+  return _MADS_HUD_SAFE_BASE_BY_INT.get(
+    int.from_bytes(fsc_raw, "big") & CAM_LANEINFO_TJA_NORMALIZE_MASK
+  )
+
+
+def is_white_hud_normalized_base(fsc_raw: bytes | None, packed_dat: bytes) -> bool:
+  """True when packed is allowlisted and differs from FSC only in normalized TJA bits."""
+  if fsc_raw is None or len(fsc_raw) != 8 or len(packed_dat) != 8:
+    return False
+  if packed_dat not in MADS_HUD_SAFE_BASE_PAYLOADS:
+    return False
+  return cam_laneinfo_matches_normalized(fsc_raw, packed_dat)
+
+
+def apply_mads_white_hud(fsc_raw: bytes | None, packed_dat: bytes, enabled: bool) -> bytes:
+  """Set TJA=2 on a TJA-normalized allowlisted HUD frame."""
+  if not enabled or fsc_raw is None:
+    return packed_dat
+  if not is_white_hud_normalized_base(fsc_raw, packed_dat):
+    return packed_dat
+  return bytes(a ^ b for a, b in zip(packed_dat, MADS_HUD_WHITE_TJA_XOR, strict=True))
+
+
+def is_mads_white_hud(dat: bytes) -> bool:
+  """True when dat is an allowlisted base with only the WHITE TJA bit set."""
+  if len(dat) != 8:
+    return False
+  base = bytes(a ^ b for a, b in zip(dat, MADS_HUD_WHITE_TJA_XOR, strict=True))
+  return base in MADS_HUD_SAFE_BASE_PAYLOADS and dat != base
 
 
 def create_button_cmd(packer, CP, counter, button):

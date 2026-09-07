@@ -122,12 +122,14 @@ def car_control(enabled=None, long_active=True, lat_active=False, accel=0.5, tor
   return cc.as_reader()
 
 
-def car_control_sp(handback=False, lead_d_rel=12.0, lead_v_rel=0.0, send_button=SendButtonState.none) -> structs.CarControlSP:
+def car_control_sp(handback=False, lead_d_rel=12.0, lead_v_rel=0.0, send_button=SendButtonState.none,
+                   mads_active=False) -> structs.CarControlSP:
   cc_sp = structs.CarControlSP()
   cc_sp.stockEcuHandBack = handback
   cc_sp.leadOne.dRel = lead_d_rel
   cc_sp.leadOne.vRel = lead_v_rel
   cc_sp.intelligentCruiseButtonManagement.sendButton = send_button
+  cc_sp.mads.active = mads_active
   return cc_sp
 
 
@@ -136,7 +138,8 @@ def car_control_sp(handback=False, lead_d_rel=12.0, lead_v_rel=0.0, send_button=
 def set_car_state(cs: CarState, out=None, *, brake_hold=False, stock_radar_alive=False, stock_radar_gone=None,
                   fsc_settled=True, radar_was_silenced=False, radar_session_refused=False, steer_undelivered=False,
                   lkas_blocked=False, lkas_effective=0, lkas_allowed_speed=True, crz_btns_counter=0,
-                  cancel_button=0, accel_button=0, decel_button=0, **out_kwargs) -> CarState:
+                  cancel_button=0, accel_button=0, decel_button=0, mrcc_armed_raw=False,
+                  cruise_available=False, cruise_enabled=False, **out_kwargs) -> CarState:
   """Put the controller-facing state of a real CarState where a test wants it.
 
   Every keyword is reset to its default on each call, so a test that drives frame by frame
@@ -165,6 +168,9 @@ def set_car_state(cs: CarState, out=None, *, brake_hold=False, stock_radar_alive
   cs.cancel_button = cancel_button
   cs.accel_button = accel_button
   cs.decel_button = decel_button
+  cs.mrcc_armed_raw = mrcc_armed_raw
+  cs.cruise_available = cruise_available
+  cs.cruise_enabled = cruise_enabled
   return cs
 
 
