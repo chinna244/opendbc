@@ -12,7 +12,8 @@ from opendbc.safety.tests.common import CANPackerSafety, make_msg
 
 
 class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTest):
-  """Pre-2022 EPS: upstream's envelope, no safety param bit."""
+  """Upstream's envelope with no safety param bit. The interface no longer emits it for any
+  Mazda; the panda keeps it as the default, so it stays proven."""
 
   TX_MSGS = [[0x243, 0], [0x09d, 0], [0x440, 0]]
   STANDSTILL_THRESHOLD = .1
@@ -46,7 +47,11 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     # EPS bit interface.py hands the panda
     class FakeCP:
       carFingerprint = CAR.MAZDA_CX5
-      flags = MazdaFlags.STEER_TO_ZERO_EPS if cls.SAFETY_PARAM & MazdaSafetyFlags.STEER_TO_ZERO_EPS else 0
+      flags = 0
+      if cls.SAFETY_PARAM & MazdaSafetyFlags.STEER_TO_ZERO_EPS:
+        flags = MazdaFlags.STEER_TO_ZERO_EPS
+      elif cls.SAFETY_PARAM & MazdaSafetyFlags.LEGACY_FW_EPS:
+        flags = MazdaFlags.LEGACY_FW_EPS
     return CarControllerParams(FakeCP())
 
   def test_controller_rate_limits_equal_the_pandas(self):
@@ -214,6 +219,92 @@ class TestMazdaSteerToZeroEpsSafety(TestMazdaSafety):
     self.assertFalse(self._tx(self._torque_cmd_msg(TestMazdaSafety.MAX_RATE_UP + 1)))
     self._set_prev_torque(800)
     self.assertFalse(self._tx(self._torque_cmd_msg(801)))
+
+  def _controller_loop(self, cc, cs, frames, driver_seen_by_controller):
+    """Run the real CarController through the compiled safety model, feeding the EPS's echo of
+    the last accepted request back into CarState. frames yields the driver torque the panda
+    samples; the controller sees driver_seen_by_controller(frame) instead, so a stale sample
+    can be staged. Returns (accepted torques by frame, longest run of rejected frames)."""
+    from opendbc.car.mazda.tests.conftest import frame as tx_frame, step
+    echo = 0
+    accepted, rejected_run, longest = [], 0, 0
+    for i, driver_torque in enumerate(frames, start=1):
+      self.safety.set_timer(i * 10_000)
+      self._rx(self._torque_driver_msg(driver_torque))
+      _, sends = step(cc, cs, long_active=False, enabled=True, lat_active=True, torque=1.0, v_ego=10.,
+                      driver_torque=driver_seen_by_controller(i), lkas_request_echo=echo)
+      dat = tx_frame(sends, 0x243)
+      if self._tx(libsafety_py.make_CANPacket(0x243, 0, dat)):
+        echo = (((dat[0] & 0x0f) << 8) | dat[1]) - 2048
+        accepted.append((i, echo))
+        rejected_run = 0
+      else:
+        rejected_run += 1
+        longest = max(longest, rejected_run)
+    return accepted, longest
+
+  @staticmethod
+  def _stale_driver_sample(frame):
+    # what the controller sees of the -100 push on frames 61 to 72: nothing for eight frames
+    return -100 if 68 < frame <= 72 else 0
+
+  def test_controller_recovers_the_stream_after_a_rejection(self):
+    # A rejection zeroes the panda's rate-limit reference, so every later frame above one step
+    # is rejected too and the EPS loses its stream: 1.72 s on route 00000148, 0.75 s on
+    # 00000139, 0.63 s on drive_02, each followed by LKAS_FAULT and the camera fault. With the
+    # echo the controller restarts from zero inside a tenth of the EPS's 0.6 s timeout.
+    from opendbc.car.mazda.tests.conftest import car_controller, mazda_car_state
+    cc = car_controller(alpha_long=False)
+    cs = mazda_car_state(cc.CP, cc.CP_SP)
+    self.safety.set_controls_allowed(True)
+    # 60 frames ramping clean; the driver then pushes -100 for 12 frames, which the panda's
+    # 6-sample window sees at once while the controller's sample runs 8 frames stale (the route
+    # 00000148 staleness); then both agree again
+    frames = [0] * 60 + [-100] * 12 + [0] * 120
+    accepted, longest = self._controller_loop(cc, cs, frames, self._stale_driver_sample)
+    self.assertGreater(longest, 0, "the stale sample must reject at least one frame")
+    # detection is history + mismatch frames; the restart's first step can be rejected again
+    # while the driver window is still stale, so the bound is a third of the EPS's 0.6 s timeout
+    self.assertLessEqual(longest, 20)
+    # and the ramp rebuilds to the rail afterwards
+    self.assertEqual(accepted[-1][1], accepted[-2][1])
+    self.assertGreater(accepted[-1][1], 500)
+
+  def test_without_the_echo_a_rejection_starves_the_eps(self):
+    # the same scenario with no echo is the failure the captures show: rejected to the end
+    from opendbc.car.mazda.tests.conftest import car_controller, mazda_car_state
+    cc = car_controller(alpha_long=False)
+    cs = mazda_car_state(cc.CP, cc.CP_SP)
+    cc.recover_from_rejection = lambda CS: None
+    self.safety.set_controls_allowed(True)
+    # 60 frames ramping clean; the driver then pushes -100 for 12 frames, which the panda's
+    # 6-sample window sees at once while the controller's sample runs 8 frames stale (the route
+    # 00000148 staleness); then both agree again
+    frames = [0] * 60 + [-100] * 12 + [0] * 120
+    _, longest = self._controller_loop(cc, cs, frames, self._stale_driver_sample)
+    self.assertGreaterEqual(longest, 60, "the EPS 0x243 timeout is about 60 frames")
+
+
+class TestMazdaLegacyFwEpsSafety(TestMazdaSafety):
+  """The same EPS hardware behind firmware that keeps the 45 kph floor (stock CX-9 2021, the
+  older platforms, THACO CX-5 2023): MazdaSafetyFlags.LEGACY_FW_EPS selects the same measured
+  envelope as the steer-to-zero bit."""
+
+  SAFETY_PARAM = MazdaSafetyFlags.LEGACY_FW_EPS
+
+  MAX_RATE_UP = 12
+  MAX_RATE_DOWN = 12
+  MAX_TORQUE_LOOKUP = [0], [1200]
+
+  MAX_RT_DELTA = 384
+
+  DRIVER_TORQUE_ALLOWANCE = 15
+  DRIVER_TORQUE_FACTOR = 15
+
+  def test_legacy_bit_selects_the_steer_to_zero_envelope(self):
+    for attr in ("MAX_RATE_UP", "MAX_RATE_DOWN", "MAX_TORQUE_LOOKUP", "MAX_RT_DELTA",
+                 "DRIVER_TORQUE_ALLOWANCE", "DRIVER_TORQUE_FACTOR"):
+      self.assertEqual(getattr(self, attr), getattr(TestMazdaSteerToZeroEpsSafety, attr), attr)
 
 
 class TestMazdaLongitudinalSafety(TestMazdaSteerToZeroEpsSafety, common.LongitudinalAccelSafetyTest):
@@ -529,6 +620,83 @@ class TestMazdaLongitudinalSafety(TestMazdaSteerToZeroEpsSafety, common.Longitud
     self.assertFalse(self.safety.get_acc_main_on())
     self._rx(self._acc_armed_msg(True))
     self.assertTrue(self.safety.get_acc_main_on())
+
+  def _pedals_msg(self, armed, brake):
+    values = {"ACC_OFF": armed, "BRAKE_ON": brake}
+    return self.packer.make_can_msg_safety("PEDALS", 0, values)
+
+  def _armed_and_latched(self):
+    self.safety.set_mads_params(True, False, False)
+    self.assertTrue(self._tx(common.make_msg(0, 0x21b, 8, self.SYNTHETIC_CRZ_INFO_STANDBY)))
+    for _ in range(60):
+      self._rx(self._acc_armed_msg(True))
+    self.assertTrue(self.safety.get_acc_main_on())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_brake_only_dropout_holds_main(self):
+    # carstate holds cruise_available through a both-low PEDALS sample under braking; the
+    # panda must hold too, or MADS exits on the panda alone and the software steers into
+    # rejections
+    self._armed_and_latched()
+    for _ in range(10):
+      self._rx(self._pedals_msg(armed=True, brake=True))
+    for _ in range(100):
+      self._rx(self._pedals_msg(armed=False, brake=True))
+      self.assertTrue(self.safety.get_acc_main_on())
+      self.assertTrue(self.safety.get_controls_allowed_lateral())
+    # the dropout lands once the brake is free
+    self._rx(self._pedals_msg(armed=False, brake=False))
+    self._rx(self._pedals_msg(armed=False, brake=False))
+    self.assertFalse(self.safety.get_acc_main_on())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_cancel_lands_through_the_brake(self):
+    # route 000001c9--0b2a64a214 seg 0: main toggled at a red light with the brake held. The
+    # software's cancel context let its main fall; the panda's held, so the next main press had
+    # no rising edge, lateral never re-armed, and MADS ran into Controls Mismatch: Lateral
+    self._armed_and_latched()
+    for _ in range(10):
+      self._rx(self._pedals_msg(armed=True, brake=True))
+    self._rx(self._button_msg(cancel=True))
+    self._rx(self._pedals_msg(armed=False, brake=True))
+    self.assertFalse(self.safety.get_acc_main_on())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    # main again with the foot still on the brake: a real rising edge, lateral re-arms
+    self._rx(self._button_msg())
+    for _ in range(10):
+      self._rx(self._pedals_msg(armed=False, brake=True))
+    self._rx(self._pedals_msg(armed=True, brake=True))
+    self.assertTrue(self.safety.get_acc_main_on())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_cancel_context_outlives_the_press(self):
+    # PEDALS trails the button: the bits can drop after the button is back up
+    self._armed_and_latched()
+    self._rx(self._button_msg(cancel=True))
+    self._rx(self._button_msg())
+    for _ in range(20):
+      self._rx(self._pedals_msg(armed=True, brake=True))
+    self.assertTrue(self.safety.get_acc_main_on())
+    self._rx(self._pedals_msg(armed=False, brake=True))
+    self.assertFalse(self.safety.get_acc_main_on())
+
+  def test_cancel_context_expires(self):
+    # past the window a both-low sample under braking is a dropout again
+    self._armed_and_latched()
+    self._rx(self._button_msg(cancel=True))
+    self._rx(self._button_msg())
+    for _ in range(25):
+      self._rx(self._pedals_msg(armed=True, brake=True))
+    self._rx(self._pedals_msg(armed=False, brake=True))
+    self.assertTrue(self.safety.get_acc_main_on())
+
+  def test_cancel_context_is_derived_from_the_software(self):
+    import os
+    import re
+    import opendbc.safety
+    header = open(os.path.join(os.path.dirname(opendbc.safety.__file__), "modes", "mazda.h")).read()
+    frames = int(re.search(r"#define MAZDA_CANCEL_CONTEXT_FRAMES\s+(\d+)U", header).group(1))
+    self.assertEqual(CarControllerParams.CANCEL_CONTEXT_T, frames / 50.)  # PEDALS is 50 Hz
 
   def test_crz_info_active_gated_on_controls(self):
     # ACC_ACTIVE mirrors CRZ_CTRL's gate: an engaged-claiming accel frame must not flow while

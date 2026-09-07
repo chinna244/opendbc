@@ -45,10 +45,14 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       # mazdacan message builders require GEN1 frame layouts.
       raise NotImplementedError(f"unsupported platform: {CP.carFingerprint}")
     self.params = CarControllerParams(CP)
-    # values.py selects the complete 2022 EPS configuration from this flag.
-    self.eps_2022 = bool(CP.flags & MazdaFlags.STEER_TO_ZERO_EPS)
+    # values.py selects the measured EPS envelope from the hardware mask; the speed-dependent
+    # scale and the non-delivery latch belong to the steer-to-zero firmware alone.
+    self.eps_2022 = bool(CP.flags & MazdaFlags.EPS_HW)
+    self.steer_to_zero = bool(CP.flags & MazdaFlags.STEER_TO_ZERO_EPS)
     self.apply_torque_last = 0
     self.driver_torque_samples: deque[float] = deque(maxlen=self.params.STEER_DRIVER_SAMPLES if self.eps_2022 else 1)
+    self.sent_torque: deque[int] = deque(maxlen=self.params.STEER_ECHO_HISTORY if self.eps_2022 else 1)
+    self.echo_mismatch_frames = 0
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.brake_counter = 0
     self.stop_and_go = StandstillHold()
@@ -79,7 +83,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     apply_torque = 0
 
-    # The 2022 EPS uses a speed-dependent STEER_MAX.
+    # The measured EPS uses a speed-dependent STEER_MAX.
     if self.eps_2022:
       steer_max = round(float(np.interp(CS.out.vEgoRaw, self.params.STEER_MAX_LOOKUP[0],
                                          self.params.STEER_MAX_LOOKUP[1])))
@@ -87,6 +91,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       steer_max = self.params.STEER_MAX
 
     self.driver_torque_samples.append(CS.out.steeringTorque)
+    if self.eps_2022:
+      self.recover_from_rejection(CS)
 
     if CC.latActive:
       # calculate steer and also set limits due to driver torque
@@ -110,7 +116,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
                                                       driver_torque, self.params, steer_max)
 
     # Stop requesting torque after the non-delivery latch; recovery then ramps from zero.
-    if self.eps_2022 and CS.steer_undelivered:
+    if self.steer_to_zero and CS.steer_undelivered:
       apply_torque = 0
 
     # Do not cancel a stock MRCC engagement while the stock radar still owns the bus.
@@ -296,6 +302,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       self.tja_mrcc_armed_prev = mrcc_armed
 
     self.apply_torque_last = apply_torque
+    self.sent_torque.append(apply_torque)
 
     if self.CP.openpilotLongitudinalControl:
       can_sends.extend(self.update_longitudinal(CC, CC_SP, CS))
@@ -412,6 +419,26 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.frame += 1
     return new_actuators, can_sends
 
+  def recover_from_rejection(self, CS) -> None:
+    """Restart the steer ramp from zero once the EPS stops echoing the recent commands.
+
+    A panda rejection resets its rate-limit reference to zero, so a controller that keeps
+    ramping is rejected on every later frame and the EPS loses its 0x243 stream: it raises
+    LKAS_FAULT about 0.6 s in and the camera faults 5.3 s after that, for the rest of the
+    ignition cycle. The EPS echoes the last request it received, so an echo that matches none
+    of the recent commands means they are not arriving; a command within one step of zero is
+    what the panda accepts next.
+    """
+    echo = CS.lkas_request_echo
+    if echo is None or self.apply_torque_last == 0 or echo in self.sent_torque:
+      self.echo_mismatch_frames = 0
+      return
+    self.echo_mismatch_frames += 1
+    if self.echo_mismatch_frames >= self.params.STEER_ECHO_MISMATCH_FRAMES:
+      self.apply_torque_last = 0
+      self.sent_torque.clear()
+      self.echo_mismatch_frames = 0
+
   def resume_requested(self, CC) -> bool:
     """The resume button belongs to the stock-longitudinal path alone. Under openpilot longitudinal
     the hold is released in-protocol (stop bits drop, RESUME_UNLATCHING pulses, the command ramps),
@@ -485,6 +512,15 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         # Track overrides in accel_last so control resumes through the slew limiter.
         accel = rate_limit(accel, self.accel_last, CarControllerParams.ACCEL_WINDDOWN_LIMIT,
                            CarControllerParams.ACCEL_WINDUP_LIMIT)
+        if accel > 0.:
+          # Shape positive commands to stock MRCC's ceiling and build rate at this speed.
+          v_ego = CS.out.vEgoRaw
+          ceiling = float(np.interp(v_ego, CarControllerParams.ACCEL_CEILING_BP, CarControllerParams.ACCEL_CEILING_V))
+          build = float(np.interp(v_ego, CarControllerParams.ACCEL_BUILD_BP, CarControllerParams.ACCEL_BUILD_V)) * DT_CTRL
+          accel = min(accel, ceiling, max(self.accel_last, 0.) + build)
+        if self.accel_last > 0. and CC.actuators.accel >= 0.:
+          # Lift the throttle at stock's rate; a brake request bypasses this above.
+          accel = max(accel, self.accel_last + CarControllerParams.ACCEL_LIFT_LIMIT * DT_CTRL)
       if sm.car_has_hold:
         # Stop requesting brake hold after the body ECU takes ownership.
         accel = CarControllerParams.ACCEL_HOLD_LATCHED

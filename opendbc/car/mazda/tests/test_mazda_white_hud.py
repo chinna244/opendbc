@@ -482,6 +482,7 @@ class TestWhiteHudController:
       lkas_allowed_speed=True,
       lkas_blocked=False,
       lkas_effective=0,
+      lkas_request_echo=None,
     )
     for name, value in overrides.items():
       setattr(cs, name, value)

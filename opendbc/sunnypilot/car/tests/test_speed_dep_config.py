@@ -32,8 +32,20 @@ def brand_cp(brand: str, fingerprint: str = "", min_steer_speed: float = 0.0) ->
   return cp
 
 
-# stock Mazda EPS: minSteerSpeed above zero, so requires_steer_to_zero suppresses the entry
+# stock CX-9 2021 EPS: a 45 kph floor on the same hardware, so the entry keeps only the bins above it
 STOCK_MAZDA = dict(brand="mazda", fingerprint="MAZDA_CX9_2021", min_steer_speed=20.0)
+
+
+def legacy_fw_cp() -> CarParams:
+  # the 2022 EPS hardware on firmware with the 45 kph floor: hardware envelope, no steer-to-zero
+  fw = CarParams.CarFw()
+  fw.ecu = CarParams.Ecu.eps
+  fw.address = 0x730
+  fw.subAddress = 0
+  fw.fwVersion = b'K319-3210X-B-00' + b'\x00' * 9
+  cp = CarInterface.get_params(CAR.MAZDA_CX5_2022, gen_empty_fingerprint(), [fw], alpha_long=False, is_release=False, docs=False)
+  assert cp.flags & MazdaFlags.LEGACY_FW_EPS and cp.minSteerSpeed > 0
+  return cp
 
 
 class TestSteerMaxSchedule:
@@ -60,7 +72,16 @@ class TestSteerMaxSchedule:
       v = entry.get('seed_version', 0)
       assert isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 2**31, name
 
-  def test_inactive_entry_stays_empty(self):
+  def test_stock_cx9_keeps_only_the_bins_above_its_floor(self):
+    cfg = get_speed_dep_config_for_car(brand_cp(**STOCK_MAZDA))
+    full = get_speed_dep_config()['MAZDA_CX9_2021']
+    assert cfg['speed_bp'] == [v for v in full['speed_bp'] if v >= 20.0]
+    assert len(cfg['laf_bp']) == len(cfg['speed_bp']) == len(cfg['friction_bp'])
+    assert 'steer_max_schedule' not in cfg
+
+  def test_flagged_entry_stays_empty_behind_a_floor(self, monkeypatch):
+    import opendbc.sunnypilot.car.interfaces as mod
+    monkeypatch.setattr(mod, 'get_speed_dep_config', lambda: {'MAZDA_CX9_2021': {'requires_steer_to_zero': True, 'speed_bp': [30.0]}})
     assert get_speed_dep_config_for_car(brand_cp(**STOCK_MAZDA)) == {}
 
   def test_config_copy_not_cached_dict(self):
@@ -104,3 +125,29 @@ class TestSteerSlewSchedule:
   @pytest.mark.parametrize("brand", ["tesla", "notabrand"])  # angle steering has no STEER_DELTA_UP/DOWN
   def test_brand_without_rate_limits_returns_none(self, brand):
     assert get_steer_slew_schedule(brand_cp(brand=brand)) is None
+
+
+class TestLegacyFirmwareEntry:
+  def test_bins_below_the_floor_are_dropped(self):
+    full = get_speed_dep_config()['MAZDA_CX5_2022']
+    cp = legacy_fw_cp()
+    cfg = get_speed_dep_config_for_car(cp)
+    keep = [i for i, v in enumerate(full['speed_bp']) if v >= cp.minSteerSpeed]
+    assert 0 < len(keep) < len(full['speed_bp'])
+    assert cfg['speed_bp'] == [full['speed_bp'][i] for i in keep]
+    assert cfg['laf_bp'] == [full['laf_bp'][i] for i in keep]
+    assert cfg['friction_bp'] == [full['friction_bp'][i] for i in keep]
+    # every surviving bin sits above the 1200 -> 800 step, so its seed was learned at the 800 scale
+    assert min(cfg['speed_bp']) > 14.5
+    assert cfg.get('seed_version', 0) == full.get('seed_version', 0)
+
+  def test_legacy_firmware_shares_the_schedule_rail_and_slew(self):
+    cp, stz = legacy_fw_cp(), cx5_2022_cp()
+    assert get_steer_max_schedule(cp) == CX5_2022_SCHEDULE
+    assert get_speed_dep_config_for_car(cp)['steer_max_schedule'] == CX5_2022_SCHEDULE
+    assert get_steer_rail_schedule(cp) == get_steer_rail_schedule(stz)
+    assert get_steer_slew_schedule(cp) == get_steer_slew_schedule(stz)
+
+  def test_steer_to_zero_entry_is_untouched(self):
+    cfg = get_speed_dep_config_for_car(cx5_2022_cp())
+    assert cfg['speed_bp'] == get_speed_dep_config()['MAZDA_CX5_2022']['speed_bp']

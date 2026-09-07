@@ -124,14 +124,22 @@ def test_command_slew_is_rate_limited(cc, cs):
   """The plan can step; the wire should not. Windup is limited tightly because dumping the
   brake in one frame is what the driver feels, winddown loosely so braking is never delayed."""
   for _ in range(200):
-    step_long(cc, cs, accel=-2.0, cruise_engaged=True)
+    step_long(cc, cs, accel=-2.0, cruise_engaged=True, v_ego=10.)
   assert cc.accel_last == pytest.approx(-2.0, rel=1e-6, abs=1e-12)
 
-  # plan jumps straight to +1.0: the command must ramp, not step
+  # plan jumps straight to +1.0: the command must ramp, not step; brake release at the windup
+  # limit, then the positive part at stock's rolling build rate
   prev = cc.accel_last
   for _ in range(5):
-    step_long(cc, cs, accel=1.0, cruise_engaged=True)
+    step_long(cc, cs, accel=1.0, cruise_engaged=True, v_ego=10.)
     assert cc.accel_last - prev == pytest.approx(CarControllerParams.ACCEL_WINDUP_LIMIT, abs=1e-6)
+    prev = cc.accel_last
+  while cc.accel_last <= 0.:
+    step_long(cc, cs, accel=1.0, cruise_engaged=True, v_ego=10.)
+  prev = cc.accel_last
+  for _ in range(5):
+    step_long(cc, cs, accel=1.0, cruise_engaged=True, v_ego=10.)
+    assert cc.accel_last - prev == pytest.approx(0.8 * DT_CTRL, abs=1e-6)
     prev = cc.accel_last
 
   # and the other way, at the looser winddown limit
@@ -142,6 +150,49 @@ def test_command_slew_is_rate_limited(cc, cs):
     step_long(cc, cs, accel=-3.0, cruise_engaged=True)
     assert cc.accel_last - prev == pytest.approx(CarControllerParams.ACCEL_WINDDOWN_LIMIT, abs=1e-6)
     prev = cc.accel_last
+
+
+def test_build_rate_follows_stock_by_speed(cc, cs):
+  """Stock pulls away from a stop at its 1.25 m/s3 release ramp and builds accel at 0.6 m/s3 once
+  rolling (+12 raw per 50 Hz frame, 99.3% of rising stock frames across 158 routes); rolling is
+  deliberately a third quicker here. The build rate governs the positive region only; brake
+  release below zero keeps the windup limit."""
+  for v_ego, jerk in ((0., 1.25), (3., 1.25), (4.5, 1.025), (6., 0.8), (20., 0.8)):
+    cc.accel_last = 0.
+    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego)
+    assert cc.accel_last == pytest.approx(jerk * DT_CTRL, abs=1e-6), f"v_ego={v_ego}"
+  cc.accel_last = -1.0
+  step_long(cc, cs, accel=0., cruise_engaged=True, v_ego=20.)
+  assert cc.accel_last == pytest.approx(-1.0 + CarControllerParams.ACCEL_WINDUP_LIMIT, abs=1e-6)
+
+
+def test_throttle_lift_follows_stock_but_braking_does_not_wait(cc, cs):
+  """Stock lifts the throttle at no more than 2.0 m/s3 (99.98% of falling positive frames). A plan
+  easing off toward zero follows that; a plan asking for brake drops at the winddown limit."""
+  for _ in range(seconds(3.0)):
+    step_long(cc, cs, accel=1.0, cruise_engaged=True, v_ego=10.)
+  assert cc.accel_last == pytest.approx(1.0, abs=1e-6)
+  prev = cc.accel_last
+  for _ in range(5):
+    step_long(cc, cs, accel=0., cruise_engaged=True, v_ego=10.)
+    assert cc.accel_last - prev == pytest.approx(CarControllerParams.ACCEL_LIFT_LIMIT * DT_CTRL, abs=1e-6)
+    prev = cc.accel_last
+  step_long(cc, cs, accel=-1.0, cruise_engaged=True, v_ego=10.)
+  assert cc.accel_last - prev == pytest.approx(CarControllerParams.ACCEL_WINDDOWN_LIMIT, abs=1e-6)
+
+
+def test_ceiling_follows_stock_by_speed(cc, cs):
+  """The wire never asks for more than stock's own accelerating command at that speed."""
+  assert max(CarControllerParams.ACCEL_CEILING_V) <= CarControllerParams.ACCEL_MAX
+  for v_ego, ceiling in ((4., 1.75), (14., 1.05), (25., 0.65), (35., 0.65)):
+    cc.accel_last = 2.0
+    for _ in range(seconds(1.0)):  # settles through the lift limit
+      step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego)
+    assert cc.accel_last == pytest.approx(ceiling, abs=1e-6), f"v_ego={v_ego}"
+  # the ceiling shapes the plan; a plan under it passes through
+  cc.accel_last = 0.5
+  step_long(cc, cs, accel=0.5, cruise_engaged=True, v_ego=14.)
+  assert cc.accel_last == pytest.approx(0.5, abs=1e-6)
 
 
 def test_accel_last_tracks_the_wire_not_the_plan(cc, cs):

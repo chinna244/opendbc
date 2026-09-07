@@ -123,7 +123,8 @@ def get_speed_dep_config_for_car(CP):
   requires_steer_to_zero: its LAF values were learned under that EPS's STEER_MAX
   schedule, and the same model with its stock EPS runs a different schedule, so the
   seeds would be mis-scaled there. minSteerSpeed == 0 is the brand-neutral statement
-  that the EPS steers to a stop, which is what the entry requires.
+  that the EPS steers to a stop, which is what the entry requires. An entry that stays
+  active for a car with a floor loses the bins centered below it.
 
   An active entry carries the platform's STEER_MAX schedule under 'steer_max_schedule'
   when one exists: bin LAF values are normalized units learned under one scale each,
@@ -133,6 +134,16 @@ def get_speed_dep_config_for_car(CP):
   if cfg.get('requires_steer_to_zero') and CP.minSteerSpeed > 0:
     return {}
   cfg = dict(cfg)
+  if cfg and CP.minSteerSpeed > 0 and 'speed_bp' in cfg:
+    # A car never steers below its floor, so bins centered there hold seeds it can neither use
+    # nor learn against; a legacy-firmware Mazda keeps only the bins learned at its road-speed scale.
+    keep = [i for i, v in enumerate(cfg['speed_bp']) if v >= CP.minSteerSpeed]
+    for key in ('speed_bp', 'laf_bp', 'friction_bp'):
+      if key in cfg:
+        if keep:
+          cfg[key] = [cfg[key][i] for i in keep]
+        else:
+          del cfg[key]
   if cfg:
     schedule = get_steer_max_schedule(CP)
     if schedule is not None:
