@@ -10,7 +10,7 @@ reproduce stock captures byte for byte; the hex values below come from real rada
 import pytest
 
 from opendbc.car.mazda import mazdacan
-from opendbc.car.mazda.values import G46L
+from opendbc.car.mazda.values import G46L, REPLAY_RADAR_DIALECTS
 from opendbc.car.mazda.tests.conftest import CAM_LANEINFO, LEAD_TRACK, parse_frame
 
 
@@ -134,6 +134,18 @@ def test_g46l_radar_frames_are_the_static_capture_alone():
   for lead in (None, (10.25, 0.)):
     frames = mazdacan.create_radar_frames(0, 15, lead, dialect=G46L)
     assert [(f.address, f.dat.hex(), f.src) for f in frames] == [(0x499, "0098400000000000", 0)]
+
+
+def test_registered_static_only_dialects_replay_the_capture_alone():
+  # the registry's promise for a static-only dialect: no track frames whatever the lead,
+  # exactly the registered capture (the concrete G46L case above, said once for all)
+  for dialect in REPLAY_RADAR_DIALECTS:
+    if dialect.sends_tracks:
+      continue
+    addr, dat = mazdacan.RADAR_STATIC_CAPTURES[dialect]
+    for lead in (None, (10.25, 0.)):
+      frames = mazdacan.create_radar_frames(0, 15, lead, dialect=dialect)
+      assert [(f.address, f.dat, f.src) for f in frames] == [(addr, dat, 0)], dialect.name
 
 
 def test_lead_track_constant_bytes_match_the_stock_release_capture():

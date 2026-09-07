@@ -49,7 +49,8 @@ def radar_fw(version: bytes) -> structs.CarParams.CarFw:
 # The 2016.5-era radar a first-gen body keeps through an EPS swap, padded to the 24-byte
 # fw field the UDS query returns (the padding length is load-bearing: the G46L is listed
 # in fingerprints.py, and a longer test padding once masked an exact-match miss)
-G46L_FW = sorted(G46L.fw)[0] + b'\x00' * (24 - len(sorted(G46L.fw)[0]))
+_g46l_stem = sorted(G46L.fw)[0]
+G46L_FW = _g46l_stem + b'\x00' * (24 - len(_g46l_stem))
 
 
 class TestMazdaEpsSwap:
@@ -312,6 +313,13 @@ class TestReplayRadarRegistry:
     from opendbc.car.mazda.interface import TRACK_RADAR_FW
     for d in REPLAY_RADAR_DIALECTS:
       assert not d.fw & TRACK_RADAR_FW
+
+  def test_dialect_firmware_sets_are_pairwise_disjoint(self):
+    # two dialects listing the same string would make resolution silently pick the first
+    seen: set[bytes] = set()
+    for d in REPLAY_RADAR_DIALECTS:
+      assert not d.fw & seen, d.name
+      seen |= d.fw
 
   def test_every_dialect_has_a_registered_capture(self):
     from opendbc.car.mazda import mazdacan

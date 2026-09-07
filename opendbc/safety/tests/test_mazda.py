@@ -447,6 +447,16 @@ class TestMazdaLongitudinalSafety(TestMazdaSteerToZeroEpsSafety, common.Longitud
     for bus in (0, 2):
       self.assertFalse(self._tx(common.make_msg(bus, 0x499, 8, bytes.fromhex("0098400100000000"))))
 
+  def test_registered_dialect_captures_allowed(self):
+    # every capture the python registry registers must pass the mirrored whitelist in
+    # mazda.h: registering a dialect without its safety capture goes red here
+    from opendbc.car.mazda import mazdacan
+    for addr, dat in mazdacan.RADAR_STATIC_CAPTURES.values():
+      for controls_allowed in (False, True):
+        self.safety.set_controls_allowed(controls_allowed)
+        for bus in (0, 2):
+          self.assertTrue(self._tx(common.make_msg(bus, addr, 8, dat)))
+
   def test_synthetic_lead_radar_track_allowed_disengaged(self):
     # Permit the measurement fields while requiring the occupied-track template. The slot is
     # perception, not actuation, so it remains valid with controls_allowed low like stock radar
