@@ -137,8 +137,7 @@ def test_g46l_radar_frames_are_the_static_capture_alone():
 
 
 def test_registered_static_only_dialects_replay_the_capture_alone():
-  # the registry's promise for a static-only dialect: no track frames whatever the lead,
-  # exactly the registered capture (the concrete G46L case above, said once for all)
+  # static-only: no track frames whatever the lead, exactly the registered capture
   for dialect in REPLAY_RADAR_DIALECTS:
     if dialect.sends_tracks:
       continue

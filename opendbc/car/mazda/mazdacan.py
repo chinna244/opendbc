@@ -18,9 +18,7 @@ LEAD_TRACK_TEMPLATE = bytes.fromhex("000e00001c000000")
 DIST_OBJ_SCALE = 0.0625   # m per bit, DIST_OBJ and RELV_OBJ share it
 DIST_OBJ_MAX = 255.875    # m, the full-scale DIST_OBJ reading a track can carry
 
-# Static capture per replay dialect (REPLAY_RADAR_DIALECTS in values.py). The G46L
-# (2016.5 bodies) sends only this static frame and no track messages at all, so the lead
-# rides CRZ_CTRL alone; fully static — no counter, no checksum.
+# Static capture per replay dialect (REPLAY_RADAR_DIALECTS in values.py).
 RADAR_STATIC_CAPTURES = {
   G46L: (0x499, bytes.fromhex("0098400000000000")),
 }

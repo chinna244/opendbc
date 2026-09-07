@@ -259,9 +259,9 @@ class RadarDialect:
 
   A talking radar outside TRACK_RADAR_FW gets the vision-only path; the dialects
   registered here are the ones whose own wire behavior alpha-long can replay. Adding
-  one: register it, claim its MazdaFlags bit, add its static capture to mazdacan.py's
-  RADAR_STATIC_CAPTURES and to mazda_radar_static_msg_valid in panda safety, and mirror
-  the capture in the safety tests.
+  one: register it, claim its MazdaFlags bit, and add its static capture to mazdacan.py's
+  RADAR_STATIC_CAPTURES and to mazda_radar_static_msg_valid in panda safety — the safety
+  test picks registered captures up by itself.
   """
   name: str
   fw: frozenset[bytes]   # null-stripped firmware strings that speak this dialect
@@ -270,8 +270,8 @@ class RadarDialect:
 
 
 # The 2016.5-era radar kept by an EPS-swapped older body. Listed for fingerprinting, but
-# it never publishes 0x361-0x366 on bus 0. Stored unpadded; matched with nulls stripped so
-# UDS response padding cannot break it.
+# it never publishes 0x361-0x366 on bus 0; its one frame is fully static — no counter, no
+# checksum. Stored unpadded; matched with nulls stripped so UDS padding cannot break it.
 G46L = RadarDialect(name='G46L', fw=frozenset((b'G46L-67XA1-C',)),
                     flag=MazdaFlags.G46L_RADAR, sends_tracks=False)
 REPLAY_RADAR_DIALECTS = (G46L,)

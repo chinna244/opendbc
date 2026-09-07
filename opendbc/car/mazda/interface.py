@@ -10,9 +10,8 @@ from opendbc.car.mazda.radar_interface import RadarInterface
 from opendbc.car.mazda.values import CAR, DBC, LKAS_LIMITS, REPLAY_RADAR_DIALECTS, STEER_TO_ZERO_EPS_FW, MazdaFlags, MazdaSafetyFlags
 
 # Radar firmware whose bus publishes the 0x361-0x366 track dialect: every radar the
-# database lists except the registered replay dialects, which it lists for fingerprinting
-# even though those radars never send tracks on bus 0. Stored null-stripped so UDS
-# response padding of any length compares equal.
+# database lists except the registered replay dialects — listed for fingerprinting, but
+# they never send tracks on bus 0. Stored null-stripped so UDS padding cannot break it.
 TRACK_RADAR_FW = {fw.rstrip(b'\x00') for fw in set().union(
   *(fw.get((structs.CarParams.Ecu.fwdRadar, 0x764, None), []) for fw in FW_VERSIONS.values())
 )} - frozenset().union(*(d.fw for d in REPLAY_RADAR_DIALECTS))
@@ -49,8 +48,7 @@ class CarInterface(CarInterfaceBase):
       ret.flags |= MazdaFlags.LEGACY_FW_EPS.value
       ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.LEGACY_FW_EPS.value
 
-    # Resolve the detected radar to a registered replay dialect (mazdacan.py replays
-    # its own wire behavior, not the 2022 captures).
+    # The registry's dialects are the ones mazdacan can replay as-is, not the 2022 captures.
     radar_fw = {fw.fwVersion.rstrip(b'\x00') for fw in car_fw if fw.ecu == 'fwdRadar'}
     dialect = next((d for d in REPLAY_RADAR_DIALECTS if radar_fw & d.fw), None)
     if dialect is not None:

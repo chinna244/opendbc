@@ -46,9 +46,8 @@ def radar_fw(version: bytes) -> structs.CarParams.CarFw:
   return fw
 
 
-# The 2016.5-era radar a first-gen body keeps through an EPS swap, padded to the 24-byte
-# fw field the UDS query returns (the padding length is load-bearing: the G46L is listed
-# in fingerprints.py, and a longer test padding once masked an exact-match miss)
+# padded to the 24-byte fw field the UDS query returns; the padding length is
+# load-bearing — a longer test padding once masked an exact-match miss
 _g46l_stem = sorted(G46L.fw)[0]
 G46L_FW = _g46l_stem + b'\x00' * (24 - len(_g46l_stem))
 
