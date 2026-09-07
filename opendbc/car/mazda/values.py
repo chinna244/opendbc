@@ -69,42 +69,72 @@ class CarControllerParams:
   ACCEL_BREAKAWAY_T = 3.0  # s
   ACCEL_BREAKAWAY_OVERSHOOT = 0.75  # m/s2 above the plan the still-stopped ramp may climb
 
-  # Limit upward plan-command slew without delaying braking response.
+  # Shape positive commands like stock MRCC (tools/mazda_long/accel_profile.py, 158 stock routes).
+  # Stock never asks for more than these by speed (p99 of the accelerating command, no lead).
+  ACCEL_CEILING_BP = [0., 4., 9., 14., 18., 25.]  # m/s
+  ACCEL_CEILING_V = [1.5, 1.75, 1.45, 1.05, 0.85, 0.65]  # m/s2
+  # Stock builds positive accel at +12 raw per 50 Hz frame (0.6 m/s3) once rolling, 99.3% of
+  # rising frames, and at its 1.25 m/s3 release ramp while pulling away. The plan steps faster
+  # than both, which is the driver-felt harshness. Rolling builds a third quicker than stock on
+  # purpose: the plan sees a lead pull away before the stock radar walk would. Applies above
+  # zero only: brake release keeps the looser windup below so braking is never held longer
+  # than the plan asks.
+  ACCEL_BUILD_BP = [3., 6.]   # m/s
+  ACCEL_BUILD_V = [1.25, 0.8]  # m/s3
+  # Stock lifts the throttle at no more than 40 raw per 50 Hz frame (2.0 m/s3) in 99.98% of
+  # falling positive frames. Applies to throttle modulation only (plan still >= 0); a plan
+  # asking for brake falls through to the winddown limit so braking is never delayed.
+  ACCEL_LIFT_LIMIT = -2.0  # m/s3
+  # Limit upward plan-command slew in the brake region without delaying braking response.
   ACCEL_WINDUP_LIMIT = 4.0 * DT_CTRL     # m/s2 per frame
   ACCEL_WINDDOWN_LIMIT = -10.0 * DT_CTRL  # m/s2 per frame, clips only the p99.9+ steps
 
   def __init__(self, CP):
-    # Select the 2022 steering limits from EPS firmware, including donor-EPS swaps.
-    if CP.flags & MazdaFlags.STEER_TO_ZERO_EPS:
-      # STEER_MAX scales normalized torque into counts; EPS_CEILING_LOOKUP is the applied limit.
-      self.STEER_MAX = 1200        # theoretical max_steer 2047
-      self.STEER_MAX_LOOKUP = ([0., 14.2, 14.5], [1200, 1200, 800])
+    # Every gen1 Mazda EPS runs the measured envelope; the interface sets one of the two bits.
+    if CP.flags & MazdaFlags.EPS_HW:
       # Match the EPS hardware slew and panda safety limits in both directions.
       self.STEER_DELTA_UP = 12
       self.STEER_DELTA_DOWN = 12
       self.STEER_DRIVER_MULTIPLIER = 15   # tuned for the CX-5 EPS response
+      # Use a sample window and margin to stay inside panda's fresher driver-torque envelope.
+      self.STEER_DRIVER_SAMPLES = 10
+      self.STEER_DRIVER_MARGIN = 2
+
+      # A panda rejection resets its rate-limit reference to zero, so every later frame more
+      # than one step from zero is rejected too and the EPS stops receiving 0x243. About 0.6 s
+      # into that silence the EPS raises STEER_RATE.LKAS_FAULT and the camera faults 5.3 s
+      # later; neither clears before the next ignition cycle. The EPS echoes the last request
+      # it received in STEER_RATE.LKAS_REQUEST, so an echo that matches none of the recent
+      # commands means they are being rejected, and the ramp restarts from zero, which the
+      # panda accepts. See docs/zoompilot/mazda-lateral.md, "LKAS_FAULT".
+      self.STEER_ECHO_HISTORY = 4            # commands the 83 Hz echo may lag behind
+      self.STEER_ECHO_MISMATCH_FRAMES = 5    # 50 ms without a matching echo restarts the ramp
+
+      # STEER_MAX scales normalized torque into counts; EPS_CEILING_LOOKUP is the applied limit.
+      # Legacy firmware never commands below its 45 kph floor, so the low-speed scale is moot
+      # there and the rest of the schedule is the same hardware.
+      self.STEER_MAX = 1200        # theoretical max_steer 2047
+      self.STEER_MAX_LOOKUP = ([0., 14.2, 14.5], [1200, 1200, 800])
       # Clamp to the measured applied-torque ceiling so controlsd can detect saturation.
       self.EPS_CEILING_LOOKUP = ([8.0, 8.5, 9.4, 10.3, 11.2, 12.1, 13.0, 13.9, 14.5],
                                  [1148, 1132, 1092, 1048, 1012,  920,  808,  676,  620])
 
-      # Stop commanding after sustained zero delivery to avoid a camera steering fault. Use
-      # LKAS_EFFECTIVE because LKAS_BLOCK may still permit partial delivery.
-      self.STEER_UNDELIVERED_MIN = 200      # counts; below this the EPS rounds to zero anyway
-      self.STEER_UNDELIVERED_FRAMES = 20    # 200 ms at 100 Hz
+      if CP.flags & MazdaFlags.STEER_TO_ZERO_EPS:
+        # Stop commanding after sustained zero delivery to avoid a camera steering fault. Use
+        # LKAS_EFFECTIVE because LKAS_BLOCK may still permit partial delivery.
+        self.STEER_UNDELIVERED_MIN = 200      # counts; below this the EPS rounds to zero anyway
+        self.STEER_UNDELIVERED_FRAMES = 20    # 200 ms at 100 Hz
 
-      # Alert only after sustained non-delivery above maneuvering speed. Suppress normal
-      # low-speed standby blocks identified by LKAS_TRACK_STATE.
-      self.STEER_UNDELIVERED_ALERT_FRAMES = 80    # 0.8 s at 100 Hz, on top of the latch's 0.2
-      self.STEER_UNDELIVERED_ALERT_MIN_SPEED = 12. * CV.MPH_TO_MS
-      # A block that began below this speed is the EPS's standby from a stop, whatever
-      # LKAS_TRACK_STATE says later in it; only a block that began rolling can be a dropout.
-      self.STEER_UNDELIVERED_ALERT_ORIGIN_SPEED = 1.0  # m/s
-
-      # Use a sample window and margin to stay inside panda's fresher driver-torque envelope.
-      self.STEER_DRIVER_SAMPLES = 10
-      self.STEER_DRIVER_MARGIN = 2
+        # Alert only after sustained non-delivery above maneuvering speed. Suppress normal
+        # low-speed standby blocks identified by LKAS_TRACK_STATE.
+        self.STEER_UNDELIVERED_ALERT_FRAMES = 80    # 0.8 s at 100 Hz, on top of the latch's 0.2
+        self.STEER_UNDELIVERED_ALERT_MIN_SPEED = 12. * CV.MPH_TO_MS
+        # A block that began below this speed is the EPS's standby from a stop, whatever
+        # LKAS_TRACK_STATE says later in it; only a block that began rolling can be a dropout.
+        self.STEER_UNDELIVERED_ALERT_ORIGIN_SPEED = 1.0  # m/s
     else:
-      # Stock limits without the steer-to-zero safety flag.
+      # Upstream's envelope. The interface no longer selects it for any Mazda; the panda keeps
+      # it as the no-param default, so flags == 0 must still build.
       self.STEER_MAX = 800         # theoretical max_steer 2047
       self.STEER_DELTA_UP = 10
       self.STEER_DELTA_DOWN = 25
@@ -131,14 +161,22 @@ class MazdaFlags(IntFlag):
   # GEN1 platforms share CAN messages and camera hardware.
   GEN1 = 1
 
-  # Identifies steer-to-zero EPS control and safety behavior from firmware.
+  # EPS firmware that steers to zero: no speed floor, the 1200-count low-speed scale, and
+  # LKAS_TRACK_STATE standby semantics.
   STEER_TO_ZERO_EPS = 2
+  # Every other gen1 Mazda EPS: the same hardware on firmware that keeps the 45 kph floor. Same
+  # envelope and tune; the floor, the non-delivery latch and alpha long stay with steer-to-zero.
+  LEGACY_FW_EPS = 4
+  # Everything keyed on the measured hardware rather than on what the firmware permits.
+  EPS_HW = STEER_TO_ZERO_EPS | LEGACY_FW_EPS
 
 
 class MazdaSafetyFlags(IntFlag):
   LONG = 1
   # Selects the steer-to-zero EPS envelope in panda safety.
   STEER_TO_ZERO_EPS = 2
+  # Selects the same envelope for legacy firmware; a distinct bit so logs show the firmware.
+  LEGACY_FW_EPS = 4
 
 
 class WMI(StrEnum):

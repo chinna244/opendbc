@@ -400,14 +400,35 @@ class UndeliveredRig:
     self.packer = packer()
     self.frame = 0
 
-  def step(self, request, effective, blocked, speed_kph=40., driver_torque=0, track_state=0):
+  def step(self, request, effective, blocked, speed_kph=40., driver_torque=0, track_state=0, fault=0):
     self.frame += 1
     ret, _ = feed(self.CI, self.frame,
                   self.packer.make_can_msg("STEER_RATE", 0, {"LKAS_REQUEST": request, "LKAS_EFFECTIVE": effective, "LKAS_BLOCK": blocked,
-                                                             "LKAS_TRACK_STATE": track_state}),
+                                                             "LKAS_TRACK_STATE": track_state, "LKAS_FAULT": fault}),
                   self.packer.make_can_msg("WHEEL_SPEEDS", 0, {"FL": speed_kph, "FR": speed_kph, "RL": speed_kph, "RR": speed_kph}),
                   self.packer.make_can_msg("STEER_TORQUE", 0, {"STEER_TORQUE_SENSOR": driver_torque}))
     return ret
+
+
+class TestLkasFaultBit:
+  """STEER_RATE bit 53: the EPS raises it about 0.6 s after its 0x243 stream stops and the camera's
+  ERR_BIT_1 follows 5.25 to 5.55 s later on every capture (11 of 11 with a known onset over 64 h);
+  neither clears before the next ignition cycle."""
+
+  def test_the_bit_is_decoded_but_the_camera_still_owns_the_fault(self):
+    rig = UndeliveredRig()
+    rig.step(0, 0, 1, track_state=0)
+    assert not rig.CS.lkas_fault
+    ret = rig.step(0, 0, 1, track_state=0, fault=1)
+    assert rig.CS.lkas_fault
+    assert not ret.steerFaultPermanent  # the camera's ERR_BIT_1 reports it, as before
+
+  def test_the_echo_reaches_the_controller(self):
+    rig = UndeliveredRig()
+    assert rig.CS.lkas_request_echo is None
+    for _ in range(2):  # the parser arms a message on its first frame
+      rig.step(-312, 0, 1, track_state=1)
+    assert rig.CS.lkas_request_echo == -312
 
 
 class TestSteerUndeliveredLatch:

@@ -20,15 +20,21 @@ class CarInterface(CarInterfaceBase):
 
     ret.radarUnavailable = Bus.radar not in DBC[candidate]
 
-    # Detect the steer-to-zero EPS from firmware so donor-EPS swaps retain its capabilities.
-    steer_to_zero = candidate == CAR.MAZDA_CX5_2022 or \
-      any(fw.ecu == 'eps' and fw.fwVersion in STEER_TO_ZERO_EPS_FW for fw in car_fw)
+    # Every gen1 Mazda EPS is the same hardware; only the firmware differs. Steer-to-zero follows
+    # the EPS firmware, so a donor-EPS swap carries it and older firmware in a 2022 body loses it.
+    # Only an unread EPS (docs, a failed query) falls back to the platform: a forced CX-5 2022
+    # fingerprint on an unlisted older EPS then gets the floor and its banner, not a silent latch.
+    eps_fw = {fw.fwVersion for fw in car_fw if fw.ecu == 'eps'}
+    steer_to_zero = bool(eps_fw & STEER_TO_ZERO_EPS_FW) or (not eps_fw and candidate == CAR.MAZDA_CX5_2022)
     if steer_to_zero:
       # Select panda's matching torque envelope from the detected EPS.
       ret.flags |= MazdaFlags.STEER_TO_ZERO_EPS.value
       ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.STEER_TO_ZERO_EPS.value
     else:
+      # Same envelope and tune; only the firmware's floor, latch semantics and alpha long differ.
       ret.minSteerSpeed = LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS
+      ret.flags |= MazdaFlags.LEGACY_FW_EPS.value
+      ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.LEGACY_FW_EPS.value
 
     # Offer alpha longitudinal only with the EPS that retains lateral control through a stop.
     ret.alphaLongitudinalAvailable = steer_to_zero and not ret.radarUnavailable
@@ -46,8 +52,8 @@ class CarInterface(CarInterfaceBase):
 
     ret.enableBsm = 0x477 in fingerprint[0]
 
-    # Command-to-torque lag follows EPS firmware; lagd learns the remaining delay.
-    ret.steerActuatorDelay = 0.14 if steer_to_zero else 0.1
+    # Command-to-torque lag measured on the EPS hardware; lagd learns the remaining delay.
+    ret.steerActuatorDelay = 0.14
     ret.steerLimitTimer = 0.8
 
     CarInterfaceBase.configure_torque_tune(candidate, ret.lateralTuning)

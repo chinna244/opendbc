@@ -32,15 +32,23 @@
 #define MAZDA_PARAM_LONGITUDINAL 1U
 // Select the steer-to-zero EPS envelope from the firmware-derived interface flag.
 #define MAZDA_PARAM_STEER_TO_ZERO_EPS 2U
+// The same EPS hardware on firmware that keeps the 45 kph floor: the same envelope.
+#define MAZDA_PARAM_LEGACY_FW_EPS 4U
 
 // Keep SET/RES intent fresh until PEDALS reports engagement.
 #define MAZDA_ENGAGE_BTN_WINDOW 10U
+// A wheel cancel turns MRCC main off for real, and PEDALS trails the press: keep the context
+// on the 50 Hz PEDALS clock for carstate's CANCEL_CONTEXT_T so the main-off edge lands under
+// braking, where a brake-only bit dropout would otherwise be held.
+#define MAZDA_CANCEL_CONTEXT_FRAMES 25U
 
 static bool mazda_longitudinal = false;
 // Declared by the driver: the TJA button owns lateral and MRCC no longer drives the main edge.
 static bool mazda_tja_button = false;
 static bool mazda_steer_to_zero_eps = false;
+static bool mazda_legacy_fw_eps = false;
 static uint32_t mazda_engage_btn_frames = 0U;
+static uint32_t mazda_cancel_context_frames = 0U;
 
 // Mirror carstate's radar-ownership guard so panda and MADS arm on the same edge. Start the
 // 50 Hz clock from the first synthetic CRZ_INFO because rx never sees the stock copy.
@@ -133,10 +141,11 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
     }
 
     if ((msg->addr == MAZDA_CRZ_BTNS) && mazda_longitudinal) {
-      // A physical cancel press always exits controls.
+      // A physical cancel press always exits controls, and explains the main-off that follows.
       bool cancel = GET_BIT(msg, 0U);
       if (cancel) {
         controls_allowed = false;
+        mazda_cancel_context_frames = MAZDA_CANCEL_CONTEXT_FRAMES;
       }
       // Record SET/RES intent for the engagement qualifier below.
       if (GET_BIT(msg, 2U) || GET_BIT(msg, 4U) || GET_BIT(msg, 5U)) {
@@ -165,12 +174,26 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
         // samples where both cruise bits are low.
         bool cruise_engaged = GET_BIT(msg, 3U);
         bool acc_armed = GET_BIT(msg, 2U) || cruise_engaged;
+        bool brake_free = !brake && !brake_pressed_prev;
 
-        if (acc_armed || cruise_engaged_prev || (!brake && !brake_pressed_prev)) {
-          // Gate the main edge on radar ownership to align with software availability.
-          if (!mazda_tja_button) {
-            acc_main_on = acc_armed && mazda_radar_was_silenced;
+        // Main mirrors carstate's cruise_available: it follows arming, and a both-low sample is
+        // held under braking unless a wheel cancel explains it. Without the cancel path, main
+        // toggled at a stop with the brake held never falls, the next press has no rising edge,
+        // and MADS runs into 200 rejected frames (route 000001c9--0b2a64a214 seg 0).
+        if (!mazda_tja_button) {
+          if (acc_armed) {
+            // Gate the main edge on radar ownership to align with software availability.
+            acc_main_on = mazda_radar_was_silenced;
+          } else if (brake_free || (mazda_cancel_context_frames > 0U)) {
+            acc_main_on = false;
+          } else {
           }
+        }
+        if (mazda_cancel_context_frames > 0U) {
+          mazda_cancel_context_frames -= 1U;
+        }
+
+        if (acc_armed || cruise_engaged_prev || brake_free) {
           // Require recent SET/RES intent on the engaged edge; ACC_ACTIVE alone may acknowledge
           // synthetic traffic rather than a driver request.
           if (cruise_engaged && !cruise_engaged_prev && (mazda_engage_btn_frames > 0U)) {
@@ -209,8 +232,9 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     .type = TorqueDriverLimited,
   };
 
-  // The steer-to-zero EPS uses its measured 12-count hardware slew. Keep max_rate_down
-  // equal to the controller retreat rate so driver-limit winddown frames remain valid.
+  // The measured EPS envelope, selected by either firmware bit: the EPS's 12-count hardware
+  // slew, with max_rate_down equal to the controller retreat rate so driver-limit winddown
+  // frames remain valid.
   const TorqueSteeringLimits MAZDA_STEER_TO_ZERO_EPS_STEERING_LIMITS = {
     .max_torque = 1200,
     .max_rate_up = 12,
@@ -235,8 +259,13 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   if (main_bus && (msg->addr == MAZDA_LKAS)) {
     int desired_torque = (((msg->data[0] & 0x0FU) << 8) | msg->data[1]) - 2048U;
 
-    const TorqueSteeringLimits limits = mazda_steer_to_zero_eps ? MAZDA_STEER_TO_ZERO_EPS_STEERING_LIMITS : MAZDA_STEERING_LIMITS;
-    if (steer_torque_cmd_checks(desired_torque, -1, limits)) {
+    const TorqueSteeringLimits *limits = &MAZDA_STEERING_LIMITS;
+    if (mazda_steer_to_zero_eps || mazda_legacy_fw_eps) {
+      limits = &MAZDA_STEER_TO_ZERO_EPS_STEERING_LIMITS;
+    } else {
+      // upstream's pre-2022 envelope, no longer selected by the interface
+    }
+    if (steer_torque_cmd_checks(desired_torque, -1, *limits)) {
       tx = false;
     }
   }
@@ -329,6 +358,7 @@ static bool mazda_fwd_hook(int bus_num, int addr) {
 
 static safety_config mazda_init(uint16_t param) {
   mazda_engage_btn_frames = 0U;
+  mazda_cancel_context_frames = 0U;
   mazda_radar_mastered = false;
   mazda_mastered_pedals_frames = 0U;
   mazda_radar_was_silenced = false;
@@ -384,6 +414,7 @@ static safety_config mazda_init(uint16_t param) {
 
   mazda_longitudinal = GET_FLAG(param, MAZDA_PARAM_LONGITUDINAL);
   mazda_steer_to_zero_eps = GET_FLAG(param, MAZDA_PARAM_STEER_TO_ZERO_EPS);
+  mazda_legacy_fw_eps = GET_FLAG(param, MAZDA_PARAM_LEGACY_FW_EPS);
   mazda_tja_button = GET_FLAG(current_safety_param_sp, MAZDA_PARAM_SP_TJA_BUTTON);
   acc_main_on = false;
 

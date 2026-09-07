@@ -20,6 +20,9 @@ Ecu = structs.CarParams.Ecu
 # The steer-to-zero EPS a swap donates, and a stock pre-2022 CX-5 EPS for contrast
 SWAPPED_EPS_FW = sorted(STEER_TO_ZERO_EPS_FW)[0]
 STOCK_CX5_EPS_FW = b'K319-3210X-A-00' + b'\x00' * 9
+# The 2022 EPS hardware on firmware that keeps the 45 kph floor (THACO CX-5 2023), and a revision listed nowhere
+LEGACY_FW_EPS = b'K319-3210X-B-00' + b'\x00' * 9
+UNLISTED_EPS_FW = b'KSD5-3210X-D-00' + b'\x00' * 9
 
 MIN_STEER_SPEED_STOCK_EPS = LKAS_LIMITS.DISABLE_SPEED * CV.KPH_TO_MS
 
@@ -45,7 +48,7 @@ class TestMazdaEpsSwap:
     CP = car_params(CAR.MAZDA_CX5, car_fw=eps_fw(STOCK_CX5_EPS_FW))
     assert CP.dashcamOnly
     assert CP.minSteerSpeed == pytest.approx(MIN_STEER_SPEED_STOCK_EPS, abs=5e-8)
-    assert CP.steerActuatorDelay == pytest.approx(0.1, abs=5e-8)
+    assert CP.steerActuatorDelay == pytest.approx(0.14, abs=5e-8)
 
   def test_swapped_eps_lifts_dashcam_and_the_speed_floor(self):
     CP = car_params(CAR.MAZDA_CX5, car_fw=eps_fw(SWAPPED_EPS_FW))
@@ -79,7 +82,7 @@ class TestMazdaEpsSwap:
     cx9_2021 = car_params(CAR.MAZDA_CX9_2021)
     assert not cx9_2021.dashcamOnly
     assert cx9_2021.minSteerSpeed == pytest.approx(MIN_STEER_SPEED_STOCK_EPS, abs=5e-8)
-    assert cx9_2021.steerActuatorDelay == pytest.approx(0.1, abs=5e-8)
+    assert cx9_2021.steerActuatorDelay == pytest.approx(0.14, abs=5e-8)
     assert not cx9_2021.alphaLongitudinalAvailable
 
   @pytest.mark.parametrize("candidate", list(CAR))
@@ -107,6 +110,7 @@ class TestMazdaEpsSwap:
     (CAR.MAZDA_CX5, eps_fw(STOCK_CX5_EPS_FW), False, False),
     (CAR.MAZDA_CX5, None, False, False),
     (CAR.MAZDA_CX9_2021, None, True, False),
+    (CAR.MAZDA_CX5_2022, eps_fw(LEGACY_FW_EPS), False, False),
   ])
   def test_safety_param_follows_the_eps(self, candidate, car_fw, alpha_long, expected):
     # the panda's torque envelope is selected by MazdaSafetyFlags.STEER_TO_ZERO_EPS, and it must
@@ -127,6 +131,83 @@ class TestMazdaEpsSwap:
     from opendbc.car.mazda.interface import CarInterface
     CP = CarInterface.get_params(candidate, gen_empty_fingerprint(), [], alpha_long=False, is_release=False, docs=True)
     assert CP.dashcamOnly
+
+
+class TestMazdaLegacyFwEps:
+  """The 2022 EPS hardware behind firmware that keeps the 45 kph floor (the THACO-built CX-5
+  2023, EPS K319-3210X-B-00). The measured slew, driver window and road-speed ceiling follow
+  the hardware; the speed floor, the low-speed scale, the non-delivery latch and alpha long
+  stay with the steer-to-zero firmware.
+  """
+
+  def test_legacy_firmware_keeps_the_floor_on_the_hardware_envelope(self):
+    CP = car_params(CAR.MAZDA_CX5_2022, car_fw=eps_fw(LEGACY_FW_EPS))
+    assert CP.flags & MazdaFlags.LEGACY_FW_EPS
+    assert not CP.flags & MazdaFlags.STEER_TO_ZERO_EPS
+    assert CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.LEGACY_FW_EPS.value
+    assert not CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.STEER_TO_ZERO_EPS.value
+    assert CP.minSteerSpeed == pytest.approx(MIN_STEER_SPEED_STOCK_EPS, abs=5e-8)
+    assert not CP.dashcamOnly
+    assert CP.steerActuatorDelay == pytest.approx(0.14, abs=5e-8)
+
+  def test_legacy_firmware_is_not_offered_alpha_long(self):
+    CP = car_params(CAR.MAZDA_CX5_2022, car_fw=eps_fw(LEGACY_FW_EPS), alpha_long=True)
+    assert not CP.alphaLongitudinalAvailable
+    assert not CP.openpilotLongitudinalControl
+    assert not CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.LONG.value
+
+  def test_2022_body_without_an_eps_reading_keeps_steer_to_zero(self):
+    # docs and a failed firmware query: the platform still answers for its own EPS
+    CP = car_params(CAR.MAZDA_CX5_2022)
+    assert CP.flags & MazdaFlags.STEER_TO_ZERO_EPS
+    assert not CP.flags & MazdaFlags.LEGACY_FW_EPS
+    assert CP.minSteerSpeed == 0
+
+  @pytest.mark.parametrize("car_fw", [eps_fw(UNLISTED_EPS_FW), eps_fw(STOCK_CX5_EPS_FW)], ids=["unlisted_eps", "older_platform_eps"])
+  def test_2022_body_with_an_unlisted_eps_gets_the_floor_not_a_silent_latch(self, car_fw):
+    # a forced CX-5 2022 fingerprint on an EPS the port has not listed: the visible degradation is
+    # the 45 kph floor with its banner, and above it the envelope is the same. Listing a genuine
+    # new steer-to-zero revision lifts the floor again.
+    CP = car_params(CAR.MAZDA_CX5_2022, car_fw=car_fw)
+    assert CP.flags & MazdaFlags.LEGACY_FW_EPS
+    assert not CP.flags & MazdaFlags.STEER_TO_ZERO_EPS
+    assert CP.minSteerSpeed == pytest.approx(MIN_STEER_SPEED_STOCK_EPS, abs=5e-8)
+    assert not CP.dashcamOnly
+
+  def test_legacy_firmware_in_an_older_body_stays_dashcam(self):
+    CP = car_params(CAR.MAZDA_CX5, car_fw=eps_fw(LEGACY_FW_EPS))
+    assert CP.dashcamOnly
+    assert CP.flags & MazdaFlags.LEGACY_FW_EPS
+
+  @pytest.mark.parametrize("candidate, car_fw", [
+    (CAR.MAZDA_CX9_2021, None),
+    (CAR.MAZDA_CX9_2021, eps_fw(b'TC3M-3210X-A-00' + b'\x00' * 9)),
+    (CAR.MAZDA_CX5, eps_fw(STOCK_CX5_EPS_FW)),
+    (CAR.MAZDA_3, None),
+    (CAR.MAZDA_6, None),
+    (CAR.MAZDA_CX9, None),
+  ], ids=["cx9_2021_no_fw", "cx9_2021_stock_eps", "cx5_stock_eps", "mazda3", "mazda6", "cx9"])
+  def test_every_non_steer_to_zero_eps_is_on_the_hardware_envelope(self, candidate, car_fw):
+    # one EPS hardware across gen1: the stock CX-9 2021 and the older platforms get the measured
+    # slew, driver window and road-speed ceiling, and keep the 45 kph floor of their firmware
+    CP = car_params(candidate, car_fw=car_fw)
+    assert CP.flags & MazdaFlags.LEGACY_FW_EPS
+    assert not CP.flags & MazdaFlags.STEER_TO_ZERO_EPS
+    assert CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.LEGACY_FW_EPS.value
+    assert CP.minSteerSpeed == pytest.approx(MIN_STEER_SPEED_STOCK_EPS, abs=5e-8)
+    assert CP.steerActuatorDelay == pytest.approx(0.14, abs=5e-8)
+    # support itself is still the platform's call: only the CX-9 2021 drives among these
+    assert CP.dashcamOnly == (candidate != CAR.MAZDA_CX9_2021)
+
+  def test_no_mazda_is_left_on_the_upstream_envelope(self):
+    for candidate in CAR:
+      assert car_params(candidate).flags & MazdaFlags.EPS_HW, candidate
+
+  def test_legacy_firmware_is_listed_for_the_2022_body_only(self):
+    from opendbc.car.mazda.fingerprints import FW_VERSIONS
+    assert LEGACY_FW_EPS in FW_VERSIONS[CAR.MAZDA_CX5_2022][(Ecu.eps, 0x730, None)]
+    assert LEGACY_FW_EPS not in STEER_TO_ZERO_EPS_FW
+    assert set(FW_VERSIONS[CAR.MAZDA_CX5_2022][(Ecu.eps, 0x730, None)]) == STEER_TO_ZERO_EPS_FW | {LEGACY_FW_EPS}
 
 
 def test_non_gen1_platform_refused_at_admission():

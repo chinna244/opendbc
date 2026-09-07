@@ -15,7 +15,7 @@ import pytest
 
 from opendbc.car import DT_CTRL, structs
 from opendbc.car.common.conversions import Conversions as CV
-from opendbc.car.mazda.tests.conftest import LongCtrlState, car_controller, controller_params, mazda_car_state, step
+from opendbc.car.mazda.tests.conftest import LongCtrlState, car_controller, car_params, controller_params, mazda_car_state, step
 from opendbc.car.mazda.values import CAR, CarControllerParams, STEER_TO_ZERO_EPS_FW
 
 Ecu = structs.CarParams.Ecu
@@ -31,6 +31,7 @@ def _eps_fw(version: bytes) -> list[structs.CarParams.CarFw]:
 
 
 SWAPPED_EPS_FW = _eps_fw(sorted(STEER_TO_ZERO_EPS_FW)[0])
+LEGACY_FW_EPS = _eps_fw(b'K319-3210X-B-00' + b'\x00' * 9)  # THACO CX-5 2023, keeps the floor
 
 
 def cx5_2022_params():
@@ -43,8 +44,21 @@ def eps_swap_params():
 
 
 def pre_2022_params():
-  # no CX-5 EPS -> low-speed lockout
+  # a pre-2022 platform with its stock EPS: the hardware envelope behind the 45 kph floor
   return controller_params(CAR.MAZDA_CX5)
+
+
+def upstream_params():
+  # flags == 0: upstream's envelope. The interface no longer emits it for any Mazda; the panda
+  # keeps it as the no-param default, so the pairing stays proven.
+  CP = car_params(CAR.MAZDA_CX5)
+  CP.flags = 0
+  return CarControllerParams(CP)
+
+
+def legacy_fw_params():
+  # the 2022 EPS hardware on firmware that keeps the floor: measured envelope, 800 scale
+  return controller_params(CAR.MAZDA_CX5_2022, car_fw=LEGACY_FW_EPS)
 
 
 class TestCarControllerParams:
@@ -96,8 +110,10 @@ class TestCarControllerParams:
   @pytest.mark.parametrize("params, panda", [
     (cx5_2022_params, "TestMazdaSteerToZeroEpsSafety"),
     (eps_swap_params, "TestMazdaSteerToZeroEpsSafety"),
-    (pre_2022_params, "TestMazdaSafety"),
-  ], ids=["cx5_2022", "eps_swap", "pre_2022"])
+    (pre_2022_params, "TestMazdaLegacyFwEpsSafety"),
+    (legacy_fw_params, "TestMazdaLegacyFwEpsSafety"),
+    (upstream_params, "TestMazdaSafety"),
+  ], ids=["cx5_2022", "eps_swap", "pre_2022", "legacy_fw", "upstream"])
   def test_rate_limits_equal_the_pandas_for_each_eps(self, params, panda):
     # The panda's driver_limit_check rejects any frame that retreats by less than max_rate_down
     # once the driver bound is below the last command, and any frame that climbs by more than
@@ -124,12 +140,21 @@ class TestCarControllerParams:
     assert params.STEER_DRIVER_MULTIPLIER == 15
     assert hasattr(params, 'STEER_MAX_LOOKUP')
 
-  def test_no_eps_no_lookup(self):
-    params = pre_2022_params()
+  def test_upstream_envelope_without_either_flag(self):
+    params = upstream_params()
     assert not hasattr(params, 'STEER_MAX_LOOKUP')
     assert not hasattr(params, 'STEER_UNDELIVERED_FRAMES')
     assert params.STEER_MAX == 800
     assert params.STEER_DRIVER_MULTIPLIER == 1
+
+  @pytest.mark.parametrize("params", [legacy_fw_params, pre_2022_params], ids=["legacy_fw_in_2022_body", "pre_2022_platform"])
+  def test_legacy_firmware_gets_the_same_envelope_and_tune(self, params):
+    legacy, stz = params(), cx5_2022_params()
+    for attr in ('STEER_MAX', 'STEER_MAX_LOOKUP', 'EPS_CEILING_LOOKUP', 'STEER_DELTA_UP', 'STEER_DELTA_DOWN',
+                 'STEER_DRIVER_MULTIPLIER', 'STEER_DRIVER_SAMPLES', 'STEER_DRIVER_MARGIN'):
+      assert getattr(legacy, attr) == getattr(stz, attr), attr
+    # the latch reads LKAS_TRACK_STATE semantics only the steer-to-zero firmware has
+    assert not hasattr(legacy, 'STEER_UNDELIVERED_FRAMES')
 
   def test_undelivered_threshold_clears_normal_operation(self):
     # 20 frames is an order of magnitude clear of both populations: across 96k unblocked
@@ -178,6 +203,63 @@ def test_carstate_undelivered_latch_zeroes_the_steer_command(stock_cc, stock_cs)
   # the latch clearing walks the command back up from zero at STEER_DELTA_UP
   step(stock_cc, stock_cs, steer_undelivered=False, **lat)
   assert stock_cc.apply_torque_last == stock_cc.params.STEER_DELTA_UP
+
+
+class TestRejectionRecovery:
+  """A panda rejection resets its rate-limit reference to zero, so a controller that keeps ramping is
+  rejected on every later frame and the EPS loses its 0x243 stream (route 00000148: 1.72 s, route
+  00000139: 0.75 s, drive_02: 0.63 s). About 0.6 s in the EPS raises LKAS_FAULT and the camera
+  faults 5.3 s later. The EPS echoes the last request it received; when that echo stops matching
+  the recent commands the controller restarts its ramp from zero, which the panda accepts."""
+
+  LAT = dict(long_active=False, enabled=True, lat_active=True, torque=1.0, v_ego=10.)
+
+  def test_a_following_echo_never_restarts_the_ramp(self, stock_cc, stock_cs):
+    echo = None
+    for _ in range(60):
+      actuators, _ = step(stock_cc, stock_cs, lkas_request_echo=echo, **self.LAT)
+      echo = actuators.torqueOutputCan  # the EPS reports last frame's command this frame
+    assert stock_cc.apply_torque_last == 60 * stock_cc.params.STEER_DELTA_UP
+
+  def test_an_echo_two_frames_behind_is_still_a_match(self, stock_cc, stock_cs):
+    sent = [0, 0, 0]
+    for _ in range(60):
+      actuators, _ = step(stock_cc, stock_cs, lkas_request_echo=sent[-3], **self.LAT)
+      sent.append(actuators.torqueOutputCan)
+    assert stock_cc.apply_torque_last == 60 * stock_cc.params.STEER_DELTA_UP
+
+  def test_a_frozen_echo_restarts_the_ramp_from_zero(self, stock_cc, stock_cs):
+    params = stock_cc.params
+    for _ in range(30):
+      actuators, _ = step(stock_cc, stock_cs, lkas_request_echo=stock_cc.apply_torque_last, **self.LAT)
+    frozen = actuators.torqueOutputCan  # the last command the panda accepted
+    # every later command is rejected: the echo stays where it was. It leaves the command
+    # history after STEER_ECHO_HISTORY frames and the mismatch count runs from there.
+    for _ in range(params.STEER_ECHO_HISTORY + params.STEER_ECHO_MISMATCH_FRAMES - 1):
+      actuators, _ = step(stock_cc, stock_cs, lkas_request_echo=frozen, **self.LAT)
+    assert actuators.torqueOutputCan > frozen  # still ramping, not yet convinced
+    actuators, _ = step(stock_cc, stock_cs, lkas_request_echo=frozen, **self.LAT)
+    assert actuators.torqueOutputCan == params.STEER_DELTA_UP  # one step from zero
+    # delivery resumes and the ramp rebuilds from there
+    for i in range(2, 10):
+      actuators, _ = step(stock_cc, stock_cs, lkas_request_echo=stock_cc.apply_torque_last, **self.LAT)
+      assert actuators.torqueOutputCan == i * params.STEER_DELTA_UP
+
+  def test_nothing_to_recover_while_commanding_zero(self, stock_cc, stock_cs):
+    # a stale echo (the camera's or a stale EPS report) while we send zero is not a rejection
+    for _ in range(20):
+      step(stock_cc, stock_cs, lkas_request_echo=500, long_active=False, enabled=False, lat_active=False, v_ego=10.)
+    assert stock_cc.echo_mismatch_frames == 0
+    actuators, _ = step(stock_cc, stock_cs, lkas_request_echo=0, **self.LAT)
+    assert actuators.torqueOutputCan == stock_cc.params.STEER_DELTA_UP
+
+  def test_no_echo_yet_means_no_recovery(self, stock_cc, stock_cs):
+    for _ in range(30):
+      actuators, _ = step(stock_cc, stock_cs, lkas_request_echo=None, **self.LAT)
+    assert actuators.torqueOutputCan == 30 * stock_cc.params.STEER_DELTA_UP
+
+  def test_no_echo_constants_on_the_upstream_envelope(self):
+    assert not hasattr(upstream_params(), 'STEER_ECHO_HISTORY')
 
 
 class TestDriverTorqueHeadroom:
@@ -242,4 +324,4 @@ class TestDriverTorqueHeadroom:
   def test_no_window_on_platforms_without_the_2022_eps(self):
     # pre-2022 params carry no STEER_DRIVER_SAMPLES, so the deque stays one deep and the
     # behavior is the single newest sample, exactly as before
-    assert not hasattr(pre_2022_params(), 'STEER_DRIVER_SAMPLES')
+    assert not hasattr(upstream_params(), 'STEER_DRIVER_SAMPLES')
