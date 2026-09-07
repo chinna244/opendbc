@@ -144,6 +144,10 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
       "SET_M_INV": (set_m + 1) % 2,
       "SET_P": set_p,
       "SET_P_INV": (set_p + 1) % 2,
+      "BIT1": 1,
+      "BIT1_INV": 0,
+      "BIT2": 1,
+      "BIT3": 1,
     }
     return self.packer.make_can_msg_safety("CRZ_BTNS", 0, values)
 
@@ -559,6 +563,85 @@ class TestMazdaIgnition(unittest.TestCase):
     self.assertTrue(self.safety.get_ignition_can())
     self.safety.ignition_can_hook(self._msg(0x20))
     self.assertFalse(self.safety.get_ignition_can())
+
+
+class TestMazdaMrccCleanupSafety(unittest.TestCase):
+  def setUp(self):
+    self.packer = CANPackerSafety("mazda_2017")
+    self.safety = libsafety_py.libsafety
+    self._init(tja_button=True)
+
+  def tearDown(self):
+    self.safety.set_current_safety_param_sp(0)
+
+  def _init(self, tja_button):
+    self.safety.set_current_safety_param_sp(MazdaSafetyFlagsSP.TJA_BUTTON if tja_button else 0)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, 0)
+    self.safety.init_tests()
+
+  def _rx_mrcc(self, armed):
+    msg = self.packer.make_can_msg_safety("CRZ_CTRL", 0, {"CRZ_AVAILABLE": armed})
+    self.safety.safety_rx_hook(msg)
+
+  def _button(self, **overrides):
+    values = {
+      "CAN_OFF": 0, "CAN_OFF_INV": 1,
+      "SET_P": 0, "SET_P_INV": 1,
+      "RES": 0, "RES_INV": 1,
+      "SET_M": 0, "SET_M_INV": 1,
+      "DISTANCE_LESS": 0, "DISTANCE_LESS_INV": 1,
+      "DISTANCE_MORE": 0, "DISTANCE_MORE_INV": 1,
+      "MODE_X": 0, "MODE_X_INV": 1,
+      "MODE_Y": 0, "MODE_Y_INV": 1,
+      "TJA_BUTTON": 0,
+      "BIT1": 0, "BIT1_INV": 1, "BIT2": 1, "BIT3": 1,
+      "CTR": 4,
+    }
+    values.update(overrides)
+    return self.packer.make_can_msg_safety("CRZ_BTNS", 0, values)
+
+  def test_exact_cleanup_requires_tja_and_armed(self):
+    self.safety.set_controls_allowed(False)
+    self._rx_mrcc(False)
+    self.assertFalse(self.safety.safety_tx_hook(self._button()))
+    self._rx_mrcc(True)
+    self.assertTrue(self.safety.safety_tx_hook(self._button()))
+    self._init(tja_button=False)
+    self._rx_mrcc(True)
+    self.assertFalse(self.safety.safety_tx_hook(self._button()))
+
+  def test_missing_inverse_is_rejected(self):
+    self._rx_mrcc(True)
+    msg = self._button(BIT1_INV=0)
+    self.assertEqual(bytes(msg.data)[:8].hex(), "0001fed000000000")
+    self.assertFalse(self.safety.safety_tx_hook(msg))
+
+  def test_cleanup_composites_are_rejected(self):
+    self._rx_mrcc(True)
+    composites = (
+      {"SET_P": 1, "SET_P_INV": 0},
+      {"SET_M": 1, "SET_M_INV": 0},
+      {"RES": 1, "RES_INV": 0},
+      {"CAN_OFF": 1, "CAN_OFF_INV": 0},
+      {"TJA_BUTTON": 1},
+      {"MODE_X": 1, "MODE_X_INV": 0},
+      {"MODE_Y": 1, "MODE_Y_INV": 0},
+      {"DISTANCE_LESS": 1, "DISTANCE_LESS_INV": 0},
+      {"DISTANCE_MORE": 1, "DISTANCE_MORE_INV": 0},
+    )
+    for fields in composites:
+      with self.subTest(fields=fields):
+        self.assertFalse(self.safety.safety_tx_hook(self._button(**fields)))
+
+  def test_normal_cancel_and_resume_unchanged(self):
+    self.safety.set_controls_allowed(False)
+    cancel = self._button(BIT1=1, BIT1_INV=0, CAN_OFF=1, CAN_OFF_INV=0)
+    resume = self._button(BIT1=1, BIT1_INV=0, RES=1, RES_INV=0)
+    self.assertTrue(self.safety.safety_tx_hook(cancel))
+    self.assertFalse(self.safety.safety_tx_hook(resume))
+    self.safety.set_controls_allowed(True)
+    self.assertTrue(self.safety.safety_tx_hook(cancel))
+    self.assertTrue(self.safety.safety_tx_hook(resume))
 
 
 class TestMazdaTjaMads(unittest.TestCase):

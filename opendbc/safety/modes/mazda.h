@@ -40,7 +40,17 @@ static bool mazda_longitudinal = false;
 // Declared by the driver: the TJA button owns lateral and MRCC no longer drives the main edge.
 static bool mazda_tja_button = false;
 static bool mazda_steer_to_zero_eps = false;
+static bool mazda_acc_armed = false;
 static uint32_t mazda_engage_btn_frames = 0U;
+
+static bool mazda_mrcc_off_msg_valid(const CANPacket_t *msg) {
+  // Exact active-low MRCC master tap captured on CX-5 2022. CTR occupies the
+  // variable bits in byte 3; all other button and payload bits stay pinned.
+  return (GET_LEN(msg) == 8U) && (msg->data[0] == 0x00U) &&
+         (msg->data[1] == 0x81U) && (msg->data[2] == 0xfeU) &&
+         ((msg->data[3] & 0xc3U) == 0xc0U) && (msg->data[4] == 0x00U) &&
+         (msg->data[5] == 0x00U) && (msg->data[6] == 0x00U) && (msg->data[7] == 0x00U);
+}
 
 // Mirror carstate's radar-ownership guard so panda and MADS arm on the same edge. Start the
 // 50 Hz clock from the first synthetic CRZ_INFO because rx never sees the stock copy.
@@ -121,6 +131,7 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
     if ((msg->addr == MAZDA_CRZ_CTRL) && !mazda_longitudinal) {
       bool cruise_engaged = msg->data[0] & 0x8U;
       pcm_cruise_check(cruise_engaged);
+      mazda_acc_armed = GET_BIT(msg, 17U);
       // With the TJA button owning lateral, MRCC no longer drives the MADS main edge.
       if (!mazda_tja_button) {
         acc_main_on = GET_BIT(msg, 17U);
@@ -167,6 +178,7 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
         bool acc_armed = GET_BIT(msg, 2U) || cruise_engaged;
 
         if (acc_armed || cruise_engaged_prev || (!brake && !brake_pressed_prev)) {
+          mazda_acc_armed = acc_armed;
           // Gate the main edge on radar ownership to align with software availability.
           if (!mazda_tja_button) {
             acc_main_on = acc_armed && mazda_radar_was_silenced;
@@ -301,8 +313,11 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
 
   if (main_bus && (msg->addr == MAZDA_CRZ_BTNS)) {
     // Permit resume only while controlling and cancel only while not controlling.
-    bool cancel_cmd = (msg->data[0] == 0x1U);
-    if (!controls_allowed && !cancel_cmd) {
+    bool cancel_cmd = (msg->data[0] == 0x1U) && GET_BIT(msg, 16U);
+    // TJA also arms MRCC on the shared main bus. Permit only the byte-exact
+    // active-low MRCC-off tap, and only while Mazda reports MRCC already armed.
+    const bool mrcc_off_cmd = mazda_tja_button && mazda_acc_armed && mazda_mrcc_off_msg_valid(msg);
+    if (!controls_allowed && !cancel_cmd && !mrcc_off_cmd) {
       tx = false;
     }
   }
@@ -332,6 +347,7 @@ static safety_config mazda_init(uint16_t param) {
   mazda_radar_mastered = false;
   mazda_mastered_pedals_frames = 0U;
   mazda_radar_was_silenced = false;
+  mazda_acc_armed = false;
 
   static const CanMsg MAZDA_TX_MSGS[] = {
     {MAZDA_LKAS, 0, 8, .check_relay = true, .disable_static_blocking = true},
