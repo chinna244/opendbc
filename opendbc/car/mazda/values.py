@@ -170,9 +170,7 @@ class MazdaFlags(IntFlag):
   # Everything keyed on the measured hardware rather than on what the firmware permits.
   EPS_HW = STEER_TO_ZERO_EPS | LEGACY_FW_EPS
 
-  # The 2016.5-era radar kept by an EPS-swapped older body. fingerprints.py lists it for
-  # fingerprinting, but it never sends tracks on bus 0; alpha-long replays its own dialect
-  # instead of the 2022 captures (mazdacan.py).
+  # The 2016.5-era radar; see G46L_RADAR_FW below for what makes it special.
   G46L_RADAR = 4
 
 
@@ -204,14 +202,14 @@ class MazdaPlatformConfig(PlatformConfig):
 class CAR(Platforms):
   MAZDA_CX5_KE = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-5 2012-16")],
-    MazdaCarSpecs(mass=3433 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=18.1),  #steerRatio copied from 22 CX-5, same hardware
+    MazdaCarSpecs(mass=3433 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=18.1),  # steer ratio from the 2022 CX-5: same rack hardware
     # This radar does not publish 0x361-0x366 tracks on bus 0.
     dbc_dict={Bus.pt: 'mazda_2017'},
     wmis={WMI.JAPAN_CROSSOVER}, chassis_codes={'KE'}, years={'C', 'D', 'E', 'F', 'G'},  # 2012-16
   )
   MAZDA_CX5 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-5 2017-21")],
-    MazdaCarSpecs(mass=3655 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=18.1),  #steerRatio copied from 22 CX-5, same hardware
+    MazdaCarSpecs(mass=3655 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=18.1),  # steer ratio from the 2022 CX-5: same rack hardware
     wmis={WMI.JAPAN_CROSSOVER}, chassis_codes={'KF'}, years={'H', 'J', 'K', 'L', 'M'},  # 2017-21
   )
   MAZDA_CX9 = MazdaPlatformConfig(
@@ -255,11 +253,9 @@ STEER_TO_ZERO_EPS_FW = {
   b'KSD5-3210X-C-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
 }
 
-# The 2016.5-era radar kept by an EPS-swapped older body. fingerprints.py lists it for
-# fingerprinting, but it never publishes 0x361-0x366 on bus 0: the interface keeps it off
-# the track dialects (vision-only under stock longitudinal), and alpha-long replays this
-# radar's own dialect instead of the 2022 templates (mazdacan.py). Stored unpadded; the
-# interface matches with nulls stripped so response padding cannot break it.
+# The 2016.5-era radar kept by an EPS-swapped older body. Listed for fingerprinting, but
+# it never publishes 0x361-0x366 on bus 0. Stored unpadded; matched with nulls stripped so
+# UDS response padding cannot break it.
 G46L_RADAR_FW = {
   b'G46L-67XA1-C',
 }

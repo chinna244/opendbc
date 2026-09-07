@@ -12,9 +12,7 @@ from opendbc.car.mazda.values import CAR, DBC, G46L_RADAR_FW, LKAS_LIMITS, STEER
 # Radar firmware whose bus publishes the 0x361-0x366 track dialect: every radar the
 # database lists except the G46L, which it lists for fingerprinting even though that
 # radar never sends tracks on bus 0. Stored null-stripped so UDS response padding of any
-# length compares equal. A talking radar outside this set behind a claiming platform (an
-# EPS-swapped older body with a carried-forward bundle) gets the vision-only path; a
-# silent one (empty fw query) keeps the platform's word.
+# length compares equal.
 TRACK_RADAR_FW = {fw.rstrip(b'\x00') for fw in set().union(
   *(fw.get((structs.CarParams.Ecu.fwdRadar, 0x764, None), []) for fw in FW_VERSIONS.values())
 )} - G46L_RADAR_FW
@@ -52,7 +50,6 @@ class CarInterface(CarInterfaceBase):
       ret.safetyConfigs[0].safetyParam |= MazdaSafetyFlags.LEGACY_FW_EPS.value
 
     # The G46L is the one foreign radar whose dialect alpha-long can replay (mazdacan.py).
-    # Detected with nulls stripped so UDS response padding cannot break the match.
     g46l_radar = any(fw.ecu == 'fwdRadar' and fw.fwVersion.rstrip(b'\x00') in G46L_RADAR_FW for fw in car_fw)
     if g46l_radar:
       ret.flags |= MazdaFlags.G46L_RADAR.value

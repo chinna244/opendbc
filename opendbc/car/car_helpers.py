@@ -170,8 +170,7 @@ def get_car(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multip
 
   if fixed_fingerprint and vin != VIN_UNKNOWN:
     # A carried-forward CarPlatformBundle can disagree with the physical car after a
-    # hardware swap or a branch switch without reinstall. A swap cannot change the VIN,
-    # so a VIN that identifies exactly one other platform is worth a loud line in the log.
+    # hardware swap or a branch switch without reinstall.
     vin_platform = platform_from_vin(vin)
     if vin_platform is not None and vin_platform != candidate:
       carlog.warning({"event": "platformBundleVinMismatch", "bundle": str(candidate), "vin_platform": vin_platform,
