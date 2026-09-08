@@ -170,6 +170,9 @@ class MazdaFlags(IntFlag):
   # Everything keyed on the measured hardware rather than on what the firmware permits.
   EPS_HW = STEER_TO_ZERO_EPS | LEGACY_FW_EPS
 
+  # The G46L radar's dialect bit; see G46L_RADAR_FW below.
+  G46L_RADAR = 8
+
 
 class MazdaSafetyFlags(IntFlag):
   LONG = 1
@@ -197,9 +200,16 @@ class MazdaPlatformConfig(PlatformConfig):
 
 
 class CAR(Platforms):
+  MAZDA_CX5_KE = MazdaPlatformConfig(
+    [MazdaCarDocs("Mazda CX-5 2012-16")],
+    MazdaCarSpecs(mass=3433 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=18.1),  # steer ratio from the 2022 CX-5: same rack hardware
+    # This radar does not publish 0x361-0x366 tracks on bus 0.
+    dbc_dict={Bus.pt: 'mazda_2017'},
+    wmis={WMI.JAPAN_CROSSOVER}, chassis_codes={'KE'}, years={'C', 'D', 'E', 'F', 'G'},  # 2012-16
+  )
   MAZDA_CX5 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-5 2017-21")],
-    MazdaCarSpecs(mass=3655 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=15.5),
+    MazdaCarSpecs(mass=3655 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=18.1),  # steer ratio from the 2022 CX-5: same rack hardware
     wmis={WMI.JAPAN_CROSSOVER}, chassis_codes={'KF'}, years={'H', 'J', 'K', 'L', 'M'},  # 2017-21
   )
   MAZDA_CX9 = MazdaPlatformConfig(
@@ -243,6 +253,13 @@ STEER_TO_ZERO_EPS_FW = {
   b'KSD5-3210X-C-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
 }
 
+# The 2016.5-era radar kept by an EPS-swapped older body. Listed for fingerprinting, but
+# it never publishes 0x361-0x366 on bus 0; its one frame is fully static — no counter, no
+# checksum. Stored unpadded; matched with nulls stripped so UDS padding cannot break it.
+G46L_RADAR_FW = {
+  b'G46L-67XA1-C',
+}
+
 
 class Buttons:
   NONE = 0
@@ -252,27 +269,34 @@ class Buttons:
   CANCEL = 4
 
 
-def match_fw_to_car_fuzzy(live_fw_versions, vin, offline_fw_versions) -> set[str]:
-  # After firmware matching fails, require VIN fields to identify one chassis platform.
+def platform_from_vin(vin: str) -> str | None:
+  """The one platform the VIN's fields identify, or None when the VIN is unknown to
+  every platform or ambiguous.
+
+  Shared by the fuzzy firmware fallback and the selected-car/VIN mismatch warning.
+  """
   if not is_valid_vin(vin):
-    return set()
+    return None
 
   vin_obj = Vin(vin)
   chassis_code = vin_obj.vds[0:2]
   year = vin_obj.vis[0]
 
-  candidates = set()
-  for platform in CAR:
-    platform_config = platform.config
-    if vin_obj.wmi in platform_config.wmis and chassis_code in platform_config.chassis_codes and year in platform_config.years:
-      candidates.add(platform)
+  candidates = {platform for platform in CAR
+                if vin_obj.wmi in platform.config.wmis and chassis_code in platform.config.chassis_codes
+                and year in platform.config.years}
+  return str(next(iter(candidates))) if len(candidates) == 1 else None
 
-  if len(candidates) == 1:
-    carlog.error(f"Fingerprinted {next(iter(candidates))} by VIN")
-    return {str(c) for c in candidates}
+
+def match_fw_to_car_fuzzy(live_fw_versions, vin, offline_fw_versions) -> set[str]:
+  # After firmware matching fails, require VIN fields to identify one chassis platform.
+  platform = platform_from_vin(vin)
+  if platform is not None:
+    carlog.error(f"Fingerprinted {platform} by VIN")
+    return {platform}
 
   # Only export VINs without model-year data continue to the EPS-swap fallback.
-  if vin_obj.wmi != WMI.OCEANIA_EXPORT:
+  if not is_valid_vin(vin) or Vin(vin).wmi != WMI.OCEANIA_EXPORT:
     return set()
 
   # Export-car swaps require a recognized EPS and an engine that identifies one platform.

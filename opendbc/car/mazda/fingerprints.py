@@ -67,6 +67,23 @@ FW_VERSIONS = {
       b'SH51-21PS1-C\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
     ],
   },
+  CAR.MAZDA_CX5_KE: {
+    (Ecu.engine, 0x7e0, None): [
+      b'PYAS-188K2-C\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+    ],
+    (Ecu.fwdRadar, 0x764, None): [
+      b'G46L-67XA1-C\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+    ],
+    (Ecu.abs, 0x760, None): [
+      b'KA0G-437AS-0-03\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+    ],
+    (Ecu.fwdCamera, 0x706, None): [
+      b'GMG6-67XK2-G\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+    ],
+    (Ecu.transmission, 0x7e1, None): [
+      b'PYAS-21PS1-D\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+    ],
+  },
   CAR.MAZDA_CX5: {
     (Ecu.eps, 0x730, None): [
       b'K319-3210X-A-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',

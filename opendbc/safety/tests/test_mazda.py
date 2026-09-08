@@ -435,6 +435,18 @@ class TestMazdaLongitudinalSafety(TestMazdaSteerToZeroEpsSafety, common.Longitud
         for addr, dat in radar_messages.items():
           self.assertTrue(self._tx(common.make_msg(bus, addr, 8, dat)))
 
+  def test_g46l_radar_static_allowed(self):
+    # the 2016.5 G46L body's own static capture; the 2022 one above is not its frame, and
+    # the G46L never sends track messages at all
+    for controls_allowed in (False, True):
+      self.safety.set_controls_allowed(controls_allowed)
+      for bus in (0, 2):
+        self.assertTrue(self._tx(common.make_msg(bus, 0x499, 8, bytes.fromhex("0098400000000000"))))
+
+    self.safety.set_controls_allowed(True)
+    for bus in (0, 2):
+      self.assertFalse(self._tx(common.make_msg(bus, 0x499, 8, bytes.fromhex("0098400100000000"))))
+
   def test_synthetic_lead_radar_track_allowed_disengaged(self):
     # Permit the measurement fields while requiring the occupied-track template. The slot is
     # perception, not actuation, so it remains valid with controls_allowed low like stock radar

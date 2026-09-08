@@ -128,6 +128,13 @@ def test_radar_frames_counter_and_lead_track():
   assert tracks[0x364] == "0a4e00001c00000f"
 
 
+def test_g46l_radar_frames_are_the_static_capture_alone():
+  # the G46L never sends track messages, lead or not: the lead rides CRZ_CTRL alone
+  for lead in (None, (10.25, 0.)):
+    frames = mazdacan.create_radar_frames(0, 15, lead, g46l=True)
+    assert [(f.address, f.dat.hex(), f.src) for f in frames] == [(0x499, "0098400000000000", 0)]
+
+
 def test_lead_track_constant_bytes_match_the_stock_release_capture():
   # the template's measurement fields are zeroed, so a zero-range lead reproduces it exactly
   assert mazdacan.create_lead_track(0., 0.) == mazdacan.LEAD_TRACK_TEMPLATE

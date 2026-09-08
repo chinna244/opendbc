@@ -18,6 +18,10 @@ LEAD_TRACK_TEMPLATE = bytes.fromhex("000e00001c000000")
 DIST_OBJ_SCALE = 0.0625   # m per bit, DIST_OBJ and RELV_OBJ share it
 DIST_OBJ_MAX = 255.875    # m, the full-scale DIST_OBJ reading a track can carry
 
+# The G46L radar (2016.5 bodies) sends only this static frame and no track messages at
+# all, so the lead rides CRZ_CTRL alone; fully static — no counter, no checksum.
+G46L_RADAR_STATIC_MSG = (0x499, bytes.fromhex("0098400000000000"))
+
 
 def crz_info_checksum(dat: bytes) -> int:
   # Invert the sum of the first seven bytes, excluding STOPPING and RESUME_UNLATCHING.
@@ -82,8 +86,10 @@ def create_lead_track(d_rel: float, v_rel: float) -> bytes:
   return bytes(dat)
 
 
-def create_radar_frames(bus, counter, lead):
+def create_radar_frames(bus, counter, lead, g46l=False):
   """lead is the (dRel, vRel) of the object to advertise on 0x364, or None for an empty slot."""
+  if g46l:
+    return [CanData(G46L_RADAR_STATIC_MSG[0], G46L_RADAR_STATIC_MSG[1], bus)]
   frames = [CanData(RADAR_STATIC_MSG[0], RADAR_STATIC_MSG[1], bus)]
   for addr, dat in RADAR_TRACK_MSGS.items():
     if lead is not None and addr == LEAD_TRACK_ADDR:
