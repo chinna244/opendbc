@@ -100,16 +100,6 @@ class CarControllerParams:
       self.STEER_DRIVER_SAMPLES = 10
       self.STEER_DRIVER_MARGIN = 2
 
-      # A panda rejection resets its rate-limit reference to zero, so every later frame more
-      # than one step from zero is rejected too and the EPS stops receiving 0x243. About 0.6 s
-      # into that silence the EPS raises STEER_RATE.LKAS_FAULT and the camera faults 5.3 s
-      # later; neither clears before the next ignition cycle. The EPS echoes the last request
-      # it received in STEER_RATE.LKAS_REQUEST, so an echo that matches none of the recent
-      # commands means they are being rejected, and the ramp restarts from zero, which the
-      # panda accepts. See docs/zoompilot/mazda-lateral.md, "LKAS_FAULT".
-      self.STEER_ECHO_HISTORY = 4            # commands the 83 Hz echo may lag behind
-      self.STEER_ECHO_MISMATCH_FRAMES = 5    # 50 ms without a matching echo restarts the ramp
-
       # STEER_MAX scales normalized torque into counts; EPS_CEILING_LOOKUP is the applied limit.
       # Legacy firmware never commands below its 45 kph floor, so the low-speed scale is moot
       # there and the rest of the schedule is the same hardware.

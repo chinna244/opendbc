@@ -209,57 +209,53 @@ class TestRejectionRecovery:
   """A panda rejection resets its rate-limit reference to zero, so a controller that keeps ramping is
   rejected on every later frame and the EPS loses its 0x243 stream (route 00000148: 1.72 s, route
   00000139: 0.75 s, drive_02: 0.63 s). About 0.6 s in the EPS raises LKAS_FAULT and the camera
-  faults 5.3 s later. The EPS echoes the last request it received; when that echo stops matching
-  the recent commands the controller restarts its ramp from zero, which the panda accepts."""
+  faults 5.3 s later. The panda reports every frame it refused back on the can stream, carstate
+  counts the torque requests among them, and the controller restarts its ramp from zero, which is
+  the one place the panda accepts next."""
 
   LAT = dict(long_active=False, enabled=True, lat_active=True, torque=1.0, v_ego=10.)
 
-  def test_a_following_echo_never_restarts_the_ramp(self, stock_cc, stock_cs):
-    echo = None
+  def test_no_report_never_restarts_the_ramp(self, stock_cc, stock_cs):
     for _ in range(60):
-      actuators, _ = step(stock_cc, stock_cs, lkas_request_echo=echo, **self.LAT)
-      echo = actuators.torqueOutputCan  # the EPS reports last frame's command this frame
-    assert stock_cc.apply_torque_last == 60 * stock_cc.params.STEER_DELTA_UP
+      actuators, _ = step(stock_cc, stock_cs, lkas_rejected=0, **self.LAT)
+    assert actuators.torqueOutputCan == 60 * stock_cc.params.STEER_DELTA_UP
 
-  def test_an_echo_two_frames_behind_is_still_a_match(self, stock_cc, stock_cs):
-    sent = [0, 0, 0]
-    for _ in range(60):
-      actuators, _ = step(stock_cc, stock_cs, lkas_request_echo=sent[-3], **self.LAT)
-      sent.append(actuators.torqueOutputCan)
-    assert stock_cc.apply_torque_last == 60 * stock_cc.params.STEER_DELTA_UP
-
-  def test_a_frozen_echo_restarts_the_ramp_from_zero(self, stock_cc, stock_cs):
+  def test_a_reported_rejection_restarts_from_one_step_of_zero(self, stock_cc, stock_cs):
     params = stock_cc.params
     for _ in range(30):
-      actuators, _ = step(stock_cc, stock_cs, lkas_request_echo=stock_cc.apply_torque_last, **self.LAT)
-    frozen = actuators.torqueOutputCan  # the last command the panda accepted
-    # every later command is rejected: the echo stays where it was. It leaves the command
-    # history after STEER_ECHO_HISTORY frames and the mismatch count runs from there.
-    for _ in range(params.STEER_ECHO_HISTORY + params.STEER_ECHO_MISMATCH_FRAMES - 1):
-      actuators, _ = step(stock_cc, stock_cs, lkas_request_echo=frozen, **self.LAT)
-    assert actuators.torqueOutputCan > frozen  # still ramping, not yet convinced
-    actuators, _ = step(stock_cc, stock_cs, lkas_request_echo=frozen, **self.LAT)
+      actuators, _ = step(stock_cc, stock_cs, lkas_rejected=0, **self.LAT)
+    assert actuators.torqueOutputCan == 30 * params.STEER_DELTA_UP
+    actuators, _ = step(stock_cc, stock_cs, lkas_rejected=1, **self.LAT)
     assert actuators.torqueOutputCan == params.STEER_DELTA_UP  # one step from zero
     # delivery resumes and the ramp rebuilds from there
     for i in range(2, 10):
-      actuators, _ = step(stock_cc, stock_cs, lkas_request_echo=stock_cc.apply_torque_last, **self.LAT)
+      actuators, _ = step(stock_cc, stock_cs, lkas_rejected=0, **self.LAT)
       assert actuators.torqueOutputCan == i * params.STEER_DELTA_UP
 
-  def test_nothing_to_recover_while_commanding_zero(self, stock_cc, stock_cs):
-    # a stale echo (the camera's or a stale EPS report) while we send zero is not a rejection
+  def test_every_reported_rejection_restarts_again(self, stock_cc, stock_cs):
+    # a stream the panda keeps refusing (its lateral not armed) holds at one step, never ramps
+    # blind to the rail
     for _ in range(20):
-      step(stock_cc, stock_cs, lkas_request_echo=500, long_active=False, enabled=False, lat_active=False, v_ego=10.)
-    assert stock_cc.echo_mismatch_frames == 0
-    actuators, _ = step(stock_cc, stock_cs, lkas_request_echo=0, **self.LAT)
+      actuators, _ = step(stock_cc, stock_cs, lkas_rejected=1, **self.LAT)
+      assert actuators.torqueOutputCan == stock_cc.params.STEER_DELTA_UP
+
+  def test_a_rejection_while_commanding_zero_changes_nothing(self, stock_cc, stock_cs):
+    for _ in range(20):
+      actuators, _ = step(stock_cc, stock_cs, lkas_rejected=1, long_active=False, enabled=False, lat_active=False, v_ego=10.)
+      assert actuators.torqueOutputCan == 0
+    assert stock_cc.apply_torque_last == 0
+    actuators, _ = step(stock_cc, stock_cs, lkas_rejected=0, **self.LAT)
     assert actuators.torqueOutputCan == stock_cc.params.STEER_DELTA_UP
 
-  def test_no_echo_yet_means_no_recovery(self, stock_cc, stock_cs):
+  def test_the_restart_applies_on_every_envelope(self):
+    # the panda's reset is the same whatever the EPS, so the legacy platforms restart too
+    cc = car_controller(alpha_long=False, candidate=CAR.MAZDA_CX9_2021)
+    cs = mazda_car_state(cc.CP, cc.CP_SP)
     for _ in range(30):
-      actuators, _ = step(stock_cc, stock_cs, lkas_request_echo=None, **self.LAT)
-    assert actuators.torqueOutputCan == 30 * stock_cc.params.STEER_DELTA_UP
-
-  def test_no_echo_constants_on_the_upstream_envelope(self):
-    assert not hasattr(upstream_params(), 'STEER_ECHO_HISTORY')
+      step(cc, cs, lkas_rejected=0, **self.LAT)
+    assert cc.apply_torque_last == 30 * cc.params.STEER_DELTA_UP
+    actuators, _ = step(cc, cs, lkas_rejected=1, **self.LAT)
+    assert actuators.torqueOutputCan == cc.params.STEER_DELTA_UP
 
 
 class TestDriverTorqueHeadroom:

@@ -10,7 +10,7 @@ under braking, cruiseState.standstill and the LKAS non-delivery latch.
 """
 import pytest
 
-from opendbc.car import DT_CTRL
+from opendbc.car import Bus, DT_CTRL
 from opendbc.car import structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda import mazdacan
@@ -423,12 +423,54 @@ class TestLkasFaultBit:
     assert rig.CS.lkas_fault
     assert not ret.steerFaultPermanent  # the camera's ERR_BIT_1 reports it, as before
 
-  def test_the_echo_reaches_the_controller(self):
+
+class TestRejectionReport:
+  """The panda puts every frame its tx hook refused back on the can stream with src = bus + 0xC0;
+  carstate counts our refused torque requests so the controller can restart its ramp."""
+
+  @staticmethod
+  def lkas(request):
+    return packer().make_can_msg("CAM_LKAS", 0, {"LKAS_REQUEST": request})[1]
+
+  def test_a_refused_torque_request_is_counted_once(self):
     rig = UndeliveredRig()
-    assert rig.CS.lkas_request_echo is None
-    for _ in range(2):  # the parser arms a message on its first frame
-      rig.step(-312, 0, 1, track_state=1)
-    assert rig.CS.lkas_request_echo == -312
+    rig.step(0, 0, 0)
+    assert rig.CS.lkas_rejected == 0
+    feed(rig.CI, rig.frame + 1, (0x243, self.lkas(312), 192))
+    assert rig.CS.lkas_rejected == 1
+    # the count is per cycle: nothing refused next frame means zero
+    rig.step(0, 0, 0)
+    assert rig.CS.lkas_rejected == 0
+
+  def test_several_in_one_cycle_are_all_counted(self):
+    rig = UndeliveredRig()
+    feed(rig.CI, 1, (0x243, self.lkas(312), 192), (0x243, self.lkas(324), 192))
+    assert rig.CS.lkas_rejected == 2
+
+  def test_only_the_rejected_bus_counts(self):
+    # the camera's own 0x243 (bus 2), the panda's echo of an accepted one (bus 128) and a frame
+    # on the main bus are not rejections
+    rig = UndeliveredRig()
+    for src in (0, 2, 128):
+      feed(rig.CI, 1, (0x243, self.lkas(312), src))
+      assert rig.CS.lkas_rejected == 0
+
+  def test_a_refused_zero_request_is_not_counted(self):
+    # the panda refuses every LKA frame while it is not controlling; those carry nothing
+    rig = UndeliveredRig()
+    feed(rig.CI, 1, (0x243, self.lkas(0), 192), (0x243, self.lkas(0), 192))
+    assert rig.CS.lkas_rejected == 0
+    feed(rig.CI, 2, (0x243, self.lkas(0), 192), (0x243, self.lkas(-12), 192))
+    assert rig.CS.lkas_rejected == 1
+
+  def test_the_report_never_touches_can_validity(self):
+    # nothing is ever refused on a clean drive, and the parser must not miss it
+    rig = UndeliveredRig()
+    for _ in range(300):  # 3 s, past every timeout the parser knows
+      rig.step(300, 300, 0)
+    loopback = rig.CI.can_parsers[Bus.loopback]
+    assert loopback.can_valid
+    assert not loopback.bus_timeout
 
 
 class TestSteerUndeliveredLatch:

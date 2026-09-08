@@ -34,8 +34,9 @@ class CarState(CarStateBase, CarStateExt):
     self.steer_undelivered = False
     self.steer_undelivered_alert = False
     self.lkas_block_origin_speed: float | None = None
-    # The EPS echoes the last LKAS_REQUEST it received; None until its first STEER_RATE.
-    self.lkas_request_echo: int | None = None
+    # Our 0x243 frames the panda refused since the last cycle, reported back on the can stream
+    # with src 192 (bus 0 + 0xC0). Zero-torque refusals while disengaged are not counted.
+    self.lkas_rejected = 0
     self.lkas_fault = False
 
     self.distance_button = 0
@@ -155,14 +156,16 @@ class CarState(CarStateBase, CarStateExt):
     # LKAS_EFFECTIVE distinguishes partial delivery from a complete block.
     self.lkas_blocked = lkas_blocked
     self.lkas_effective = cp.vl["STEER_RATE"]["LKAS_EFFECTIVE"]
-    self.lkas_request_echo = int(cp.vl["STEER_RATE"]["LKAS_REQUEST"])
     lkas_track_state = cp.vl["STEER_RATE"]["LKAS_TRACK_STATE"] == 1
     # The 2022 EPS raises LKAS_FAULT once its 0x243 stream has stopped for about 0.6 s; the
     # camera's own fault follows 5.3 s later and neither clears before the next ignition cycle.
     # Decoded for the log and tooling; the driver-facing fault stays the camera's own.
     self.lkas_fault = cp.vl["STEER_RATE"]["LKAS_FAULT"] == 1
+    # The panda refuses every LKA frame while it is not controlling, so a refused zero-torque
+    # frame carries nothing the controller needs; count the torque requests it turned away.
+    self.lkas_rejected = sum(1 for v in can_parsers[Bus.loopback].vl_all["CAM_LKAS"]["LKAS_REQUEST"] if v != 0)
     if self.CP.flags & MazdaFlags.STEER_TO_ZERO_EPS:
-      self.update_steer_undelivered(ret.vEgoRaw, self.lkas_request_echo, lkas_blocked, lkas_track_state)
+      self.update_steer_undelivered(ret.vEgoRaw, cp.vl["STEER_RATE"]["LKAS_REQUEST"], lkas_blocked, lkas_track_state)
 
     if not self.CP.flags & MazdaFlags.STEER_TO_ZERO_EPS:
       # LKAS is enabled at 52kph going up and disabled at 45kph going down
@@ -328,4 +331,7 @@ class CarState(CarStateBase, CarStateExt):
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, 0),
       Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], cam_messages, 2),
+      # Our own 0x243 frames the panda refused, reported back with src = bus + 0xC0. Sporadic by
+      # nature, so never part of canValid or canTimeout.
+      Bus.loopback: CANParser(DBC[CP.carFingerprint][Bus.pt], [("CAM_LKAS", float("nan"))], 192),
     }
