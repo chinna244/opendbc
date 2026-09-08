@@ -12,6 +12,7 @@ FSC_SETTLE_FRAMES = int(CarControllerParams.FSC_SETTLE_T / DT_CTRL)
 STOCK_RADAR_ALIVE_FRAMES = int(CarControllerParams.STOCK_RADAR_ALIVE_T / DT_CTRL)
 STOCK_RADAR_GUARD_FRAMES = round(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CTRL)
 CANCEL_CONTEXT_FRAMES = int(CarControllerParams.CANCEL_CONTEXT_T / DT_CTRL)
+STOCK_CTS_FRAMES = 100  # 1 s at 100 Hz
 CAM_LANEINFO_FRESH_FRAMES = int(CarControllerParams.CAM_LANEINFO_FRESH_T / DT_CTRL)
 
 
@@ -38,6 +39,8 @@ class CarState(CarStateBase, CarStateExt):
     # with src 192 (bus 0 + 0xC0). Zero-torque refusals while disengaged are not counted.
     self.lkas_rejected = 0
     self.lkas_fault = False
+    # Frames the camera's own 0x243 has carried a torque request with its TJA/CTS state on.
+    self.stock_cts_frames = 0
 
     self.distance_button = 0
     self.accel_button = 0
@@ -280,6 +283,22 @@ class CarState(CarStateBase, CarStateExt):
     self.cam_lkas = cp_cam.vl["CAM_LKAS"]
     self.cam_laneinfo = cp_cam.vl["CAM_LANEINFO"]
     ret.steerFaultPermanent = cp_cam.vl["CAM_LKAS"]["ERR_BIT_1"] == 1
+
+    # Stock TJA/CTS steering at the same time as openpilot. The camera's TJA state is on (0x440
+    # TJA nonzero, it is 0 until the driver presses the TJA button) and its own 0x243 carries a
+    # torque request the panda drops on the floor: the EPS follows ours and echoes ours back,
+    # so the camera never sees its command executed. One user's CTS-enabled CX-5 2022 ran like
+    # this for a whole drive (route 0000007b--9b17f2dc01, TJA 4, request nonzero on 955 of 959
+    # camera frames) and reported the cluster's camera malfunction warning every few minutes.
+    # A second of sustained request separates it from a lane-departure nudge, and a second of
+    # quiet clears it, so the request crossing zero mid-steer does not blink the alert.
+    stock_cts_steering = (cam_laneinfo_fresh and self.cam_laneinfo["TJA"] != 0 and
+                          self.cam_lkas["LKAS_REQUEST"] != 0)
+    if stock_cts_steering:
+      self.stock_cts_frames = min(self.stock_cts_frames + 1, 2 * STOCK_CTS_FRAMES)
+    else:
+      self.stock_cts_frames = max(self.stock_cts_frames - 1, 0)
+    ret.stockLkas = self.stock_cts_frames >= STOCK_CTS_FRAMES
 
     # Decode distance, set-speed, resume, cancel, and main-button events.
     prev_distance_button = self.distance_button
