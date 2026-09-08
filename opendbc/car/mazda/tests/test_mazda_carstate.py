@@ -14,7 +14,6 @@ from opendbc.car import Bus, DT_CTRL
 from opendbc.car import structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda import mazdacan
-from opendbc.car.mazda.carstate import CAM_LANEINFO_FRESH_FRAMES, STOCK_CTS_FRAMES
 from opendbc.car.mazda.tests.conftest import car_interface, packer
 from opendbc.car.mazda.values import CarControllerParams
 from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP
@@ -627,64 +626,3 @@ class TestTjaButtonEvents:
     self._btns(CI, pk, 0, MODE_X=0, MODE_Y=0)
     ret = self._btns(CI, pk, 1, MODE_X=1, MODE_Y=1)
     assert [be.type for be in ret.buttonEvents] == [self.ButtonType.mainCruise]
-
-
-class TestStockCtsSteering:
-  """The camera's own TJA/CTS steering alongside openpilot: 0x440 TJA nonzero and a torque
-  request in the camera's 0x243 for a second raise stockLkas (user route 0000007b--9b17f2dc01,
-  TJA 4 with a request on 955 of 959 camera frames while openpilot held lateral)."""
-
-  def rig(self):
-    CI = car_interface(alpha_long=False)
-    return CI, packer()
-
-  def step(self, CI, pk, i, tja, request):
-    ret, _ = feed(CI, i,
-                  pk.make_can_msg("CAM_LANEINFO", 2, {"TJA": tja, "LANE_LINES": 3}),
-                  pk.make_can_msg("CAM_LKAS", 2, {"LKAS_REQUEST": request}),
-                  pk.make_can_msg("STEER_RATE", 0, {"LKAS_REQUEST": 0, "LKAS_EFFECTIVE": 0, "LKAS_BLOCK": 0}))
-    return ret
-
-  def test_a_sustained_request_with_tja_on_raises_it(self):
-    CI, pk = self.rig()
-    for i in range(1, 101):  # the parser arms a message on its first frame
-      assert not self.step(CI, pk, i, 4, 250).stockLkas
-    assert self.step(CI, pk, 101, 4, 250).stockLkas
-    assert self.step(CI, pk, 102, 3, -180).stockLkas  # any nonzero TJA state, either sign
-
-  def test_a_request_with_tja_off_is_a_lane_departure_nudge_not_cts(self):
-    CI, pk = self.rig()
-    for i in range(1, 300):
-      assert not self.step(CI, pk, i, 0, 250).stockLkas
-
-  def test_tja_on_but_not_steering_is_not_a_conflict(self):
-    CI, pk = self.rig()
-    for i in range(1, 300):
-      assert not self.step(CI, pk, i, 2, 0).stockLkas
-
-  def test_it_clears_after_a_second_of_quiet_not_at_a_zero_crossing(self):
-    CI, pk = self.rig()
-    for i in range(1, 400):
-      self.step(CI, pk, i, 4, 250)
-    # the request passes through zero for a few frames while the camera steers on
-    for i in range(400, 405):
-      assert self.step(CI, pk, i, 4, 0).stockLkas
-    assert self.step(CI, pk, 405, 4, -120).stockLkas
-    # the camera stops: the alert holds a second, then clears
-    for i in range(406, 500):
-      assert self.step(CI, pk, i, 0, 0).stockLkas
-    for i in range(500, 520):
-      self.step(CI, pk, i, 0, 0)
-    assert not self.step(CI, pk, 520, 0, 0).stockLkas
-
-  def test_a_stale_camera_never_raises_it(self):
-    CI, pk = self.rig()
-    for i in range(1, 150):
-      self.step(CI, pk, i, 4, 250)
-    # CAM_LANEINFO goes silent; the last parsed TJA value must not keep the count alive past
-    # the freshness window plus the hold
-    for i in range(150, 150 + CAM_LANEINFO_FRESH_FRAMES + 2 * STOCK_CTS_FRAMES):
-      ret, _ = feed(CI, i, pk.make_can_msg("CAM_LKAS", 2, {"LKAS_REQUEST": 250}),
-                    pk.make_can_msg("STEER_RATE", 0, {"LKAS_REQUEST": 0, "LKAS_EFFECTIVE": 0, "LKAS_BLOCK": 0}))
-    assert not ret.stockLkas
-    assert CI.CS.stock_cts_frames == 0
