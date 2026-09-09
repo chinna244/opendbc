@@ -8,7 +8,7 @@ import pytest
 
 from opendbc.car import gen_empty_fingerprint
 from opendbc.car.mazda.interface import CarInterface
-from opendbc.car.mazda.values import CAR, MazdaFlags
+from opendbc.car.mazda.values import CAR, STEER_TO_ZERO_EPS_FW, MazdaFlags
 from opendbc.car.structs import CarParams
 from opendbc.sunnypilot.car.interfaces import (get_speed_dep_config, get_speed_dep_config_for_car, get_steer_max_schedule,
                                              get_steer_rail_schedule, get_steer_slew_schedule)
@@ -19,6 +19,18 @@ CX5_2022_SCHEDULE = ([0.0, 14.2, 14.5], [1200.0, 1200.0, 800.0])
 def cx5_2022_cp() -> CarParams:
   # the real CarParams: the 2022 EPS flag and minSteerSpeed 0 come from the interface
   cp = CarInterface.get_params(CAR.MAZDA_CX5_2022, gen_empty_fingerprint(), [], alpha_long=False, is_release=False, docs=False)
+  assert cp.flags & MazdaFlags.STEER_TO_ZERO_EPS and cp.minSteerSpeed == 0.0
+  return cp
+
+
+def ke_swapped_cp() -> CarParams:
+  # the 2016.5 report: a KE body with the 2022 CX-5 EPS the seed bins were learned under
+  fw = CarParams.CarFw()
+  fw.ecu = CarParams.Ecu.eps
+  fw.address = 0x730
+  fw.subAddress = 0
+  fw.fwVersion = sorted(STEER_TO_ZERO_EPS_FW)[0]
+  cp = CarInterface.get_params(CAR.MAZDA_CX5_KE, gen_empty_fingerprint(), [fw], alpha_long=False, is_release=False, docs=False)
   assert cp.flags & MazdaFlags.STEER_TO_ZERO_EPS and cp.minSteerSpeed == 0.0
   return cp
 
@@ -83,6 +95,19 @@ class TestSteerMaxSchedule:
     import opendbc.sunnypilot.car.interfaces as mod
     monkeypatch.setattr(mod, 'get_speed_dep_config', lambda: {'MAZDA_CX9_2021': {'requires_steer_to_zero': True, 'speed_bp': [30.0]}})
     assert get_speed_dep_config_for_car(brand_cp(**STOCK_MAZDA)) == {}
+
+  def test_ke_seeds_apply_under_the_donor_eps(self):
+    # the tables start identical: the donor EPS is the EPS the CX-5 2022 bins were
+    # learned under, and the swap carries the same STEER_MAX schedule with them
+    ke = get_speed_dep_config_for_car(ke_swapped_cp())
+    cx5_2022 = get_speed_dep_config_for_car(cx5_2022_cp())
+    for key in ('speed_bp', 'laf_bp', 'friction_bp', 'steer_max_schedule'):
+      assert ke[key] == cx5_2022[key], key
+
+  def test_ke_seeds_withheld_on_the_stock_eps(self):
+    # a stock-EPS KE keeps the flat 800-count scale, so the entry must not apply
+    cp = brand_cp(brand="mazda", fingerprint=str(CAR.MAZDA_CX5_KE), min_steer_speed=20.0)
+    assert get_speed_dep_config_for_car(cp) == {}
 
   def test_config_copy_not_cached_dict(self):
     a = get_speed_dep_config_for_car(cx5_2022_cp())

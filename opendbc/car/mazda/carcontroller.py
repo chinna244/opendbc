@@ -49,10 +49,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # scale and the non-delivery latch belong to the steer-to-zero firmware alone.
     self.eps_2022 = bool(CP.flags & MazdaFlags.EPS_HW)
     self.steer_to_zero = bool(CP.flags & MazdaFlags.STEER_TO_ZERO_EPS)
+    self.g46l = bool(CP.flags & MazdaFlags.G46L_RADAR)
     self.apply_torque_last = 0
     self.driver_torque_samples: deque[float] = deque(maxlen=self.params.STEER_DRIVER_SAMPLES if self.eps_2022 else 1)
-    self.sent_torque: deque[int] = deque(maxlen=self.params.STEER_ECHO_HISTORY if self.eps_2022 else 1)
-    self.echo_mismatch_frames = 0
     self.packer = CANPacker(dbc_names[Bus.pt])
     self.brake_counter = 0
     self.stop_and_go = StandstillHold()
@@ -91,8 +90,16 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       steer_max = self.params.STEER_MAX
 
     self.driver_torque_samples.append(CS.out.steeringTorque)
-    if self.eps_2022:
-      self.recover_from_rejection(CS)
+    if CS.lkas_rejected:
+      # The panda reports every 0x243 it refused back on the can stream (src 192). A rejection
+      # zeroes its rate-limit reference, so a controller that keeps ramping is refused on every
+      # later frame and the EPS loses its stream: LKAS_FAULT about 0.6 s in, the camera fault
+      # 5.3 s after that, neither clearing before the next ignition cycle. Only a command
+      # within one step of zero is accepted next, so the ramp restarts there. A nonzero stream
+      # refused because the panda's lateral is not armed becomes a one-step sawtooth instead of
+      # a blind ramp to the rail; the camera's own 0x243 is forwarded meanwhile. See
+      # docs/zoompilot/mazda-lateral.md, "LKAS_FAULT".
+      self.apply_torque_last = 0
 
     if CC.latActive:
       # calculate steer and also set limits due to driver torque
@@ -302,7 +309,6 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       self.tja_mrcc_armed_prev = mrcc_armed
 
     self.apply_torque_last = apply_torque
-    self.sent_torque.append(apply_torque)
 
     if self.CP.openpilotLongitudinalControl:
       can_sends.extend(self.update_longitudinal(CC, CC_SP, CS))
@@ -419,26 +425,6 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.frame += 1
     return new_actuators, can_sends
 
-  def recover_from_rejection(self, CS) -> None:
-    """Restart the steer ramp from zero once the EPS stops echoing the recent commands.
-
-    A panda rejection resets its rate-limit reference to zero, so a controller that keeps
-    ramping is rejected on every later frame and the EPS loses its 0x243 stream: it raises
-    LKAS_FAULT about 0.6 s in and the camera faults 5.3 s after that, for the rest of the
-    ignition cycle. The EPS echoes the last request it received, so an echo that matches none
-    of the recent commands means they are not arriving; a command within one step of zero is
-    what the panda accepts next.
-    """
-    echo = CS.lkas_request_echo
-    if echo is None or self.apply_torque_last == 0 or echo in self.sent_torque:
-      self.echo_mismatch_frames = 0
-      return
-    self.echo_mismatch_frames += 1
-    if self.echo_mismatch_frames >= self.params.STEER_ECHO_MISMATCH_FRAMES:
-      self.apply_torque_last = 0
-      self.sent_torque.clear()
-      self.echo_mismatch_frames = 0
-
   def resume_requested(self, CC) -> bool:
     """The resume button belongs to the stock-longitudinal path alone. Under openpilot longitudinal
     the hold is released in-protocol (stop bits drop, RESUME_UNLATCHING pulses, the command ramps),
@@ -535,7 +521,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     if radar_master and self.frame % CarControllerParams.RADAR_STEP == 0:
       for bus in LONG_BUSES:
-        can_sends.extend(mazdacan.create_radar_frames(bus, self.radar_counter, self.lead_adv.lead))
+        can_sends.extend(mazdacan.create_radar_frames(bus, self.radar_counter, self.lead_adv.lead, g46l=self.g46l))
       self.radar_counter += 1
 
     if radar_master and self.frame % CarControllerParams.LONG_STEP == 0:
