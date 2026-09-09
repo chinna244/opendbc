@@ -86,9 +86,10 @@ def car_controller(alpha_long=True, candidate=CAR.MAZDA_CX5_2022) -> CarControll
 # capnp messages
 
 def car_state(standstill=False, gas=False, brake_pressed=False, v_ego=0., driver_torque=0.,
-              steering_pressed=False, available=True, cruise_engaged=False) -> structs.CarState:
+              steering_pressed=False, available=True, cruise_engaged=False, can_valid=True) -> structs.CarState:
   """structs.CarState with the fields the controller reads off CS.out."""
   ret = structs.CarState()
+  ret.canValid = can_valid
   ret.standstill = standstill
   ret.gasPressed = gas
   ret.brakePressed = brake_pressed
@@ -134,7 +135,8 @@ def car_control_sp(handback=False, lead_d_rel=12.0, lead_v_rel=0.0, send_button=
 # CarState seeded without a bus
 
 def set_car_state(cs: CarState, out=None, *, brake_hold=False, stock_radar_alive=False, stock_radar_gone=None,
-                  fsc_settled=True, radar_was_silenced=False, radar_session_refused=False, steer_undelivered=False,
+                  fsc_settled=True, radar_was_silenced=False, radar_session_refused=False, radar_session_response=0,
+                  radar_bus_healthy=True, steer_undelivered=False,
                   lkas_blocked=False, lkas_effective=0, steer_first_engage_hold=False, lkas_allowed_speed=True, lkas_rejected=0,
                   lkas_fault=False, crz_btns_counter=0, stock_tja=0,
                   cancel_button=0, accel_button=0, decel_button=0, **out_kwargs) -> CarState:
@@ -147,6 +149,11 @@ def set_car_state(cs: CarState, out=None, *, brake_hold=False, stock_radar_alive
   """
   cs.out = out if out is not None else car_state(**out_kwargs)
   cs.brake_hold = brake_hold
+  cs.cruise_enabled = cs.out.cruiseState.enabled
+  cs.cruise_available = cs.out.cruiseState.available
+  cs.stock_radar_seen = True
+  cs.main_can_silent_frames = {name: 0 if radar_bus_healthy else 100 for name in cs.main_can_silent_frames}  # 100 > every window
+  cs.radar_session_response = radar_session_response
   if stock_radar_gone is None:
     stock_radar_gone = not stock_radar_alive
   if stock_radar_alive:

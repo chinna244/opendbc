@@ -14,6 +14,9 @@ STOCK_RADAR_GUARD_FRAMES = round(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CT
 CANCEL_CONTEXT_FRAMES = int(CarControllerParams.CANCEL_CONTEXT_T / DT_CTRL)
 CAM_LANEINFO_FRESH_FRAMES = int(CarControllerParams.CAM_LANEINFO_FRESH_T / DT_CTRL)
 STOCK_CTS_ALERT_FRAMES = int(CarControllerParams.STOCK_CTS_ALERT_T / DT_CTRL)
+# Bus witnesses at the CANParser's own validity threshold, ten periods: PEDALS 50 Hz, ENGINE_DATA 100 Hz.
+# A stricter window would revoke radar ownership on a gap the parser still accepts.
+MAIN_CAN_FRESH_FRAMES = {"PEDALS": round(0.2 / DT_CTRL), "ENGINE_DATA": round(0.1 / DT_CTRL)}
 
 
 class CarState(CarStateBase, CarStateExt):
@@ -67,12 +70,18 @@ class CarState(CarStateBase, CarStateExt):
     self.cruise_enabled_blocked = True
     self.brake_pressed_prev = False
     self.stock_radar_silent_frames = 0
+    self.stock_radar_seen = False
+    self.main_can_silent_frames = dict(MAIN_CAN_FRESH_FRAMES)
+    self.radar_control_active = False  # controller owns replacement traffic, read on the next update
+    self.radar_restore_failed = False
+    self.radar_handback_active = False
     self.radar_was_silenced = False
     self.cancel_context_frames = 0
     self.cam_laneinfo_seen = False
     self.cam_laneinfo_silent_frames = 0
     self.cam_empty_seen = False
     self.radar_session_refused = False
+    self.radar_session_response = 0
     self.fsc_settled_frames = 0
     # The body ECU owns the standstill brake hold.
     self.brake_hold = False
@@ -83,12 +92,16 @@ class CarState(CarStateBase, CarStateExt):
 
   @property
   def stock_radar_alive(self) -> bool:
-    return self.stock_radar_silent_frames < STOCK_RADAR_ALIVE_FRAMES
+    return self.stock_radar_seen and self.stock_radar_silent_frames < STOCK_RADAR_ALIVE_FRAMES
+
+  @property
+  def radar_bus_healthy(self) -> bool:
+    return all(age < MAIN_CAN_FRESH_FRAMES[name] for name, age in self.main_can_silent_frames.items())
 
   @property
   def stock_radar_gone(self) -> bool:
     # This silence duration establishes radar ownership rather than a dropped frame.
-    return self.stock_radar_silent_frames >= STOCK_RADAR_GUARD_FRAMES
+    return self.radar_bus_healthy and self.stock_radar_silent_frames >= STOCK_RADAR_GUARD_FRAMES
 
   def update_steer_undelivered(self, v_ego_raw: float, lkas_request: float) -> None:
     lkas_blocked, lkas_track_state = self.lkas_blocked, self.lkas_track_state
@@ -233,28 +246,43 @@ class CarState(CarStateBase, CarStateExt):
 
       # Block engagement until stock radar ownership is clear. Radar traffic after a completed
       # teardown is a fault and triggers the alpha-long recovery path.
+      for name, signal in (("PEDALS", "ACC_ACTIVE"), ("ENGINE_DATA", "SPEED")):
+        self.main_can_silent_frames[name] = 0 if cp.vl_all[name][signal] else min(self.main_can_silent_frames[name] + 1,
+                                                                             MAIN_CAN_FRESH_FRAMES[name])
       if len(cp.vl_all["CRZ_INFO"]["CTR"]) > 0:
+        self.stock_radar_seen = True
         self.stock_radar_silent_frames = 0
-      else:
+      elif self.radar_bus_healthy:
         self.stock_radar_silent_frames += 1
+      else:
+        # A missing vehicle bus is not proof of a silenced radar. Restart the observation
+        # guard on recovery instead of adopting an outage accumulated while disconnected.
+        self.stock_radar_silent_frames = STOCK_RADAR_ALIVE_FRAMES
 
-      # Accept positive session responses and NRC 0x78, which means response pending.
+      # Validate single-frame session responses; firmware-query ISO-TP fragments and
+      # unrelated service replies must not change session state.
       resp = cp.vl_all["RADAR_UDS_RESPONSE"]
       self.radar_session_refused = any(
-        sid == 0x7F and sub == uds.SERVICE_TYPE.DIAGNOSTIC_SESSION_CONTROL and nrc != 0x78
-        for sid, sub, nrc in zip(resp["SID"], resp["SUB"], resp["NRC"], strict=True))
-      silenced = self.stock_radar_gone
-      ret.accFaulted = self.radar_was_silenced and not silenced
+        pci == 3 and sid == 0x7F and sub == uds.SERVICE_TYPE.DIAGNOSTIC_SESSION_CONTROL and nrc != 0x78
+        for pci, sid, sub, nrc in zip(resp["PCI"], resp["SID"], resp["SUB"], resp["NRC"], strict=True))
+      self.radar_session_response = next((int(sub) for pci, sid, sub in
+                                         reversed(list(zip(resp["PCI"], resp["SID"], resp["SUB"], strict=True)))
+                                         if pci == 6 and sid == 0x50 and sub in (1, 2)), 0)
+      # Ownership is established by the silence guard and then held on the controller's claim:
+      # the radar stays in its diagnostic session through a bus blip, so recovery does not
+      # re-run the guard. Stock traffic ends the claim on the alive window either way.
+      silenced = self.radar_control_active and not self.stock_radar_alive and (self.stock_radar_gone or self.radar_was_silenced)
+      ret.accFaulted = self.radar_restore_failed or (self.radar_was_silenced and self.stock_radar_alive and not self.radar_handback_active)
       self.radar_was_silenced |= silenced
 
       # Gate enabled with available so a stock engagement inside the ownership guard cannot
       # latch MADS. Require an idle transition before adopting a later engagement.
-      if not self.radar_was_silenced:
+      if not silenced:
         self.cruise_enabled_blocked = True
       elif not self.cruise_enabled:
         self.cruise_enabled_blocked = False
 
-      ret.cruiseState.available = self.cruise_available and self.radar_was_silenced
+      ret.cruiseState.available = self.cruise_available and silenced
       ret.cruiseState.enabled = self.cruise_enabled and not self.cruise_enabled_blocked
 
       # The FSC teardown gate requires fresh, settled CAM_LANEINFO without ERR_BIT. BIT2 is

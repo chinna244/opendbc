@@ -3,12 +3,12 @@ from collections import deque
 import numpy as np
 
 from opendbc.can import CANPacker
-from opendbc.car import Bus, DT_CTRL, make_tester_present_msg, rate_limit, structs, uds
+from opendbc.car import Bus, DT_CTRL, rate_limit, structs
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.mazda import mazdacan
-from opendbc.car.mazda.longitudinal import (BREAKAWAY_FRAMES, RADAR_ADDR, AdvertisedLead, RadarSessionManager,
-                                            RadarSessionState, StandstillHold, create_radar_session_msg)
+from opendbc.car.mazda.longitudinal import BREAKAWAY_FRAMES, AdvertisedLead, StandstillHold
+from opendbc.car.mazda.radar_session import RadarSessionManager, RadarSessionState
 from opendbc.car.mazda.values import CarControllerParams, Buttons, MazdaFlags
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
@@ -196,26 +196,27 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     # Start takeover only after the FSC boot check and any stock engagement have ended.
     stock_radar_alive = CS.stock_radar_alive
-    setup_ok = CS.fsc_settled and not (stock_radar_alive and CS.out.cruiseState.enabled)
+    setup_ok = CS.fsc_settled and not (stock_radar_alive and CS.cruise_enabled)
     session_state = self.radar_session.update(setup_ok, stock_radar_alive, CC_SP.stockEcuHandBack,
                                               standstill=CS.out.standstill,
                                               session_refused=CS.radar_session_refused,
-                                              stock_radar_gone=CS.stock_radar_gone)
+                                              stock_radar_gone=CS.stock_radar_gone,
+                                              bus_healthy=CS.radar_bus_healthy and CS.out.canValid,
+                                              session_response=CS.radar_session_response, frame=self.frame)
     # Continue synthetic radar frames through hand-back to avoid a camera-visible gap.
-    radar_master = session_state in (RadarSessionState.SILENCED, RadarSessionState.HANDBACK)
+    radar_master = self.radar_session.replacement_needed(stock_radar_alive, CS.radar_bus_healthy, CS.stock_radar_gone)
+    CS.radar_control_active = radar_master and session_state == RadarSessionState.SILENCED
+    CS.radar_restore_failed = self.radar_session.handback_failed
+    CS.radar_handback_active = session_state == RadarSessionState.HANDBACK or self.radar_session.handback_completed
 
-    if self.frame % CarControllerParams.RADAR_UDS_STEP == 0:
-      if session_state == RadarSessionState.SILENCING:
-        can_sends.append(create_radar_session_msg(uds.SESSION_TYPE.PROGRAMMING))
-      elif session_state == RadarSessionState.HANDBACK:
-        can_sends.append(create_radar_session_msg(uds.SESSION_TYPE.DEFAULT))
-      elif session_state == RadarSessionState.SILENCED:
-        # Tester-present frames keep the radar silent in its diagnostic session.
-        can_sends.append(make_tester_present_msg(RADAR_ADDR, 0, suppress_response=True))
+    if self.radar_session.diagnostic_message is not None:
+      can_sends.append(self.radar_session.diagnostic_message)
 
     stopping = CC.actuators.longControlState == LongCtrlState.stopping
     # Engaged bits follow CC.enabled. Gas is an override, not a disengagement.
-    long_engaged = CC.enabled
+    control_ready = CS.radar_control_active and CS.radar_bus_healthy and CS.out.canValid
+    long_engaged = CC.enabled and control_ready
+    long_active = CC.longActive and control_ready
     sm = self.stop_and_go
     sm.update(long_engaged, stopping, CS.out.standstill, CC.actuators.accel, CS.brake_hold,
               gas_pressed=CS.out.gasPressed)
@@ -227,12 +228,12 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       # Never-latched stops relax in one frame; latched holds ramp from the relaxed command.
       self.release_ramp = CarControllerParams.ACCEL_HOLD_LATCHED if sm.latched_release else \
                           CarControllerParams.ACCEL_RELEASE_BAND
-    elif sm.holding or not CC.longActive:
+    elif sm.holding or not long_active:
       # Re-holds and driver overrides terminate the release ramp.
       self.release_ramp = None
 
     accel = 0.
-    if CC.longActive:
+    if long_active:
       accel = float(np.clip(CC.actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
       # Continue a bounded release ramp while stopped because the plan may not break static hold.
       if self.release_ramp is None or not CS.out.standstill:
@@ -283,7 +284,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       self.radar_counter += 1
 
     if radar_master and self.frame % CarControllerParams.LONG_STEP == 0:
-      acc_available = CS.out.cruiseState.available
+      # Preserve the driver's main-switch state through restoration without advertising
+      # openpilot engagement. CarState's public availability is already revoked.
+      acc_available = CS.cruise_available if session_state == RadarSessionState.HANDBACK and CS.radar_bus_healthy else \
+                      CS.out.cruiseState.available and control_ready
       # Mirror the driver's distance setting; stock defaults to gap 2.
       gap = (int(CC.hudControl.leadDistanceBars) or 2) if (long_engaged or acc_available) else 0
       acc_active_2 = sm.acc_active_2 if long_engaged else False

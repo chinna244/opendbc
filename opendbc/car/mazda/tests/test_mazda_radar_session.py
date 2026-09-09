@@ -7,22 +7,25 @@ See the LICENSE.md file in the root directory for more details.
 The radar UDS session: RadarSessionManager's bounds on its own, then what goes on the bus in
 each state driven through the real CarController.update_longitudinal.
 """
+import pytest
+
 from opendbc.car import DT_CTRL
-from opendbc.car.mazda.longitudinal import RADAR_SESSION_LIMIT_FRAMES, RadarSessionManager, RadarSessionState
+from opendbc.car.mazda.radar_session import RADAR_SESSION_LIMIT_FRAMES, RADAR_RESTORE_FRAMES, RadarSessionManager, RadarSessionState
 from opendbc.car.mazda.tests.conftest import (CRZ_CTRL, CRZ_INFO, RADAR_STATIC, RADAR_UDS, SESSION_DFLT_DAT, SESSION_PROG_DAT,
                                               TESTER_PRESENT_DAT, LongCtrlState, frames, step_long)
 from opendbc.car.mazda.values import CarControllerParams
 
 
 class TestRadarSessionBounds:
-  """The fire-and-forget UDS session has no readable NRC, so every episode is bounded the
-  way disable_ecu bounds its retries."""
+  """Diagnostic attempts are bounded; completion requires observed stock recovery."""
 
   def test_silencing_gives_up_bounded(self):
     m = RadarSessionManager()
     for _ in range(RADAR_SESSION_LIMIT_FRAMES + 2):
       state = m.update(True, True, False, standstill=True, session_refused=False, stock_radar_gone=False)
-    assert state == RadarSessionState.STOCK and m.silencing_failed
+    assert state == RadarSessionState.HANDBACK and m.silencing_failed
+    for _ in range(CarControllerParams.RADAR_UDS_STEP + RADAR_RESTORE_FRAMES):
+      m.update(True, True, False, standstill=True, session_refused=False, stock_radar_gone=False)
     # and stays given up for the drive: stock keeps the bus
     for _ in range(10):
       assert m.update(True, True, False, standstill=True, session_refused=False, stock_radar_gone=False) == RadarSessionState.STOCK
@@ -33,7 +36,7 @@ class TestRadarSessionBounds:
     m = RadarSessionManager()
     m.update(True, True, False, standstill=True, session_refused=False, stock_radar_gone=False)
     assert m.state == RadarSessionState.SILENCING
-    assert m.update(True, True, False, standstill=True, session_refused=True, stock_radar_gone=False) == RadarSessionState.STOCK
+    assert m.update(True, True, False, standstill=True, session_refused=True, stock_radar_gone=False) == RadarSessionState.HANDBACK
     assert m.silencing_failed
 
   def test_handback_stops_waiting_for_a_dead_radar(self):
@@ -42,7 +45,9 @@ class TestRadarSessionBounds:
     assert m.state == RadarSessionState.SILENCED
     for _ in range(RADAR_SESSION_LIMIT_FRAMES + 2):
       state = m.update(True, False, True, standstill=True, session_refused=False, stock_radar_gone=True)
-    assert state == RadarSessionState.STOCK
+    assert state == RadarSessionState.HANDBACK
+    assert m.handback_failed and not m.handback_completed
+    assert m.diagnostic_message is None
 
   def test_completed_handback_never_resilences(self):
     # the parked toggle-off regression: the monitor's CC_SP assert used to drop after its done
@@ -54,21 +59,22 @@ class TestRadarSessionBounds:
     assert m.state == RadarSessionState.SILENCED
     m.update(True, False, True, standstill=True, session_refused=False, stock_radar_gone=True)
     assert m.state == RadarSessionState.HANDBACK
-    assert m.update(True, True, True, standstill=True, session_refused=False, stock_radar_gone=False) == RadarSessionState.STOCK
+    for _ in range(CarControllerParams.RADAR_UDS_STEP + RADAR_RESTORE_FRAMES):
+      m.update(True, True, True, standstill=True, session_refused=False, stock_radar_gone=False)
+    assert m.state == RadarSessionState.STOCK
     for handback in (True, False):
       for alive in (True, False):
         for _ in range(5):
           assert m.update(True, alive, handback, standstill=True, session_refused=False, stock_radar_gone=not alive) == RadarSessionState.STOCK
 
-  def test_withdrawn_handback_allows_retakeover(self):
-    # only a hand-back that ran to completion latches: a genuine toggle-flip-back
-    # mid-hand-back gets the normal takeover again
+  def test_withdrawn_handback_finishes_restoration(self):
+    # A reversal must finish restoration; card cycles using the latest toggle value.
     m = RadarSessionManager()
     m.update(True, False, False, standstill=True, session_refused=False, stock_radar_gone=True)
     m.update(True, False, True, standstill=True, session_refused=False, stock_radar_gone=True)
     assert m.state == RadarSessionState.HANDBACK
     state = m.update(True, False, False, standstill=True, session_refused=False, stock_radar_gone=True)
-    assert state == RadarSessionState.SILENCED and not m.handback_completed
+    assert state == RadarSessionState.HANDBACK and not m.handback_completed
 
   def test_silencing_waits_for_standstill_but_adoption_does_not(self):
     # actively silencing disables AEB, so it only starts pre-motion like disable_ecu;
@@ -102,6 +108,8 @@ class TestRadarSessionBounds:
     for _ in range(300):
       assert m.update(True, True, False, standstill=False, session_refused=False, stock_radar_gone=False) == RadarSessionState.STOCK
     assert m.update(True, True, False, standstill=True, session_refused=False, stock_radar_gone=False) == RadarSessionState.SILENCING
+    while not m.programming_sent:
+      m.update(True, True, False, standstill=True, session_refused=False, stock_radar_gone=False)
     # the handover back is on the alive window, not the guard: the radar stops within a frame
     # of accepting the session, and every frame in between is a radar gap for the camera
     assert m.update(True, False, False, standstill=True, session_refused=False, stock_radar_gone=False) == RadarSessionState.SILENCED
@@ -130,6 +138,44 @@ def synthetic(sends):
 class TestRadarSessionSequencing:
   """Boot teardown deferral and the ordered hand-back: what goes on the bus in each
   radar session state, driven through the real CarController.update_longitudinal."""
+
+  @pytest.mark.parametrize("phase", range(CarControllerParams.RADAR_UDS_STEP))
+  def test_cancel_inflight_teardown_restores_default_before_finishing(self, cc, cs, phase):
+    assert SESSION_PROG_DAT in uds(boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True))
+    for _ in range(phase):
+      boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True)
+    # The last radar frame remains fresh when the toggle flips. No synthetic traffic
+    # may overlap it, but the outstanding programming request still needs undoing.
+    saw_default = False
+    for _ in range(CarControllerParams.RADAR_UDS_STEP + 2):
+      sends = boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, handback=True)
+      saw_default |= SESSION_DFLT_DAT in uds(sends)
+      assert synthetic(sends) == []
+      assert SESSION_PROG_DAT not in uds(sends)
+    assert saw_default
+    assert cc.radar_session.handback_completed
+    assert boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True) == []
+
+  def test_cancel_inflight_teardown_covers_late_silence(self, cc, cs):
+    boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True)
+    boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, handback=True)
+    saw_default = False
+    saw_synthetic = False
+    for _ in range(100):
+      sends = boot_step(cc, cs, stock_radar_alive=False, fsc_settled=True, handback=True)
+      saw_default |= SESSION_DFLT_DAT in uds(sends)
+      saw_synthetic |= bool(synthetic(sends))
+      assert TESTER_PRESENT_DAT not in uds(sends)
+      assert SESSION_PROG_DAT not in uds(sends)
+    assert saw_default and saw_synthetic
+    assert cc.radar_session.state == RadarSessionState.HANDBACK
+    assert boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, handback=True) == []
+
+  def test_returned_radar_requires_setup_gate_again(self, cc, cs):
+    for settled, engaged in ((False, False), (True, True)):
+      boot_step(cc, cs, stock_radar_alive=False, fsc_settled=True)
+      for _ in range(100):
+        assert boot_step(cc, cs, stock_radar_alive=True, fsc_settled=settled, cruise_engaged=engaged) == []
 
   def test_stock_state_is_silent(self, cc, cs):
     # radar alive, gate not yet passed: nothing at all goes on the bus
@@ -197,7 +243,9 @@ class TestRadarSessionSequencing:
     # into a fresh takeover on the very next frame (parked => standstill, gate still passed)
     boot_step(cc, cs, stock_radar_alive=False, fsc_settled=True)
     boot_step(cc, cs, stock_radar_alive=False, fsc_settled=True, handback=True)
-    boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, handback=True)
+    for _ in range(CarControllerParams.RADAR_UDS_STEP + RADAR_RESTORE_FRAMES):
+      boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, handback=True)
+    assert cc.radar_session.handback_completed
     for _ in range(200):
       assert boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, handback=False) == []
 
