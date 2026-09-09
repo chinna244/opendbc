@@ -58,7 +58,7 @@ class TestTjaIcbmSuppressScoping:
       lkas_allowed_speed=True,
       lkas_blocked=False,
       lkas_effective=0,
-      lkas_request_echo=None,
+      lkas_rejected=0,
       steer_undelivered=False,
     )
 
