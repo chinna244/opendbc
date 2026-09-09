@@ -301,13 +301,19 @@ def is_mads_white_hud(dat: bytes) -> bool:
   return base in MADS_HUD_SAFE_BASE_PAYLOADS and dat != base
 
 
-def create_button_cmd(packer, CP, counter, button):
+def create_button_cmd(packer, CP, counter, button, bus=0):
   can = int(button == Buttons.CANCEL)
   res = int(button == Buttons.RESUME)
   inc = int(button == Buttons.SET_PLUS)
   dec = int(button == Buttons.SET_MINUS)
+  # Only ever on the camera bus: the panda refuses it on the car's side, where it would toggle
+  # MADS and arm MRCC in the body.
+  tja = int(button == Buttons.TJA)
+  assert not (tja and bus == 0)
 
   values = {
+    "TJA_BUTTON": tja,
+
     "CAN_OFF": can,
     "CAN_OFF_INV": (can + 1) % 2,
 
@@ -338,7 +344,7 @@ def create_button_cmd(packer, CP, counter, button):
     "CTR": (counter + 1) % 16,
   }
 
-  return packer.make_can_msg("CRZ_BTNS", 0, values)
+  return packer.make_can_msg("CRZ_BTNS", bus, values)
 
 
 def create_mrcc_off_cmd(packer, counter):

@@ -146,7 +146,8 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
       bool cruise_engaged = msg->data[0] & 0x8U;
       pcm_cruise_check(cruise_engaged);
       mazda_acc_armed = GET_BIT(msg, 17U);
-      // With the TJA button owning lateral, MRCC no longer drives the MADS main edge.
+      // With the TJA button owning lateral, MRCC no longer drives the MADS main edge: its
+      // falling edge would exit the panda's lateral while the software's MADS stays on.
       if (!mazda_tja_button) {
         acc_main_on = GET_BIT(msg, 17U);
       }
@@ -197,14 +198,14 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
         // held under braking unless a wheel cancel explains it. Without the cancel path, main
         // toggled at a stop with the brake held never falls, the next press has no rising edge,
         // and MADS runs into 200 rejected frames (route 000001c9--0b2a64a214 seg 0).
-        if (!mazda_tja_button) {
-          if (acc_armed) {
-            // Gate the main edge on radar ownership to align with software availability.
-            acc_main_on = mazda_radar_was_silenced;
-          } else if (brake_free || (mazda_cancel_context_frames > 0U)) {
-            acc_main_on = false;
-          } else {
-          }
+        if (mazda_tja_button) {
+          // the button is the lateral switch; MRCC is cruise only
+        } else if (acc_armed) {
+          // Gate the main edge on radar ownership to align with software availability.
+          acc_main_on = mazda_radar_was_silenced;
+        } else if (brake_free || (mazda_cancel_context_frames > 0U)) {
+          acc_main_on = false;
+        } else {
         }
         if (mazda_cancel_context_frames > 0U) {
           mazda_cancel_context_frames -= 1U;
@@ -232,10 +233,23 @@ static bool mazda_is_lka_addr(int addr) {
   return (((unsigned int)addr == MAZDA_LKAS) || ((unsigned int)addr == MAZDA_LKAS_HUD));
 }
 
-// The camera owns LKAS addresses while both axes are inactive; openpilot owns them once
-// either axis engages, including idle 0x243 under longitudinal control.
+// The camera owns the LKAS addresses whenever openpilot is not steering. Lateral is its own
+// axis under MADS (controls_allowed_lateral); with MADS off it follows cruise. Cruise alone must
+// not claim them: under stock long that silenced the camera's own TJA/CTS with MADS off while the
+// dash showed nothing (route 00000018--5655da2c1c seg 15).
 static bool mazda_openpilot_controlling(void) {
-  return controls_allowed || controls_allowed_lateral;
+  return controls_allowed_lateral || (controls_allowed && !m_mads_state.system_enabled);
+}
+
+// The one CRZ_BTNS frame openpilot may put on the camera bus: the TJA button pressed over the
+// wheel's idle pattern (00 09 ff Cx 00 00 00 00, Cx = MODE_X_INV, MODE_Y_INV and the counter),
+// no other button. It presses the camera's own TJA/CTS off while openpilot steers, so the two
+// lane-centering systems never run at once (docs/zoompilot/mazda-lateral.md, "The camera's
+// own TJA/CTS state").
+static bool mazda_cam_tja_press_msg_valid(const CANPacket_t *msg) {
+  return (msg->data[0] == 0x00U) && (msg->data[1] == 0x09U) && (msg->data[2] == 0xffU) &&
+         ((msg->data[3] & 0xc3U) == 0xc0U) && (msg->data[4] == 0x00U) && (msg->data[5] == 0x00U) &&
+         (msg->data[6] == 0x00U) && (msg->data[7] == 0x00U);
 }
 
 static bool mazda_tx_hook(const CANPacket_t *msg) {
@@ -355,6 +369,19 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     if (!controls_allowed && !cancel_cmd && !mrcc_off_cmd) {
       tx = false;
     }
+    // The TJA button is never pressed on the car's side: it would toggle MADS through the
+    // rx hook and arm MRCC in the body.
+    if (GET_BIT(msg, MAZDA_TJA_BUTTON_BIT)) {
+      tx = false;
+    }
+  }
+
+  if ((msg->bus == (unsigned char)MAZDA_CAM) && (msg->addr == MAZDA_CRZ_BTNS)) {
+    // The camera-side press exists only to switch the camera's TJA/CTS off under openpilot's
+    // steering, so it is accepted only then and only byte-exact.
+    if (!mazda_openpilot_controlling() || !mazda_cam_tja_press_msg_valid(msg)) {
+      tx = false;
+    }
   }
 
   // The first synthetic CRZ_INFO marks the radar ownership transition.
@@ -389,6 +416,8 @@ static safety_config mazda_init(uint16_t param) {
     {MAZDA_LKAS, 0, 8, .check_relay = true, .disable_static_blocking = true},
     {MAZDA_CRZ_BTNS, 0, 8, .check_relay = false},
     {MAZDA_LKAS_HUD, 0, 8, .check_relay = true, .disable_static_blocking = true},
+    // The camera press: no relay check, so the wheel's own 0x09d keeps forwarding to the camera.
+    {MAZDA_CRZ_BTNS, MAZDA_CAM, 8, .check_relay = false},
   };
 
 // Replaced-radar addresses omit relay checks because the radar remains live during boot and
@@ -397,6 +426,7 @@ static safety_config mazda_init(uint16_t param) {
     {MAZDA_LKAS, 0, 8, .check_relay = true, .disable_static_blocking = true},
     {MAZDA_CRZ_BTNS, 0, 8, .check_relay = false},
     {MAZDA_LKAS_HUD, 0, 8, .check_relay = true, .disable_static_blocking = true},
+    {MAZDA_CRZ_BTNS, MAZDA_CAM, 8, .check_relay = false},
     {MAZDA_CRZ_INFO, 0, 8, .check_relay = false},
     {MAZDA_CRZ_CTRL, 0, 8, .check_relay = false},
     {MAZDA_RADAR_STATIC, 0, 8, .check_relay = false},
