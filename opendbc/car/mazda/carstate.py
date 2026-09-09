@@ -2,9 +2,9 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, DT_CTRL, create_button_events, structs, uds
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
-from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP
 from opendbc.car.mazda.values import DBC, LKAS_LIMITS, CarControllerParams, MazdaFlags
 from opendbc.sunnypilot.car.mazda.carstate_ext import CarStateExt
+from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP
 
 ButtonType = structs.CarState.ButtonEvent.Type
 
@@ -13,6 +13,7 @@ STOCK_RADAR_ALIVE_FRAMES = int(CarControllerParams.STOCK_RADAR_ALIVE_T / DT_CTRL
 STOCK_RADAR_GUARD_FRAMES = round(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CTRL)
 CANCEL_CONTEXT_FRAMES = int(CarControllerParams.CANCEL_CONTEXT_T / DT_CTRL)
 CAM_LANEINFO_FRESH_FRAMES = int(CarControllerParams.CAM_LANEINFO_FRESH_T / DT_CTRL)
+STOCK_CTS_ALERT_FRAMES = int(CarControllerParams.STOCK_CTS_ALERT_T / DT_CTRL)
 
 
 class CarState(CarStateBase, CarStateExt):
@@ -28,16 +29,30 @@ class CarState(CarStateBase, CarStateExt):
     self.lkas_allowed_speed = False
     self.lkas_blocked = False
     self.lkas_effective = 0
+    self.lkas_track_state = False
     # LKAS non-delivery state is used only with the steer-to-zero EPS.
     self.params = CarControllerParams(CP)
     self.steer_undelivered_frames = 0
     self.steer_undelivered = False
     self.steer_undelivered_alert = False
     self.lkas_block_origin_speed: float | None = None
+    # The EPS's first engagement of the ignition cycle, asked for torque under standby (block
+    # and track) at a crawl, raised LKAS_FAULT 0.3 s in on three drives; it delivered nothing
+    # in that window on any start on record. Hold the request until it has delivered once,
+    # the standby lifts, or the car is rolling.
+    self.lkas_delivered = False
+    self.steer_first_engage_hold = False
     # Our 0x243 frames the panda refused since the last cycle, reported back on the can stream
     # with src 192 (bus 0 + 0xC0). Zero-torque refusals while disengaged are not counted.
     self.lkas_rejected = 0
     self.lkas_fault = False
+    # The camera's own TJA/CTS state from its 0x440: 0 off, 2 armed, 3 to 5 steering. Live,
+    # never latched; 0 when the camera is stale.
+    self.stock_tja = 0
+    # Raised by the controller once per arming episode when its camera presses did not clear
+    # stock_tja; consumed here into a stockLkas pulse.
+    self.stock_cts_stuck = False
+    self.stock_cts_alert_frames = 0
 
     self.distance_button = 0
     self.accel_button = 0
@@ -75,7 +90,12 @@ class CarState(CarStateBase, CarStateExt):
     # This silence duration establishes radar ownership rather than a dropped frame.
     return self.stock_radar_silent_frames >= STOCK_RADAR_GUARD_FRAMES
 
-  def update_steer_undelivered(self, v_ego_raw: float, lkas_request: float, lkas_blocked: bool, lkas_track_state: bool) -> None:
+  def update_steer_undelivered(self, v_ego_raw: float, lkas_request: float) -> None:
+    lkas_blocked, lkas_track_state = self.lkas_blocked, self.lkas_track_state
+    self.lkas_delivered |= self.lkas_effective != 0
+    self.steer_first_engage_hold = (not self.lkas_delivered and lkas_blocked and lkas_track_state and
+                                    v_ego_raw < self.params.STEER_UNDELIVERED_ALERT_ORIGIN_SPEED)
+
     # Latch sustained zero LKAS_EFFECTIVE for a real request before the camera faults. Clear
     # with LKAS_BLOCK because a zeroed command provides no delivery signal. Driver torque does
     # not gate entry because torque in the requested direction does not reduce the request.
@@ -156,7 +176,7 @@ class CarState(CarStateBase, CarStateExt):
     # LKAS_EFFECTIVE distinguishes partial delivery from a complete block.
     self.lkas_blocked = lkas_blocked
     self.lkas_effective = cp.vl["STEER_RATE"]["LKAS_EFFECTIVE"]
-    lkas_track_state = cp.vl["STEER_RATE"]["LKAS_TRACK_STATE"] == 1
+    self.lkas_track_state = cp.vl["STEER_RATE"]["LKAS_TRACK_STATE"] == 1
     # The 2022 EPS raises LKAS_FAULT once its 0x243 stream has stopped for about 0.6 s; the
     # camera's own fault follows 5.3 s later and neither clears before the next ignition cycle.
     # Decoded for the log and tooling; the driver-facing fault stays the camera's own.
@@ -165,7 +185,7 @@ class CarState(CarStateBase, CarStateExt):
     # frame carries nothing the controller needs; count the torque requests it turned away.
     self.lkas_rejected = sum(1 for v in can_parsers[Bus.loopback].vl_all["CAM_LKAS"]["LKAS_REQUEST"] if v != 0)
     if self.CP.flags & MazdaFlags.STEER_TO_ZERO_EPS:
-      self.update_steer_undelivered(ret.vEgoRaw, cp.vl["STEER_RATE"]["LKAS_REQUEST"], lkas_blocked, lkas_track_state)
+      self.update_steer_undelivered(ret.vEgoRaw, cp.vl["STEER_RATE"]["LKAS_REQUEST"])
 
     if not self.CP.flags & MazdaFlags.STEER_TO_ZERO_EPS:
       # LKAS is enabled at 52kph going up and disabled at 45kph going down
@@ -280,6 +300,16 @@ class CarState(CarStateBase, CarStateExt):
     self.cam_lkas = cp_cam.vl["CAM_LKAS"]
     self.cam_laneinfo = cp_cam.vl["CAM_LANEINFO"]
     ret.steerFaultPermanent = cp_cam.vl["CAM_LKAS"]["ERR_BIT_1"] == 1
+    self.stock_tja = int(self.cam_laneinfo["TJA"]) if cam_laneinfo_fresh else 0
+
+    # The camera stayed armed through the controller's presses: one pulse of stockLkas, which
+    # the Mazda event hook turns into a one-shot warning. openpilot keeps steering; the panda
+    # blocks the camera's own command meanwhile.
+    if self.stock_cts_stuck:
+      self.stock_cts_stuck = False
+      self.stock_cts_alert_frames = STOCK_CTS_ALERT_FRAMES
+    ret.stockLkas = self.stock_cts_alert_frames > 0
+    self.stock_cts_alert_frames = max(self.stock_cts_alert_frames - 1, 0)
 
     # Decode distance, set-speed, resume, cancel, and main-button events.
     prev_distance_button = self.distance_button

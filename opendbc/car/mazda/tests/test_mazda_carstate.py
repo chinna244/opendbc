@@ -14,6 +14,7 @@ from opendbc.car import Bus, DT_CTRL
 from opendbc.car import structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda import mazdacan
+from opendbc.car.mazda.carstate import CAM_LANEINFO_FRESH_FRAMES, STOCK_CTS_ALERT_FRAMES
 from opendbc.car.mazda.tests.conftest import car_interface, packer
 from opendbc.car.mazda.values import CarControllerParams
 from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP
@@ -626,3 +627,75 @@ class TestTjaButtonEvents:
     self._btns(CI, pk, 0, MODE_X=0, MODE_Y=0)
     ret = self._btns(CI, pk, 1, MODE_X=1, MODE_Y=1)
     assert [be.type for be in ret.buttonEvents] == [self.ButtonType.mainCruise]
+
+
+class TestStockTja:
+  """The camera's own TJA/CTS state, read live off its 0x440 for the controller's camera press:
+  0 off, 2 armed, 3 to 5 steering. Never latched (the camera drops its own arm, route 00000018
+  seg 9), and 0 once the camera goes stale."""
+
+  def step(self, CI, pk, i, tja):
+    ret, _ = feed(CI, i, pk.make_can_msg("CAM_LANEINFO", 2, {"TJA": tja, "LANE_LINES": 3}))
+    return ret
+
+  def test_follows_the_camera_frame_by_frame(self):
+    CI, pk = car_interface(alpha_long=False), packer()
+    for i, tja in enumerate([0, 2, 2, 4, 3, 0, 2, 0]):
+      self.step(CI, pk, i, tja)
+      assert CI.CS.stock_tja == tja
+
+  def test_stale_camera_reads_off(self):
+    CI, pk = car_interface(alpha_long=False), packer()
+    self.step(CI, pk, 0, 4)
+    assert CI.CS.stock_tja == 4
+    for i in range(1, CAM_LANEINFO_FRESH_FRAMES):
+      CI.update([(t_ns(i), [])])
+      assert CI.CS.stock_tja == 4
+    CI.update([(t_ns(CAM_LANEINFO_FRESH_FRAMES), [])])
+    assert CI.CS.stock_tja == 0
+
+  def test_the_controllers_stuck_flag_is_one_stocklkas_pulse(self):
+    # the controller raises stock_cts_stuck once per arming episode; carstate consumes it into a
+    # short stockLkas pulse (the alert's own duration does the showing) and never repeats it
+    CI, pk = car_interface(alpha_long=False), packer()
+    assert not self.step(CI, pk, 0, 4).stockLkas
+    CI.CS.stock_cts_stuck = True
+    for i in range(1, 1 + STOCK_CTS_ALERT_FRAMES):
+      assert self.step(CI, pk, i, 4).stockLkas
+    assert not CI.CS.stock_cts_stuck
+    for i in range(1 + STOCK_CTS_ALERT_FRAMES, 200):
+      assert not self.step(CI, pk, i, 4).stockLkas
+
+
+class TestFirstEngageHold:
+  """The EPS's first LKAS engagement after power-up raised LKAS_FAULT 250-300 ms after the first
+  nonzero request on routes 0000001a, 000001bb and 000001e8: standby (block and track), zero
+  delivery, 0.28-0.30 m/s. On the ten other first engagements from that state it delivered
+  nothing until the standby lifted above 1 m/s, so a zero request there withholds no assist.
+  carstate derives the hold; once the EPS has delivered once the same standby is left alone."""
+
+  def crawl(self, rig, effective=0):
+    return rig.step(100, effective, 1, speed_kph=1., track_state=1)
+
+  def test_holds_through_the_first_standby_and_latches_on_delivery(self):
+    rig = UndeliveredRig()
+    self.crawl(rig)  # the parsers take a frame to fill
+    for _ in range(30):
+      self.crawl(rig)
+      assert rig.CS.steer_first_engage_hold
+    self.crawl(rig, effective=8)
+    assert rig.CS.lkas_delivered
+    for _ in range(30):
+      self.crawl(rig)
+      assert not rig.CS.steer_first_engage_hold  # route_118 t248, 12c t125: the same standby later in the drive
+
+  @pytest.mark.parametrize("release", [dict(speed_kph=3.7), dict(blocked=0), dict(track_state=0)])
+  def test_rolling_or_leaving_standby_releases(self, release):
+    rig = UndeliveredRig()
+    self.crawl(rig)
+    self.crawl(rig)
+    assert rig.CS.steer_first_engage_hold
+    kw = dict(speed_kph=1., track_state=1, blocked=1)
+    kw.update(release)
+    rig.step(100, 0, kw.pop('blocked'), **kw)
+    assert not rig.CS.steer_first_engage_hold

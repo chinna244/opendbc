@@ -45,6 +45,12 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.accel_last = 0.
     self.release_ramp = None
     self.breakaway_frames = 0
+    # The camera's own TJA/CTS is pressed off on its bus while openpilot steers, per arming
+    # episode: the camera re-arms on the driver's own TJA press (that press is also the MADS
+    # switch on declared cars) and drops its arm by itself at times.
+    self.tja_press_count = 0
+    self.tja_press_frame: int | None = None
+    self.tja_episode_alerted = False
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -91,8 +97,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
                                                       driver_torque, self.params, steer_max)
 
-    # Stop requesting torque after the non-delivery latch; recovery then ramps from zero.
-    if self.steer_to_zero and CS.steer_undelivered:
+    # Stop requesting torque while carstate says the EPS will not take it: after the
+    # non-delivery latch, or through its first engagement of the cycle. Recovery ramps from zero.
+    if self.steer_to_zero and (CS.steer_undelivered or CS.steer_first_engage_hold):
       apply_torque = 0
 
     # Do not cancel a stock MRCC engagement while the stock radar still owns the bus.
@@ -116,6 +123,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     if self.CP.openpilotLongitudinalControl:
       can_sends.extend(self.update_longitudinal(CC, CC_SP, CS))
+
+    can_sends.extend(self.update_camera_tja(CC, CS))
 
     # send HUD alerts
     if self.frame % 50 == 0:
@@ -142,6 +151,37 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     self.frame += 1
     return new_actuators, can_sends
+
+  def update_camera_tja(self, CC, CS):
+    """Press the camera's own TJA/CTS off, on its bus, whenever openpilot steers with it armed.
+
+    The two lane-centering systems must never run at once: the panda drops the camera's 0x243
+    while openpilot controls, but the camera keeps its state and takes the wheel the moment
+    lateral drops (route 00000018--5655da2c1c seg 15). One CRZ_BTNS with the TJA bit over the
+    wheel's idle pattern, counter plus one, on bus 2; the forwarded real stream supplies the
+    release and the camera acts on the press edge (tja_cts_route_29). At least one 0x440
+    period between presses, three per arming episode; the episode resets when the camera
+    reads 0, so a driver re-arming it under us is handled again. Not gated on the button
+    declaration: any Mazda steering with the camera armed gets the same press.
+    """
+    can_sends = []
+    if CS.stock_tja == 0:
+      self.tja_press_count = 0
+      self.tja_press_frame = None
+      self.tja_episode_alerted = False
+    elif CC.latActive:
+      interval = int(CarControllerParams.TJA_PRESS_INTERVAL_T / DT_CTRL)
+      due = self.tja_press_frame is None or self.frame - self.tja_press_frame >= interval
+      if due and self.tja_press_count < CarControllerParams.TJA_PRESS_MAX:
+        can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.TJA, bus=2))
+        self.tja_press_count += 1
+        self.tja_press_frame = self.frame
+      elif due and not self.tja_episode_alerted:
+        # The camera did not clear: keep steering (its command is blocked) and tell the driver
+        # once. carstate turns this into the one-shot stockLkas pulse.
+        CS.stock_cts_stuck = True
+        self.tja_episode_alerted = True
+    return can_sends
 
   def resume_requested(self, CC) -> bool:
     """The resume button belongs to the stock-longitudinal path alone. Under openpilot longitudinal

@@ -321,3 +321,21 @@ class TestDriverTorqueHeadroom:
     # pre-2022 params carry no STEER_DRIVER_SAMPLES, so the deque stays one deep and the
     # behavior is the single newest sample, exactly as before
     assert not hasattr(upstream_params(), 'STEER_DRIVER_SAMPLES')
+
+
+def test_carstate_first_engage_hold_zeroes_the_steer_command(stock_cc, stock_cs):
+  # carstate derives the hold (first engagement of the cycle, standby, crawl); the controller only obeys it
+  lat = dict(long_active=False, enabled=True, lat_active=True, torque=-1.0, v_ego=0.3)
+  actuators, _ = step(stock_cc, stock_cs, steer_first_engage_hold=True, **lat)
+  assert actuators.torqueOutputCan == 0
+  assert stock_cc.apply_torque_last == 0
+  # released, the command walks up from zero at STEER_DELTA_UP
+  for i in range(1, 4):
+    actuators, _ = step(stock_cc, stock_cs, steer_first_engage_hold=False, **lat)
+    assert actuators.torqueOutputCan == -i * stock_cc.params.STEER_DELTA_UP
+
+
+def test_the_first_engage_hold_is_the_steer_to_zero_eps_only(stock_cc, stock_cs):
+  stock_cc.steer_to_zero = False
+  actuators, _ = step(stock_cc, stock_cs, steer_first_engage_hold=True, long_active=False, enabled=True, lat_active=True, torque=-1.0, v_ego=0.3)
+  assert actuators.torqueOutputCan == -stock_cc.params.STEER_DELTA_UP

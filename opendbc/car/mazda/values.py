@@ -40,6 +40,12 @@ class CarControllerParams:
   # CAM_LANEINFO runs near 2 Hz, so its freshness window must exceed one period.
   CAM_LANEINFO_PERIOD_T = 0.563
   CAM_LANEINFO_FRESH_T = 1.5
+  # The camera's own TJA/CTS is pressed off on its bus while openpilot steers: one 0x440 period
+  # plus parser latency between presses, three per arming episode before the driver is told.
+  TJA_PRESS_INTERVAL_T = 1.0
+  TJA_PRESS_MAX = 3
+  # The one-shot warning after the third press is a pulse; the alert's own duration shows it.
+  STOCK_CTS_ALERT_T = 0.1
 
   # Stock body-latched releases use a nine-frame RESUME_UNLATCHING pulse.
   RESUME_UNLATCH_LATCHED_T = 0.18  # s, 9 wire frames, the latched-family mode
@@ -121,6 +127,9 @@ class CarControllerParams:
         self.STEER_UNDELIVERED_ALERT_MIN_SPEED = 12. * CV.MPH_TO_MS
         # A block that began below this speed is the EPS's standby from a stop, whatever
         # LKAS_TRACK_STATE says later in it; only a block that began rolling can be a dropout.
+        # The same boundary gates the first-engagement hold in carstate: on the EPS's first
+        # engagement of the cycle it delivered nothing under standby below it on any start on
+        # record, and faulted on 3 of 13 (docs/zoompilot/mazda-lkas-startup-2026-09-09.md).
         self.STEER_UNDELIVERED_ALERT_ORIGIN_SPEED = 1.0  # m/s
     else:
       # Upstream's envelope. The interface no longer selects it for any Mazda; the panda keeps
@@ -257,6 +266,8 @@ class Buttons:
   SET_MINUS = 2
   RESUME = 3
   CANCEL = 4
+  # The physical TJA button, sent only on the camera bus to switch the camera's own TJA/CTS off.
+  TJA = 5
 
 
 def platform_from_vin(vin: str) -> str | None:
