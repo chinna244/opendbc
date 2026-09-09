@@ -88,6 +88,29 @@ class TestWhiteHudDoesNotArmStockTja:
     assert hud
     assert mazdacan.is_mads_white_hud(hud[0])
 
+  def test_armed_white_hud_leaves_stock_tja_and_camera_press_idle(self):
+    CP = CarInterface.get_params(CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], False, False, False)
+    CP_SP = CarInterface.get_params_sp(CP, CAR.MAZDA_CX5_2022, {0: {}, 1: {}, 2: {}}, [], False, False, False)
+    CP_SP.flags |= MazdaFlagsSP.TJA_BUTTON
+    cc = CarController({Bus.pt: "mazda_2017"}, CP, CP_SP)
+    cc.mads_white_hud_off_frames = int(0.5 / DT_CTRL)
+
+    CS = TestWhiteHudController._carstate(
+      raw=OFF, live=True, raw_armed=True,
+      filtered_available=True, filtered_enabled=False, stock_tja=0,
+    )
+    CC, CC_SP = TestWhiteHudController._controls(active=True)
+    _, sends = cc.update(CC, CC_SP, CS, 0)
+
+    assert CS.stock_tja == 0
+    assert presses(sends) == 0
+    assert not frames(sends, CRZ_BTNS, bus=0)
+    assert not cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_tx_frames == 0
+    hud = [dat for addr, dat, bus in sends if addr == 0x440 and bus == 0]
+    assert hud
+    assert mazdacan.is_mads_white_hud(hud[0])
+
 
 class TestFirstEngageHoldWithCustomFeatures:
   """D: first-engagement hold still zeroes torque with HUD/MRCC present."""

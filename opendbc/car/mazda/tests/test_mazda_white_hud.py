@@ -539,17 +539,21 @@ class TestWhiteHudController:
     assert bytes(a ^ b for a, b in zip(base, out, strict=True)) == WHITE_TJA_XOR
     assert mazdacan.is_mads_white_hud(out)
 
-  def test_armed_never_emits_white(self):
+  def test_armed_becomes_white_only_after_stable_eligibility(self):
     CC, CC_SP = self._controls(active=True)
     controller = self._controller()
-    for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 10):
-      _, sends = controller.update(
-        CC, CC_SP,
-        self._carstate(filtered_available=True, filtered_enabled=False, raw_armed=True),
-        round(frame * DT_CTRL * 1e9),
-      )
+    armed = dict(filtered_available=True, filtered_enabled=False, raw_armed=True)
+    _, sends = controller.update(CC, CC_SP, self._carstate(**armed), 0)
+    assert self._hud(sends) == OFF
+    for frame in range(1, MADS_WHITE_HUD_OFF_CONFIRM_FRAMES):
+      _, sends = controller.update(CC, CC_SP, self._carstate(**armed), round(frame * DT_CTRL * 1e9))
       if any(addr == 0x440 for addr, _dat, _bus in sends):
         assert not mazdacan.is_mads_white_hud(self._hud(sends))
+    _, sends = controller.update(
+      CC, CC_SP, self._carstate(**armed),
+      round(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES * DT_CTRL * 1e9),
+    )
+    assert self._hud(sends) == WHITE
 
   def test_active_never_emits_white(self):
     CC, CC_SP = self._controls(active=True)
@@ -562,6 +566,21 @@ class TestWhiteHudController:
       )
       if any(addr == 0x440 for addr, _dat, _bus in sends):
         assert not mazdacan.is_mads_white_hud(self._hud(sends))
+
+  def test_armed_to_active_withdraws_white_immediately(self):
+    CC, CC_SP = self._controls(active=True)
+    controller = self._controller()
+    armed = dict(filtered_available=True, filtered_enabled=False, raw_armed=True)
+    for frame in range(MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 1):
+      _, sends = controller.update(CC, CC_SP, self._carstate(**armed), round(frame * DT_CTRL * 1e9))
+    assert self._hud(sends) == WHITE
+
+    _, sends = controller.update(
+      CC, CC_SP,
+      self._carstate(filtered_available=True, filtered_enabled=True, raw_armed=True),
+      round((MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 1) * DT_CTRL * 1e9),
+    )
+    assert not mazdacan.is_mads_white_hud(self._hud(sends))
 
   @pytest.mark.parametrize(("off_flag", "active", "raw", "live"), [
     (False, True, OFF, True),
@@ -610,8 +629,6 @@ class TestWhiteHudController:
     {"accel_button": 1},
     {"decel_button": 1},
     {"distance_button": 1},
-    {"raw_armed": True},
-    {"filtered_available": True},
     {"filtered_enabled": True},
     {"live": False},
     {"raw": UNKNOWN},
@@ -625,6 +642,28 @@ class TestWhiteHudController:
                                  round((MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 1) * DT_CTRL * 1e9))
     assert not mazdacan.is_mads_white_hud(self._hud(sends))
     assert controller.frame == MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 2
+
+  def test_off_white_survives_stable_armed_without_reconfirm(self):
+    # OFF→ARMED without buttons stays WHITE-eligible; confirm counter does not reset.
+    controller = self._controller()
+    CC, CC_SP = self._controls(active=True)
+    self._prime_white(controller, CC, CC_SP)
+    assert controller.mads_white_hud_off_frames == MADS_WHITE_HUD_OFF_CONFIRM_FRAMES
+    assert controller.mads_white_hud_on_bus
+
+    armed = dict(filtered_available=True, filtered_enabled=False, raw_armed=True)
+    # No immediate withdraw TX: ARMED remains eligible, so wait for the next 2 Hz slot.
+    while controller.frame % 50 != 0:
+      frame = controller.frame
+      _, sends = controller.update(CC, CC_SP, self._carstate(**armed), round(frame * DT_CTRL * 1e9))
+      assert not any(addr == 0x440 for addr, _dat, _bus in sends)
+      assert controller.mads_white_hud_off_frames == MADS_WHITE_HUD_OFF_CONFIRM_FRAMES
+      assert controller.mads_white_hud_on_bus
+
+    frame = controller.frame
+    _, sends = controller.update(CC, CC_SP, self._carstate(**armed), round(frame * DT_CTRL * 1e9))
+    assert self._hud(sends) == WHITE
+    assert controller.mads_white_hud_off_frames == MADS_WHITE_HUD_OFF_CONFIRM_FRAMES
 
   def test_no_tja_button_flag_never_emits_white(self):
     controller = self._controller(off_flag=False)
