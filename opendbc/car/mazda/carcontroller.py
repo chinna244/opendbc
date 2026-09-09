@@ -45,7 +45,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.accel_last = 0.
     self.release_ramp = None
     self.breakaway_frames = 0
-    # The camera's own TJA/CTS is pressed off on its bus while openpilot steers, per arming
+    # The camera's own TJA/CTS is pressed off on its bus whenever it is armed, per arming
     # episode: the camera re-arms on the driver's own TJA press (that press is also the MADS
     # switch on declared cars) and drops its arm by itself at times.
     self.tja_press_count = 0
@@ -153,32 +153,35 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     return new_actuators, can_sends
 
   def update_camera_tja(self, CC, CS):
-    """Press the camera's own TJA/CTS off, on its bus, whenever openpilot steers with it armed.
+    """Press the camera's own TJA/CTS off, on its bus, whenever it is armed.
 
-    The two lane-centering systems must never run at once: the panda drops the camera's 0x243
-    while openpilot controls, but the camera keeps its state and takes the wheel the moment
-    lateral drops (route 00000018--5655da2c1c seg 15). One CRZ_BTNS with the TJA bit over the
-    wheel's idle pattern, counter plus one, on bus 2; the forwarded real stream supplies the
-    release and the camera acts on the press edge (tja_cts_route_29). At least one 0x440
-    period between presses, three per arming episode; the episode resets when the camera
-    reads 0, so a driver re-arming it under us is handled again. Not gated on the button
-    declaration: any Mazda steering with the camera armed gets the same press.
+    The two lane-centering systems must never run at once, and with a panda fitted the camera
+    is never needed: the panda drops the camera's 0x243 while openpilot controls, but the camera
+    keeps its state and takes the wheel the moment lateral drops (route 00000018--5655da2c1c seg
+    15), and a MADS-off press re-arms it so stock TJA engages a few seconds later. So the press
+    is not gated on lateral. One CRZ_BTNS with the TJA bit over the wheel's idle pattern, counter
+    plus one, on bus 2; the forwarded real stream supplies the release and the camera acts on the
+    press edge (tja_cts_route_29). At least one 0x440 period between presses, three per arming
+    episode; the episode resets when the camera reads 0, so a driver re-arming it is handled
+    again. Not gated on the button declaration: any Mazda with the camera armed gets the same
+    press. The press only reaches the camera, so it cannot arm or disarm MRCC in the body.
     """
     can_sends = []
     if CS.stock_tja == 0:
       self.tja_press_count = 0
       self.tja_press_frame = None
       self.tja_episode_alerted = False
-    elif CC.latActive:
+    else:
       interval = int(CarControllerParams.TJA_PRESS_INTERVAL_T / DT_CTRL)
       due = self.tja_press_frame is None or self.frame - self.tja_press_frame >= interval
       if due and self.tja_press_count < CarControllerParams.TJA_PRESS_MAX:
         can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.TJA, bus=2))
         self.tja_press_count += 1
         self.tja_press_frame = self.frame
-      elif due and not self.tja_episode_alerted:
-        # The camera did not clear: keep steering (its command is blocked) and tell the driver
-        # once. carstate turns this into the one-shot stockLkas pulse.
+      elif due and CC.latActive and not self.tja_episode_alerted:
+        # The camera did not clear while openpilot steers: keep steering (its command is
+        # blocked) and tell the driver once. carstate turns this into the one-shot stockLkas
+        # pulse. With lateral off the camera steering is stock behaviour, nothing to warn about.
         CS.stock_cts_stuck = True
         self.tja_episode_alerted = True
     return can_sends
