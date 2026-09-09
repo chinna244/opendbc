@@ -665,3 +665,37 @@ class TestStockTja:
     assert not CI.CS.stock_cts_stuck
     for i in range(1 + STOCK_CTS_ALERT_FRAMES, 200):
       assert not self.step(CI, pk, i, 4).stockLkas
+
+
+class TestFirstEngageHold:
+  """The EPS's first LKAS engagement after power-up raised LKAS_FAULT 250-300 ms after the first
+  nonzero request on routes 0000001a, 000001bb and 000001e8: standby (block and track), zero
+  delivery, 0.28-0.30 m/s. On the ten other first engagements from that state it delivered
+  nothing until the standby lifted above 1 m/s, so a zero request there withholds no assist.
+  carstate derives the hold; once the EPS has delivered once the same standby is left alone."""
+
+  def crawl(self, rig, effective=0):
+    return rig.step(100, effective, 1, speed_kph=1., track_state=1)
+
+  def test_holds_through_the_first_standby_and_latches_on_delivery(self):
+    rig = UndeliveredRig()
+    self.crawl(rig)  # the parsers take a frame to fill
+    for _ in range(30):
+      self.crawl(rig)
+      assert rig.CS.steer_first_engage_hold
+    self.crawl(rig, effective=8)
+    assert rig.CS.lkas_delivered
+    for _ in range(30):
+      self.crawl(rig)
+      assert not rig.CS.steer_first_engage_hold  # route_118 t248, 12c t125: the same standby later in the drive
+
+  @pytest.mark.parametrize("release", [dict(speed_kph=3.7), dict(blocked=0), dict(track_state=0)])
+  def test_rolling_or_leaving_standby_releases(self, release):
+    rig = UndeliveredRig()
+    self.crawl(rig)
+    self.crawl(rig)
+    assert rig.CS.steer_first_engage_hold
+    kw = dict(speed_kph=1., track_state=1, blocked=1)
+    kw.update(release)
+    rig.step(100, 0, kw.pop('blocked'), **kw)
+    assert not rig.CS.steer_first_engage_hold

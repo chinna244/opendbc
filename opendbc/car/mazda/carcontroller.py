@@ -97,8 +97,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       apply_torque = apply_driver_steer_torque_limits(new_torque, self.apply_torque_last,
                                                       driver_torque, self.params, steer_max)
 
-    # Stop requesting torque after the non-delivery latch; recovery then ramps from zero.
-    if self.steer_to_zero and CS.steer_undelivered:
+    # Stop requesting torque while carstate says the EPS will not take it: after the
+    # non-delivery latch, or through its first engagement of the cycle. Recovery ramps from zero.
+    if self.steer_to_zero and (CS.steer_undelivered or CS.steer_first_engage_hold):
       apply_torque = 0
 
     # Do not cancel a stock MRCC engagement while the stock radar still owns the bus.

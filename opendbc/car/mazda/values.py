@@ -127,6 +127,9 @@ class CarControllerParams:
         self.STEER_UNDELIVERED_ALERT_MIN_SPEED = 12. * CV.MPH_TO_MS
         # A block that began below this speed is the EPS's standby from a stop, whatever
         # LKAS_TRACK_STATE says later in it; only a block that began rolling can be a dropout.
+        # The same boundary gates the first-engagement hold in carstate: on the EPS's first
+        # engagement of the cycle it delivered nothing under standby below it on any start on
+        # record, and faulted on 3 of 13 (docs/zoompilot/mazda-lkas-startup-2026-09-09.md).
         self.STEER_UNDELIVERED_ALERT_ORIGIN_SPEED = 1.0  # m/s
     else:
       # Upstream's envelope. The interface no longer selects it for any Mazda; the panda keeps
