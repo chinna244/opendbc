@@ -483,6 +483,9 @@ class TestWhiteHudController:
       lkas_blocked=False,
       lkas_effective=0,
       lkas_rejected=0,
+      stock_tja=0,
+      steer_first_engage_hold=False,
+      stock_cts_stuck=False,
     )
     for name, value in overrides.items():
       setattr(cs, name, value)

@@ -29,7 +29,8 @@ class TestTjaIcbmSuppressScoping:
   @staticmethod
   def _cs(*, tja_button=0, cruise_available=False, cruise_enabled=False, mrcc_armed_raw=None, crz_btns_counter=0,
           cancel_button=0, resume_button=0, accel_button=0, decel_button=0, mrcc_button=0,
-          distance_button=0, distance_button_active=0):
+          distance_button=0, distance_button_active=0, stock_tja=0, steer_first_engage_hold=False,
+          steer_undelivered=False, lkas_rejected=0):
     if mrcc_armed_raw is None:
       mrcc_armed_raw = cruise_available
     return SimpleNamespace(
@@ -58,8 +59,11 @@ class TestTjaIcbmSuppressScoping:
       lkas_allowed_speed=True,
       lkas_blocked=False,
       lkas_effective=0,
-      lkas_rejected=0,
-      steer_undelivered=False,
+      lkas_rejected=lkas_rejected,
+      steer_undelivered=steer_undelivered,
+      steer_first_engage_hold=steer_first_engage_hold,
+      stock_tja=stock_tja,
+      stock_cts_stuck=False,
     )
 
   @staticmethod
