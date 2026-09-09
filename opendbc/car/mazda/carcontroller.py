@@ -323,9 +323,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     can_sends.extend(self.update_camera_tja(CC, CS))
 
     # CAM_LANEINFO.TJA=2 draws the WHITE wheel, but it is not display-only: the
-    # Mazda body/MRCC consumes it too. Fail closed around cruise/TJA interaction.
-    # Expose WHITE after MRCC has been OFF or ARMED (not ACTIVE) and quiet for
-    # 0.5 s. ACTIVE remains a hard deny. stock_tja (camera RX) stays separate.
+    # Mazda body/MRCC consumes it too. Fail closed around every cruise/TJA
+    # interaction. Only expose WHITE after MRCC has been completely off and quiet
+    # for 0.5 s; ARMED and ACTIVE are hard denies.
+    # stock_tja (camera RX) stays separate from this TX path.
     cruise_state = getattr(CS.out, "cruiseState", None)
     if self.CP.openpilotLongitudinalControl:
       filtered_mrcc_available = bool(getattr(CS, "cruise_available", False))
@@ -345,22 +346,6 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       cruise_state is not None and
       not filtered_mrcc_available and
       not filtered_mrcc_enabled
-    )
-    mrcc_active = (
-      bool(getattr(CS, "cruise_enabled", False)) or
-      filtered_mrcc_enabled
-    )
-    # ARMED for this experiment: available/raw-armed without ACTIVE. Accidental
-    # TJA-induced arms are excluded while the button is held (hud_button_activity)
-    # and by the 0.5 s confirmation once the state is quiet.
-    mrcc_armed = (
-      not mrcc_active and
-      cruise_state is not None and
-      (
-        bool(getattr(CS, "mrcc_armed_raw", False)) or
-        bool(getattr(CS, "cruise_available", False)) or
-        filtered_mrcc_available
-      )
     )
 
     icbm = getattr(CC_SP, "intelligentCruiseButtonManagement", None)
@@ -401,12 +386,12 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       not hud_button_activity
     )
 
-    white_hud_base_allowed = (
+    white_hud_off_base_allowed = (
       tja_button_mazda and
       white_hud_trusted and
-      (mrcc_off or mrcc_armed)
+      mrcc_off
     )
-    if white_hud_base_allowed:
+    if white_hud_off_base_allowed:
       self.mads_white_hud_off_frames = min(
         self.mads_white_hud_off_frames + 1,
         MADS_WHITE_HUD_OFF_CONFIRM_FRAMES,
@@ -415,13 +400,13 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       self.mads_white_hud_off_frames = 0
 
     white_hud = (
-      white_hud_base_allowed and
+      white_hud_off_base_allowed and
       self.mads_white_hud_off_frames >= MADS_WHITE_HUD_OFF_CONFIRM_FRAMES
     )
     withdraw_white_now = self.mads_white_hud_on_bus and not white_hud
 
     # Preserve the normal 2 Hz cadence. Exception: immediate OEM withdraw when WHITE
-    # becomes unsafe (button / ACTIVE / warning / stale / unknown payload).
+    # becomes unsafe (button / ARMED / warning / stale / unknown payload).
     if self.frame % 50 == 0 or withdraw_white_now:
       payload = hud_base if white_hud and hud_base is not None else packed_laneinfo
       alert = (alert[0], mazdacan.apply_mads_white_hud(fsc_raw, payload, white_hud), alert[2])
