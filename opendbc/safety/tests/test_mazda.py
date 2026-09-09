@@ -6,6 +6,7 @@ from opendbc.car import DT_CTRL
 from opendbc.car.lateral import apply_driver_steer_torque_limits
 from opendbc.car.mazda.values import CAR, CarControllerParams, MazdaFlags, MazdaSafetyFlags
 from opendbc.car.structs import CarParams
+from opendbc.sunnypilot.car.mazda.values import MazdaSafetyFlagsSP
 from opendbc.safety.tests.libsafety import libsafety_py
 import opendbc.safety.tests.common as common
 from opendbc.safety.tests.common import CANPackerSafety, make_msg
@@ -15,7 +16,7 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
   """Upstream's envelope with no safety param bit. The interface no longer emits it for any
   Mazda; the panda keeps it as the default, so it stays proven."""
 
-  TX_MSGS = [[0x243, 0], [0x09d, 0], [0x440, 0]]
+  TX_MSGS = [[0x243, 0], [0x09d, 0], [0x440, 0], [0x09d, 2]]
   STANDSTILL_THRESHOLD = .1
   RELAY_MALFUNCTION_ADDRS = {0: (0x243, 0x440)}
   # camera 0x243/0x440 frames forward while openpilot is not controlling
@@ -138,8 +139,9 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
     values = {"CRZ_ACTIVE": enable}
     return self.packer.make_can_msg_safety("CRZ_CTRL", 0, values)
 
-  def _button_msg(self, resume=False, cancel=False, set_m=False, set_p=False):
+  def _button_msg(self, resume=False, cancel=False, set_m=False, set_p=False, tja=False, bus=0):
     values = {
+      "TJA_BUTTON": tja,
       "CAN_OFF": cancel,
       "CAN_OFF_INV": (cancel + 1) % 2,
       "RES": resume,
@@ -149,7 +151,7 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
       "SET_P": set_p,
       "SET_P_INV": (set_p + 1) % 2,
     }
-    return self.packer.make_can_msg_safety("CRZ_BTNS", 0, values)
+    return self.packer.make_can_msg_safety("CRZ_BTNS", bus, values)
 
   def test_buttons(self):
     # only cancel allows while controls not allowed
@@ -191,6 +193,46 @@ class TestMazdaSafety(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTes
           self.assertEqual(fwd_bus, self.safety.safety_fwd_hook(2, addr), f"{mads=} {controls_allowed=} {controls_allowed_lateral=} {addr=:#x}")
           self.assertEqual(not stock_active, self._tx(msg), f"openpilot tx {mads=} {controls_allowed=} {controls_allowed_lateral=} {addr=:#x}")
     self.safety.set_mads_params(False, False, False)
+
+  def _cam_tja_press(self, ctr=5, **overrides):
+    # the wheel's idle pattern with the TJA bit: 00 09 ff Cx 00 00 00 00
+    values = {"TJA_BUTTON": 1, "DISTANCE_LESS_INV": 1, "BIT1": 1, "BIT2": 1, "BIT3": 1, "CAN_OFF_INV": 1, "RES_INV": 1,
+              "SET_P_INV": 1, "SET_M_INV": 1, "DISTANCE_MORE_INV": 1, "MODE_X_INV": 1, "MODE_Y_INV": 1, "CTR": ctr}
+    values.update(overrides)
+    return self.packer.make_can_msg_safety("CRZ_BTNS", 2, values)
+
+  def test_cam_tja_press(self):
+    # openpilot presses the camera's own TJA/CTS off on the camera bus while it steers, so the
+    # two lane-centering systems never run at once. Accepted only while openpilot owns the LKAS
+    # addresses (the eight states of test_stock_passthrough), and only byte-exact: the TJA bit
+    # over the wheel's idle pattern, any counter, no other button
+    self.assertEqual(bytes.fromhex("0009ffd400000000"), bytes(self.packer.make_can_msg("CRZ_BTNS", 2, {
+      "TJA_BUTTON": 1, "DISTANCE_LESS_INV": 1, "BIT1": 1, "BIT2": 1, "BIT3": 1, "CAN_OFF_INV": 1, "RES_INV": 1, "SET_P_INV": 1,
+      "SET_M_INV": 1, "DISTANCE_MORE_INV": 1, "MODE_X_INV": 1, "MODE_Y_INV": 1, "CTR": 5})[1]))
+    for mads in (False, True):
+      self.safety.set_mads_params(mads, False, False)
+      for controls_allowed, controls_allowed_lateral in [(False, False), (True, False), (False, True), (True, True)]:
+        controlling = controls_allowed_lateral or (controls_allowed and not mads)
+        self.safety.set_controls_allowed(controls_allowed)
+        self.safety.set_controls_allowed_lateral(controls_allowed_lateral)
+        for ctr in range(16):
+          self.assertEqual(controlling, self._tx(self._cam_tja_press(ctr=ctr)), f"{mads=} {controls_allowed=} {controls_allowed_lateral=} {ctr=}")
+        # anything else on the camera-side address is refused in every state
+        for other in ({"TJA_BUTTON": 0}, {"CAN_OFF": 1, "CAN_OFF_INV": 0}, {"RES": 1, "RES_INV": 0}, {"SET_P": 1, "SET_P_INV": 0},
+                      {"SET_M": 1, "SET_M_INV": 0}, {"DISTANCE_LESS": 1, "DISTANCE_LESS_INV": 0}, {"MODE_X": 1, "MODE_X_INV": 0},
+                      {"MODE_Y": 1, "MODE_Y_INV": 0}, {"BIT1": 0}, {"BIT2": 0}, {"BIT3": 0}):
+          self.assertFalse(self._tx(self._cam_tja_press(**other)), f"{other=} {mads=} {controls_allowed=} {controls_allowed_lateral=}")
+        self.assertFalse(self._tx(make_msg(2, 0x09d, 8)))
+    self.safety.set_mads_params(False, False, False)
+
+  def test_tja_button_never_pressed_on_the_car_side(self):
+    # bit 11 on bus 0 would toggle MADS through the rx hook and arm MRCC in the body
+    for controls_allowed in (False, True):
+      self.safety.set_controls_allowed(controls_allowed)
+      self.assertFalse(self._tx(self._button_msg(tja=True)))
+      self.assertFalse(self._tx(self._button_msg(tja=True, resume=True)))
+      self.assertFalse(self._tx(self._button_msg(tja=True, cancel=True)))
+      self.assertEqual(controls_allowed, self._tx(self._button_msg(resume=True)))
 
 
 class TestMazdaSteerToZeroEpsSafety(TestMazdaSafety):
@@ -339,7 +381,7 @@ class TestMazdaLongitudinalSafety(TestMazdaSteerToZeroEpsSafety, common.Longitud
   """openpilot longitudinal is only offered on steer-to-zero EPS platforms, so LONG always
   travels with that bit."""
 
-  TX_MSGS = [[0x243, 0], [0x09d, 0], [0x440, 0], [0x21b, 0], [0x21c, 0], [0x499, 0],
+  TX_MSGS = [[0x243, 0], [0x09d, 0], [0x440, 0], [0x09d, 2], [0x21b, 0], [0x21c, 0], [0x499, 0],
              [0x361, 0], [0x362, 0], [0x363, 0], [0x364, 0], [0x365, 0], [0x366, 0], [0x764, 0],
              [0x21b, 2], [0x21c, 2], [0x499, 2], [0x361, 2], [0x362, 2], [0x363, 2], [0x364, 2], [0x365, 2], [0x366, 2]]
 
@@ -749,6 +791,103 @@ class TestMazdaLongitudinalSafety(TestMazdaSteerToZeroEpsSafety, common.Longitud
         self.assertEqual(not active, self._tx(msg))
         self.safety.set_controls_allowed(True)
         self.assertTrue(self._tx(msg))
+
+
+class TestMazdaTjaMads(unittest.TestCase):
+  """The physical TJA button as the MADS lateral switch, declared by the driver.
+
+  The button is fitted to some trims only and neither MAZDA_CX5_2022 nor MAZDA_CX9_2021
+  predicts it, so a sunnypilot safety param carries the driver's declaration. Declared, bit 11
+  drives the MADS button and MRCC no longer touches the main edge in either direction: its
+  falling edge would otherwise exit the panda's lateral while the software's MADS stays on.
+  Undeclared cars keep the MRCC-derived main edge and bit 11 is ignored.
+  """
+
+  def setUp(self):
+    self.packer = CANPackerSafety("mazda_2017")
+    self.safety = libsafety_py.libsafety
+    self._init(tja_button=False)
+
+  def _init(self, tja_button, param=0):
+    self.safety.set_current_safety_param_sp(MazdaSafetyFlagsSP.TJA_BUTTON if tja_button else 0)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, param)
+    self.safety.init_tests()
+    self.safety.set_mads_params(True, False, False)
+
+  def tearDown(self):
+    self.safety.set_current_safety_param_sp(0)
+    self.safety.set_mads_params(False, False, False)
+
+  def _btns(self, tja=False):
+    return self.packer.make_can_msg_safety("CRZ_BTNS", 0, {"TJA_BUTTON": tja})
+
+  def _crz_ctrl(self, main_on):
+    return self.packer.make_can_msg_safety("CRZ_CTRL", 0, {"CRZ_AVAILABLE": main_on})
+
+  def _pedals(self, acc_off):
+    return self.packer.make_can_msg_safety("PEDALS", 0, {"ACC_OFF": acc_off})
+
+  def test_undeclared_keeps_mrcc_path_and_ignores_the_bit(self):
+    self.safety.safety_rx_hook(self._btns(True))
+    self.safety.safety_rx_hook(self._btns(False))
+    self.assertEqual(-1, self.safety.get_mads_button_press())  # UNAVAILABLE
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    self.safety.safety_rx_hook(self._crz_ctrl(True))
+    self.assertTrue(self.safety.get_acc_main_on())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.safety.safety_rx_hook(self._crz_ctrl(False))
+    self.assertFalse(self.safety.get_acc_main_on())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_declared_button_allows_lateral_without_mrcc(self):
+    self._init(tja_button=True)
+    self.safety.safety_rx_hook(self._btns(False))
+    self.assertEqual(0, self.safety.get_mads_button_press())  # NOT_PRESSED
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    self.safety.safety_rx_hook(self._btns(True))
+    self.assertEqual(1, self.safety.get_mads_button_press())  # PRESSED
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    self.safety.safety_rx_hook(self._btns(False))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_declared_button_mrcc_does_not_drive_the_main_edge(self):
+    self._init(tja_button=True)
+    self.safety.safety_rx_hook(self._crz_ctrl(True))
+    self.assertFalse(self.safety.get_acc_main_on())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    self.safety.safety_rx_hook(self._btns(True))
+    self.safety.safety_rx_hook(self._btns(False))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    # the MRCC master button (route 00000018 seg 12) disarms MRCC and the camera, not MADS:
+    # no falling edge here, so the panda's lateral stays with the software's
+    self.safety.safety_rx_hook(self._crz_ctrl(False))
+    self.assertFalse(self.safety.get_acc_main_on())
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_declared_button_under_openpilot_longitudinal(self):
+    # the PEDALS-derived main edge is guarded the same way
+    self._init(tja_button=True, param=MazdaSafetyFlags.LONG | MazdaSafetyFlags.STEER_TO_ZERO_EPS)
+    self.safety.safety_rx_hook(self._pedals(True))
+    self.assertFalse(self.safety.get_acc_main_on())
+    self.safety.safety_rx_hook(self._btns(True))
+    self.safety.safety_rx_hook(self._btns(False))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+    self.safety.safety_rx_hook(self._pedals(False))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_declaration_is_read_at_init(self):
+    self._init(tja_button=True)
+    self.safety.safety_rx_hook(self._crz_ctrl(True))
+    self.assertFalse(self.safety.get_acc_main_on())
+
+    self._init(tja_button=False)
+    self.safety.safety_rx_hook(self._crz_ctrl(True))
+    self.assertTrue(self.safety.get_acc_main_on())
 
 
 class TestMazdaIgnition(unittest.TestCase):

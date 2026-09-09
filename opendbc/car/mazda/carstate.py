@@ -4,6 +4,7 @@ from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
 from opendbc.car.mazda.values import DBC, LKAS_LIMITS, CarControllerParams, MazdaFlags
 from opendbc.sunnypilot.car.mazda.carstate_ext import CarStateExt
+from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP
 
 ButtonType = structs.CarState.ButtonEvent.Type
 
@@ -12,6 +13,7 @@ STOCK_RADAR_ALIVE_FRAMES = int(CarControllerParams.STOCK_RADAR_ALIVE_T / DT_CTRL
 STOCK_RADAR_GUARD_FRAMES = round(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CTRL)
 CANCEL_CONTEXT_FRAMES = int(CarControllerParams.CANCEL_CONTEXT_T / DT_CTRL)
 CAM_LANEINFO_FRESH_FRAMES = int(CarControllerParams.CAM_LANEINFO_FRESH_T / DT_CTRL)
+STOCK_CTS_ALERT_FRAMES = int(CarControllerParams.STOCK_CTS_ALERT_T / DT_CTRL)
 
 
 class CarState(CarStateBase, CarStateExt):
@@ -37,6 +39,13 @@ class CarState(CarStateBase, CarStateExt):
     # with src 192 (bus 0 + 0xC0). Zero-torque refusals while disengaged are not counted.
     self.lkas_rejected = 0
     self.lkas_fault = False
+    # The camera's own TJA/CTS state from its 0x440: 0 off, 2 armed, 3 to 5 steering. Live,
+    # never latched; 0 when the camera is stale.
+    self.stock_tja = 0
+    # Raised by the controller once per arming episode when its camera presses did not clear
+    # stock_tja; consumed here into a stockLkas pulse.
+    self.stock_cts_stuck = False
+    self.stock_cts_alert_frames = 0
 
     self.distance_button = 0
     self.accel_button = 0
@@ -44,6 +53,7 @@ class CarState(CarStateBase, CarStateExt):
     self.cancel_button = 0
     self.resume_button = 0
     self.main_button = 0
+    self.tja_button = 0
 
     self.cruise_available = False
     self.cruise_enabled = False
@@ -278,6 +288,16 @@ class CarState(CarStateBase, CarStateExt):
     self.cam_lkas = cp_cam.vl["CAM_LKAS"]
     self.cam_laneinfo = cp_cam.vl["CAM_LANEINFO"]
     ret.steerFaultPermanent = cp_cam.vl["CAM_LKAS"]["ERR_BIT_1"] == 1
+    self.stock_tja = int(self.cam_laneinfo["TJA"]) if cam_laneinfo_fresh else 0
+
+    # The camera stayed armed through the controller's presses: one pulse of stockLkas, which
+    # the Mazda event hook turns into a one-shot warning. openpilot keeps steering; the panda
+    # blocks the camera's own command meanwhile.
+    if self.stock_cts_stuck:
+      self.stock_cts_stuck = False
+      self.stock_cts_alert_frames = STOCK_CTS_ALERT_FRAMES
+    ret.stockLkas = self.stock_cts_alert_frames > 0
+    self.stock_cts_alert_frames = max(self.stock_cts_alert_frames - 1, 0)
 
     # Decode distance, set-speed, resume, cancel, and main-button events.
     prev_distance_button = self.distance_button
@@ -286,6 +306,7 @@ class CarState(CarStateBase, CarStateExt):
     prev_cancel_button = self.cancel_button
     prev_resume_button = self.resume_button
     prev_main_button = self.main_button
+    prev_tja_button = self.tja_button
     self.distance_button = cp.vl["CRZ_BTNS"]["DISTANCE_LESS"]
     # SET_P is the wheel's increase button; RES is a distinct resume button.
     self.accel_button = cp.vl["CRZ_BTNS"]["SET_P"]
@@ -294,6 +315,8 @@ class CarState(CarStateBase, CarStateExt):
     self.cancel_button = cp.vl["CRZ_BTNS"]["CAN_OFF"]
     self.resume_button = cp.vl["CRZ_BTNS"]["RES"]
     self.main_button = int(cp.vl["CRZ_BTNS"]["MODE_X"] == 1 and cp.vl["CRZ_BTNS"]["MODE_Y"] == 1)
+    # Only a car declared to have the physical TJA button reports it as the MADS switch.
+    self.tja_button = int(cp.vl["CRZ_BTNS"]["TJA_BUTTON"] == 1) if self.CP_SP.flags & MazdaFlagsSP.TJA_BUTTON else 0
 
     ret.buttonEvents = [
       *create_button_events(self.distance_button, prev_distance_button, {1: ButtonType.gapAdjustCruise}),
@@ -302,6 +325,7 @@ class CarState(CarStateBase, CarStateExt):
       *create_button_events(self.cancel_button, prev_cancel_button, {1: ButtonType.cancel}),
       *create_button_events(self.resume_button, prev_resume_button, {1: ButtonType.resumeCruise}),
       *create_button_events(self.main_button, prev_main_button, {1: ButtonType.mainCruise}),
+      *create_button_events(self.tja_button, prev_tja_button, {1: ButtonType.lkas}),
     ]
 
     CarStateExt.update(self, ret, ret_sp, can_parsers)

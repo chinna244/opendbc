@@ -14,8 +14,10 @@ from opendbc.car import Bus, DT_CTRL
 from opendbc.car import structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda import mazdacan
+from opendbc.car.mazda.carstate import CAM_LANEINFO_FRESH_FRAMES, STOCK_CTS_ALERT_FRAMES
 from opendbc.car.mazda.tests.conftest import car_interface, packer
 from opendbc.car.mazda.values import CarControllerParams
+from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP
 
 CAM_LANEINFO = 0x440
 CAM_EMPTY = 0x21d
@@ -585,15 +587,81 @@ class TestSteerUndeliveredLatch:
       assert ret.steerFaultTemporary == expect, f"origin {v0} m/s"
 
 
-class TestMainCruiseButtonEvents:
+class TestTjaButtonEvents:
+  """The physical TJA button is published as an lkas event alongside, not instead of,
+  mainCruise, once the driver has declared the button. Undeclared, bit 11 is ignored so a
+  stray press can never toggle lateral on a car that runs the ACC-main path."""
+
   ButtonType = structs.CarState.ButtonEvent.Type
 
   def _btns(self, CI, pk, i, **values):
     ret, _ = feed(CI, i, pk.make_can_msg("CRZ_BTNS", 0, values))
     return ret
 
+  def _declared(self):
+    CI = car_interface(alpha_long=False)
+    CI.CP_SP.flags |= MazdaFlagsSP.TJA_BUTTON
+    return CI
+
+  def test_tja_press_emits_an_lkas_event(self):
+    CI, pk = self._declared(), packer()
+    self._btns(CI, pk, 0, TJA_BUTTON=0)
+    ret = self._btns(CI, pk, 1, TJA_BUTTON=1)
+    assert [be.type for be in ret.buttonEvents] == [self.ButtonType.lkas]
+    assert ret.buttonEvents[0].pressed
+
+  def test_no_event_without_the_button(self):
+    CI, pk = self._declared(), packer()
+    for i in range(10):
+      ret = self._btns(CI, pk, i, TJA_BUTTON=0)
+      assert not [be for be in ret.buttonEvents if be.type == self.ButtonType.lkas]
+
+  def test_undeclared_ignores_the_bit(self):
+    CI, pk = car_interface(alpha_long=False), packer()
+    self._btns(CI, pk, 0, TJA_BUTTON=0)
+    ret = self._btns(CI, pk, 1, TJA_BUTTON=1)
+    assert not [be for be in ret.buttonEvents if be.type == self.ButtonType.lkas]
+
   def test_main_cruise_event_is_unchanged(self):
     CI, pk = car_interface(alpha_long=False), packer()
     self._btns(CI, pk, 0, MODE_X=0, MODE_Y=0)
     ret = self._btns(CI, pk, 1, MODE_X=1, MODE_Y=1)
     assert [be.type for be in ret.buttonEvents] == [self.ButtonType.mainCruise]
+
+
+class TestStockTja:
+  """The camera's own TJA/CTS state, read live off its 0x440 for the controller's camera press:
+  0 off, 2 armed, 3 to 5 steering. Never latched (the camera drops its own arm, route 00000018
+  seg 9), and 0 once the camera goes stale."""
+
+  def step(self, CI, pk, i, tja):
+    ret, _ = feed(CI, i, pk.make_can_msg("CAM_LANEINFO", 2, {"TJA": tja, "LANE_LINES": 3}))
+    return ret
+
+  def test_follows_the_camera_frame_by_frame(self):
+    CI, pk = car_interface(alpha_long=False), packer()
+    for i, tja in enumerate([0, 2, 2, 4, 3, 0, 2, 0]):
+      self.step(CI, pk, i, tja)
+      assert CI.CS.stock_tja == tja
+
+  def test_stale_camera_reads_off(self):
+    CI, pk = car_interface(alpha_long=False), packer()
+    self.step(CI, pk, 0, 4)
+    assert CI.CS.stock_tja == 4
+    for i in range(1, CAM_LANEINFO_FRESH_FRAMES):
+      CI.update([(t_ns(i), [])])
+      assert CI.CS.stock_tja == 4
+    CI.update([(t_ns(CAM_LANEINFO_FRESH_FRAMES), [])])
+    assert CI.CS.stock_tja == 0
+
+  def test_the_controllers_stuck_flag_is_one_stocklkas_pulse(self):
+    # the controller raises stock_cts_stuck once per arming episode; carstate consumes it into a
+    # short stockLkas pulse (the alert's own duration does the showing) and never repeats it
+    CI, pk = car_interface(alpha_long=False), packer()
+    assert not self.step(CI, pk, 0, 4).stockLkas
+    CI.CS.stock_cts_stuck = True
+    for i in range(1, 1 + STOCK_CTS_ALERT_FRAMES):
+      assert self.step(CI, pk, i, 4).stockLkas
+    assert not CI.CS.stock_cts_stuck
+    for i in range(1 + STOCK_CTS_ALERT_FRAMES, 200):
+      assert not self.step(CI, pk, i, 4).stockLkas
