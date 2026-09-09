@@ -16,7 +16,6 @@ from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.tests.conftest import car_interface, packer
 from opendbc.car.mazda.values import CarControllerParams
-from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP
 
 CAM_LANEINFO = 0x440
 CAM_EMPTY = 0x21d
@@ -586,40 +585,12 @@ class TestSteerUndeliveredLatch:
       assert ret.steerFaultTemporary == expect, f"origin {v0} m/s"
 
 
-class TestTjaButtonEvents:
-  """The physical TJA button is published as an lkas event alongside, not instead of,
-  mainCruise, once the driver has declared the button. Undeclared, bit 11 is ignored so a
-  stray press can never toggle lateral on a car that runs the ACC-main path."""
-
+class TestMainCruiseButtonEvents:
   ButtonType = structs.CarState.ButtonEvent.Type
 
   def _btns(self, CI, pk, i, **values):
     ret, _ = feed(CI, i, pk.make_can_msg("CRZ_BTNS", 0, values))
     return ret
-
-  def _declared(self):
-    CI = car_interface(alpha_long=False)
-    CI.CP_SP.flags |= MazdaFlagsSP.TJA_BUTTON
-    return CI
-
-  def test_tja_press_emits_an_lkas_event(self):
-    CI, pk = self._declared(), packer()
-    self._btns(CI, pk, 0, TJA_BUTTON=0)
-    ret = self._btns(CI, pk, 1, TJA_BUTTON=1)
-    assert [be.type for be in ret.buttonEvents] == [self.ButtonType.lkas]
-    assert ret.buttonEvents[0].pressed
-
-  def test_no_event_without_the_button(self):
-    CI, pk = self._declared(), packer()
-    for i in range(10):
-      ret = self._btns(CI, pk, i, TJA_BUTTON=0)
-      assert not [be for be in ret.buttonEvents if be.type == self.ButtonType.lkas]
-
-  def test_undeclared_ignores_the_bit(self):
-    CI, pk = car_interface(alpha_long=False), packer()
-    self._btns(CI, pk, 0, TJA_BUTTON=0)
-    ret = self._btns(CI, pk, 1, TJA_BUTTON=1)
-    assert not [be for be in ret.buttonEvents if be.type == self.ButtonType.lkas]
 
   def test_main_cruise_event_is_unchanged(self):
     CI, pk = car_interface(alpha_long=False), packer()

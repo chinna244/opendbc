@@ -8,11 +8,6 @@
 #define MAZDA_CRZ_INFO      0x21bU
 #define MAZDA_CRZ_CTRL      0x21cU
 #define MAZDA_CRZ_BTNS      0x09dU
-// Physical TJA button, DBC start bit 11 (byte 1, bit 3). Observed on a CTS-equipped gen1
-// Mazda; trims without the button hold it low for the life of a drive.
-#define MAZDA_TJA_BUTTON_BIT 11U
-// sunnypilot safety param: the TJA button is the MADS lateral switch
-#define MAZDA_PARAM_SP_TJA_BUTTON 1U
 #define MAZDA_RADAR_STATIC  0x499U
 #define MAZDA_RADAR_TRACK_1 0x361U
 #define MAZDA_RADAR_TRACK_2 0x362U
@@ -43,8 +38,6 @@
 #define MAZDA_CANCEL_CONTEXT_FRAMES 25U
 
 static bool mazda_longitudinal = false;
-// Declared by the driver: the TJA button owns lateral and MRCC no longer drives the main edge.
-static bool mazda_tja_button = false;
 static bool mazda_steer_to_zero_eps = false;
 static bool mazda_legacy_fw_eps = false;
 static uint32_t mazda_engage_btn_frames = 0U;
@@ -135,15 +128,7 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
     if ((msg->addr == MAZDA_CRZ_CTRL) && !mazda_longitudinal) {
       bool cruise_engaged = msg->data[0] & 0x8U;
       pcm_cruise_check(cruise_engaged);
-      // With the TJA button owning lateral, MRCC no longer drives the MADS main edge.
-      if (!mazda_tja_button) {
-        acc_main_on = GET_BIT(msg, 17U);
-      }
-    }
-
-    if ((msg->addr == MAZDA_CRZ_BTNS) && mazda_tja_button) {
-      // The physical TJA button is the MADS lateral switch, so lateral no longer follows MRCC.
-      mads_button_press = GET_BIT(msg, MAZDA_TJA_BUTTON_BIT) ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
+      acc_main_on = GET_BIT(msg, 17U);
     }
 
     if ((msg->addr == MAZDA_CRZ_BTNS) && mazda_longitudinal) {
@@ -186,14 +171,12 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
         // held under braking unless a wheel cancel explains it. Without the cancel path, main
         // toggled at a stop with the brake held never falls, the next press has no rising edge,
         // and MADS runs into 200 rejected frames (route 000001c9--0b2a64a214 seg 0).
-        if (!mazda_tja_button) {
-          if (acc_armed) {
-            // Gate the main edge on radar ownership to align with software availability.
-            acc_main_on = mazda_radar_was_silenced;
-          } else if (brake_free || (mazda_cancel_context_frames > 0U)) {
-            acc_main_on = false;
-          } else {
-          }
+        if (acc_armed) {
+          // Gate the main edge on radar ownership to align with software availability.
+          acc_main_on = mazda_radar_was_silenced;
+        } else if (brake_free || (mazda_cancel_context_frames > 0U)) {
+          acc_main_on = false;
+        } else {
         }
         if (mazda_cancel_context_frames > 0U) {
           mazda_cancel_context_frames -= 1U;
@@ -220,10 +203,12 @@ static bool mazda_is_lka_addr(int addr) {
   return (((unsigned int)addr == MAZDA_LKAS) || ((unsigned int)addr == MAZDA_LKAS_HUD));
 }
 
-// The camera owns LKAS addresses while both axes are inactive; openpilot owns them once
-// either axis engages, including idle 0x243 under longitudinal control.
+// The camera owns the LKAS addresses whenever openpilot is not steering. Lateral is its own
+// axis under MADS (controls_allowed_lateral); with MADS off it follows cruise. Cruise alone must
+// not claim them: under stock long that silenced the camera's own TJA/CTS with MADS off while the
+// dash showed nothing (route 00000018--5655da2c1c seg 15).
 static bool mazda_openpilot_controlling(void) {
-  return controls_allowed || controls_allowed_lateral;
+  return controls_allowed_lateral || (controls_allowed && !m_mads_state.system_enabled);
 }
 
 static bool mazda_tx_hook(const CANPacket_t *msg) {
@@ -421,7 +406,6 @@ static safety_config mazda_init(uint16_t param) {
   mazda_longitudinal = GET_FLAG(param, MAZDA_PARAM_LONGITUDINAL);
   mazda_steer_to_zero_eps = GET_FLAG(param, MAZDA_PARAM_STEER_TO_ZERO_EPS);
   mazda_legacy_fw_eps = GET_FLAG(param, MAZDA_PARAM_LEGACY_FW_EPS);
-  mazda_tja_button = GET_FLAG(current_safety_param_sp, MAZDA_PARAM_SP_TJA_BUTTON);
   acc_main_on = false;
 
   return mazda_longitudinal ? BUILD_SAFETY_CFG(mazda_long_rx_checks, MAZDA_LONG_TX_MSGS) :
