@@ -243,9 +243,12 @@ static bool mazda_openpilot_controlling(void) {
 
 // The one CRZ_BTNS frame openpilot may put on the camera bus: the TJA button pressed over the
 // wheel's idle pattern (00 09 ff Cx 00 00 00 00, Cx = MODE_X_INV, MODE_Y_INV and the counter),
-// no other button. It presses the camera's own TJA/CTS off while openpilot steers, so the two
-// lane-centering systems never run at once (docs/zoompilot/mazda-lateral.md, "The camera's
-// own TJA/CTS state").
+// no other button. It presses the camera's own TJA/CTS off whenever the camera is armed, so the
+// two lane-centering systems never run at once and the camera never takes the wheel behind a
+// MADS-off press. Accepted in every state: the frame only reaches the camera and can only
+// toggle its lane centering, which the wheel button does anyway; the camera's torque is still
+// vetoed whenever openpilot steers (docs/zoompilot/mazda-lateral.md, "The camera's own TJA/CTS
+// state").
 static bool mazda_cam_tja_press_msg_valid(const CANPacket_t *msg) {
   return (msg->data[0] == 0x00U) && (msg->data[1] == 0x09U) && (msg->data[2] == 0xffU) &&
          ((msg->data[3] & 0xc3U) == 0xc0U) && (msg->data[4] == 0x00U) && (msg->data[5] == 0x00U) &&
@@ -377,9 +380,8 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   }
 
   if ((msg->bus == (unsigned char)MAZDA_CAM) && (msg->addr == MAZDA_CRZ_BTNS)) {
-    // The camera-side press exists only to switch the camera's TJA/CTS off under openpilot's
-    // steering, so it is accepted only then and only byte-exact.
-    if (!mazda_openpilot_controlling() || !mazda_cam_tja_press_msg_valid(msg)) {
+    // The camera-side press exists only to switch the camera's TJA/CTS off: byte-exact, any state.
+    if (!mazda_cam_tja_press_msg_valid(msg)) {
       tx = false;
     }
   }
