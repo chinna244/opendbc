@@ -648,6 +648,10 @@ class TestMazdaLongitudinalSafety(TestMazdaSteerToZeroEpsSafety, common.Longitud
     # under a step -- the 0x243 starvation that latched the camera fault on routes 116/117.
     # Same PEDALS frames to both machines; the stock CRZ_INFO only the software sees; our first
     # synthetic CRZ_INFO tx at the controller's latest possible frame (alive window + LONG_STEP).
+    # Radar-session ownership: CarState only arms after the controller claims the bus, and the
+    # silence counter only advances on a healthy main bus (ENGINE_DATA witness). This harness
+    # drives CarState + panda only, so mirror the controller claim once the guard has lifted
+    # (same pattern as test_mazda_carstate.feed_guard).
     from opendbc.can import CANPacker
     from opendbc.car import gen_empty_fingerprint
     from opendbc.car.mazda import mazdacan
@@ -660,6 +664,7 @@ class TestMazdaLongitudinalSafety(TestMazdaSteerToZeroEpsSafety, common.Longitud
     CI = CarInterface(CP, CP_SP)
     packer = CANPacker("mazda_2017")
     pedals = packer.make_can_msg("PEDALS", 0, {"ACC_OFF": 1})
+    engine = packer.make_can_msg("ENGINE_DATA", 0, {"SPEED": 0})
     last_stock = 200  # 100 Hz control frames; the stock radar's last CRZ_INFO lands here
     first_tx = last_stock + STOCK_RADAR_ALIVE_FRAMES + CarControllerParams.LONG_STEP
     panda_armed_at = software_armed_at = None
@@ -668,8 +673,12 @@ class TestMazdaLongitudinalSafety(TestMazdaSteerToZeroEpsSafety, common.Longitud
       if i % 2 == 0:  # the 50 Hz PEDALS clock, MRCC main armed from the first frame
         self._rx(self._acc_armed_msg(True))
         msgs.append(pedals)
+        msgs.append(engine)
         if i <= last_stock:
           msgs.append(mazdacan.create_acc_command(packer, 0, i // 2, 0., long_active=False, acc_available=True))
+      # Controller owns radar_control_active in production; adopt once silence is established.
+      if CI.CS.stock_radar_gone:
+        CI.CS.radar_control_active = True
       ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(m[0], m[1], m[2]) for m in msgs])])
       if i == first_tx:
         self.assertTrue(self._tx(common.make_msg(0, 0x21b, 8, self.SYNTHETIC_CRZ_INFO_STANDBY)))

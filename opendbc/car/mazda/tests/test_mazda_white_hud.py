@@ -486,6 +486,10 @@ class TestWhiteHudController:
       stock_tja=0,
       steer_first_engage_hold=False,
       stock_cts_stuck=False,
+      radar_handback_active=False,
+      radar_bus_healthy=True,
+      radar_session_refused=False,
+      radar_session_response=0,
     )
     for name, value in overrides.items():
       setattr(cs, name, value)

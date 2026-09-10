@@ -64,6 +64,11 @@ class TestTjaIcbmSuppressScoping:
       steer_first_engage_hold=steer_first_engage_hold,
       stock_tja=stock_tja,
       stock_cts_stuck=False,
+      radar_handback_active=False,
+      radar_bus_healthy=True,
+      radar_session_refused=False,
+      radar_session_response=0,
+      fsc_settled=True,
     )
 
   @staticmethod
