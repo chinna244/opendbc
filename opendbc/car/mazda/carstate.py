@@ -75,6 +75,7 @@ class CarState(CarStateBase, CarStateExt):
     self.main_can_silent_frames = {name: fresh for name, (_, fresh) in MAIN_CAN_WITNESSES.items()}
     self.radar_bus_healthy = False
     self.radar_control_active = False  # controller owns replacement traffic, read on the next update
+    self.radar_owned = False  # the silence guard passed on an owned radar: the engagement gate below
     self.radar_restore_failed = False
     self.radar_handback_active = False
     self.radar_was_silenced = False
@@ -275,6 +276,7 @@ class CarState(CarStateBase, CarStateExt):
       silenced = self.radar_control_active and not self.stock_radar_alive and (self.stock_radar_gone or self.radar_was_silenced)
       ret.accFaulted = self.radar_restore_failed or (self.radar_was_silenced and self.stock_radar_alive and not self.radar_handback_active)
       self.radar_was_silenced |= silenced
+      self.radar_owned = silenced
 
       # Gate enabled with available so a stock engagement inside the ownership guard cannot
       # latch MADS. Require an idle transition before adopting a later engagement.

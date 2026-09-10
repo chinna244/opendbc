@@ -660,12 +660,17 @@ class TestMazdaLongitudinalSafety(TestMazdaSteerToZeroEpsSafety, common.Longitud
     first_tx = last_stock + STOCK_RADAR_ALIVE_FRAMES + CarControllerParams.LONG_STEP
     panda_armed_at = software_armed_at = None
     for i in range(last_stock + 3 * STOCK_RADAR_GUARD_FRAMES):
-      msgs = []
+      # the 100 Hz bus witness: radar silence is only evidence while the vehicle bus is fresh
+      msgs = [packer.make_can_msg("ENGINE_DATA", 0, {"SPEED": 0})]
       if i % 2 == 0:  # the 50 Hz PEDALS clock, MRCC main armed from the first frame
         self._rx(self._acc_armed_msg(True))
         msgs.append(pedals)
         if i <= last_stock:
           msgs.append(mazdacan.create_acc_command(packer, 0, i // 2, 0., long_active=False, acc_available=True))
+      # the controller's ownership claim (radar_session.py replacement_active -> carstate
+      # radar_control_active) starts with the first synthetic frame; carstate then runs its own
+      # silence guard on top of it, which is the ordering under test
+      CI.CS.radar_control_active = i >= first_tx
       ret, _ = CI.update([(int(i * DT_CTRL * 1e9), [(m[0], m[1], m[2]) for m in msgs])])
       if i == first_tx:
         self.assertTrue(self._tx(common.make_msg(0, 0x21b, 8, self.SYNTHETIC_CRZ_INFO_STANDBY)))

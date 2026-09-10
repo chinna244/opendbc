@@ -14,13 +14,14 @@ from opendbc.car.mazda.radar_session import RADAR_SESSION_LIMIT_FRAMES, RADAR_RE
 from opendbc.car.mazda.tests.conftest import (CRZ_CTRL, CRZ_INFO, RADAR_STATIC, RADAR_UDS, SESSION_DFLT_DAT, SESSION_PROG_DAT,
                                               TESTER_PRESENT_DAT, LongCtrlState, frames, step_long)
 from opendbc.car.mazda.values import CarControllerParams
+from opendbc.sunnypilot.car.stock_ecu import StockEcuState
 
 
 class RadarSessionManager(RadarSessionManager):
   """Direct-driven manager: counts the controller frame the production caller passes in."""
 
-  def __init__(self):
-    super().__init__()
+  def __init__(self, **kwargs):
+    super().__init__(**kwargs)
     self.n = -1
 
   def update(self, *args, **kwargs):
@@ -61,11 +62,8 @@ class TestRadarSessionBounds:
     assert m.handback_failed and not m.handback_completed
     assert m.diagnostic_message is None
 
-  def test_completed_handback_never_resilences(self):
-    # the parked toggle-off regression: the monitor's CC_SP assert used to drop after its done
-    # latch, the manager read that as a withdrawal, fell to STOCK, and re-entered SILENCING on
-    # the same call (parked, gate still passed) -- re-silencing the radar it had just handed
-    # back, right before shutdown, leaving it to a degraded unattended S3 recovery
+  def test_ordered_handback_stays_stock_while_the_request_stands(self):
+    # the lifecycle holds its assert for the whole stop: no re-silencing right before shutdown
     m = RadarSessionManager()
     m.update(True, False, False, standstill=True, session_refused=False, stock_radar_gone=True)
     assert m.state == RadarSessionState.SILENCED
@@ -73,11 +71,22 @@ class TestRadarSessionBounds:
     assert m.state == RadarSessionState.HANDBACK
     for _ in range(CarControllerParams.RADAR_UDS_STEP + RADAR_RESTORE_FRAMES):
       m.update(True, True, True, standstill=True, session_refused=False, stock_radar_gone=False)
-    assert m.state == RadarSessionState.STOCK
-    for handback in (True, False):
-      for alive in (True, False):
-        for _ in range(5):
-          assert m.update(True, alive, handback, standstill=True, session_refused=False, stock_radar_gone=not alive) == RadarSessionState.STOCK
+    assert m.state == RadarSessionState.STOCK and m.handback_completed
+    for alive in (True, False):
+      for _ in range(5):
+        assert m.update(True, alive, True, standstill=True, session_refused=False, stock_radar_gone=not alive) == RadarSessionState.STOCK
+    assert m.status.state == StockEcuState.RESTORED
+
+  def test_withdrawn_request_after_the_restore_is_a_fresh_start(self):
+    # forced offroad cancelled once the radar was handed back: the next takeover is a first one
+    m = RadarSessionManager()
+    m.update(True, False, False, standstill=True, session_refused=False, stock_radar_gone=True)
+    m.update(True, False, True, standstill=True, session_refused=False, stock_radar_gone=True)
+    for _ in range(CarControllerParams.RADAR_UDS_STEP + RADAR_RESTORE_FRAMES):
+      m.update(True, True, True, standstill=True, session_refused=False, stock_radar_gone=False)
+    assert m.handback_completed
+    assert m.update(True, True, False, standstill=True, session_refused=False, stock_radar_gone=False) == RadarSessionState.SILENCING
+    assert not m.handback_completed and not m.handback_ordered
 
   def test_withdrawn_handback_finishes_restoration(self):
     # A reversal must finish restoration; card cycles using the latest toggle value.
@@ -166,7 +175,11 @@ class TestRadarSessionSequencing:
       assert SESSION_PROG_DAT not in uds(sends)
     assert saw_default
     assert cc.radar_session.handback_completed
-    assert boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True) == []
+    # the request withdrawn after the restore (toggle flipped back): a fresh parked takeover
+    resumed = False
+    for _ in range(CarControllerParams.RADAR_UDS_STEP + 1):
+      resumed |= SESSION_PROG_DAT in uds(boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True))
+    assert resumed
 
   def test_cancel_inflight_teardown_covers_late_silence(self, cc, cs):
     boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True)
@@ -249,17 +262,16 @@ class TestRadarSessionSequencing:
     sends = boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, cruise_engaged=False)
     assert SESSION_PROG_DAT in uds(sends)
 
-  def test_completed_handback_stays_stock_after_the_assert_drops(self, cc, cs):
-    # CC_SP is rebuilt every frame, so once the toggle monitor's done latch stops asserting
-    # the hand-back the manager sees handback=False; a completed hand-back must not turn
-    # into a fresh takeover on the very next frame (parked => standstill, gate still passed)
+  def test_completed_handback_stays_stock_while_asserted(self, cc, cs):
+    # the hand-back server holds CC_SP.stockEcuHandBack for the whole stop; nothing goes on the
+    # bus once stock traffic is back
     boot_step(cc, cs, stock_radar_alive=False, fsc_settled=True)
     boot_step(cc, cs, stock_radar_alive=False, fsc_settled=True, handback=True)
     for _ in range(CarControllerParams.RADAR_UDS_STEP + RADAR_RESTORE_FRAMES):
       boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, handback=True)
     assert cc.radar_session.handback_completed
     for _ in range(200):
-      assert boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, handback=False) == []
+      assert boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, handback=True) == []
 
   def test_s3_recovery_resilences(self, cc, cs):
     # radar reappears mid-drive (dropped tester present, S3 timeout): re-request the session
@@ -290,3 +302,164 @@ class TestRadarSessionSequencing:
     cc.frame = 0
     sends = boot_step(cc, cs, stock_radar_alive=False, stock_radar_gone=True, fsc_settled=True, standstill=False)
     assert len(synthetic(sends)) > 0
+
+
+def _stock(m, standstill, alive=True, refused=False, gate=True, **kw):
+  return m.update(gate, alive, False, standstill=standstill, session_refused=refused, stock_radar_gone=not alive, **kw)
+
+
+class TestMovingTakeover:
+  """A fresh session started with the car rolling (forced offroad exit, process restart): a
+  radar with a moving handover on record is requested at speed; every other radar waits for
+  the stop, and the status says which."""
+
+  def test_capable_radar_is_requested_while_moving(self):
+    m = RadarSessionManager(moving_takeover=True)
+    assert _stock(m, standstill=False) == RadarSessionState.SILENCING
+    assert m.attempt_moving
+    while not m.programming_sent:
+      _stock(m, standstill=False)
+    assert _stock(m, standstill=False, alive=False) == RadarSessionState.SILENCED
+    assert m.status.state == StockEcuState.STARTING  # owned, guard not yet passed
+    _stock(m, standstill=False, alive=False, owned=True)
+    assert m.status.state == StockEcuState.READY
+
+  def test_default_configuration_waits_for_the_stop(self):
+    m = RadarSessionManager()
+    for _ in range(300):
+      assert _stock(m, standstill=False) == RadarSessionState.STOCK
+    assert m.status.state == StockEcuState.PARK_TO_TAKE_OVER
+    assert _stock(m, standstill=True) == RadarSessionState.SILENCING
+
+  @pytest.mark.parametrize("how", ["refused", "timeout"])
+  def test_moving_refusal_leaves_the_parked_attempt_open(self, how):
+    # the radar saying no at speed says nothing about the parked path every configuration has
+    # on record: no more moving attempts this session, the next stop is requested as usual
+    m = RadarSessionManager(moving_takeover=True)
+    _stock(m, standstill=False)
+    if how == "refused":
+      assert _stock(m, standstill=False, refused=True) == RadarSessionState.HANDBACK
+    else:
+      for _ in range(RADAR_SESSION_LIMIT_FRAMES + 1):
+        state = _stock(m, standstill=False)
+      assert state == RadarSessionState.HANDBACK
+    assert m.moving_closed and not m.silencing_failed
+    for _ in range(CarControllerParams.RADAR_UDS_STEP + RADAR_RESTORE_FRAMES):
+      _stock(m, standstill=False)
+    assert m.state == RadarSessionState.STOCK and not m.handback_completed
+    for _ in range(200):
+      assert _stock(m, standstill=False) == RadarSessionState.STOCK
+    assert m.status.state == StockEcuState.PARK_TO_TAKE_OVER
+    assert _stock(m, standstill=True) == RadarSessionState.SILENCING
+    assert not m.attempt_moving
+
+  def test_parked_refusal_is_definitive(self):
+    m = RadarSessionManager(moving_takeover=True)
+    _stock(m, standstill=True)
+    _stock(m, standstill=True, refused=True)
+    assert m.silencing_failed
+    for _ in range(CarControllerParams.RADAR_UDS_STEP + RADAR_RESTORE_FRAMES + 50):
+      _stock(m, standstill=True)
+    for standstill in (True, False):
+      assert _stock(m, standstill=standstill) == RadarSessionState.STOCK
+    assert m.status.state == StockEcuState.FAILED
+
+  def test_motion_change_mid_attempt(self):
+    # capable: a parked attempt carries on when the car pulls away and a moving one when it
+    # stops; default: pulling away undoes the queued request, as before
+    m = RadarSessionManager(moving_takeover=True)
+    _stock(m, standstill=True)
+    while not m.programming_sent:
+      _stock(m, standstill=True)
+    assert _stock(m, standstill=False) == RadarSessionState.SILENCING
+    m2 = RadarSessionManager(moving_takeover=True)
+    _stock(m2, standstill=False)
+    assert _stock(m2, standstill=True) == RadarSessionState.SILENCING
+    m3 = RadarSessionManager()
+    _stock(m3, standstill=True)
+    while not m3.programming_sent:
+      _stock(m3, standstill=True)
+    assert _stock(m3, standstill=False) == RadarSessionState.HANDBACK
+
+  def test_undone_request_leaves_the_next_attempt_open(self):
+    # undoing our own request (motion on a parked-only radar) is not an ordered hand-back
+    m = RadarSessionManager()
+    _stock(m, standstill=True)
+    while not m.programming_sent:
+      _stock(m, standstill=True)
+    _stock(m, standstill=False)
+    for _ in range(CarControllerParams.RADAR_UDS_STEP + RADAR_RESTORE_FRAMES):
+      _stock(m, standstill=False)
+    assert m.state == RadarSessionState.STOCK and not m.handback_completed
+    assert _stock(m, standstill=True) == RadarSessionState.SILENCING
+
+  def test_returned_radar_is_only_resilenced_parked(self):
+    # a radar heard again under our frames came back through its own S3 timeout; a moving
+    # re-request is not on record for any configuration
+    m = RadarSessionManager(moving_takeover=True)
+    _stock(m, standstill=False, alive=False)
+    assert m.state == RadarSessionState.SILENCED
+    assert _stock(m, standstill=False) == RadarSessionState.STOCK
+    for _ in range(200):
+      assert _stock(m, standstill=False) == RadarSessionState.STOCK
+    assert m.status.state == StockEcuState.PARK_TO_TAKE_OVER
+    assert _stock(m, standstill=True) == RadarSessionState.SILENCING
+
+
+class TestStockEcuStatus:
+  """The transition contract: the driver's view of ownership, in place on the manager."""
+
+  def test_starting_covers_every_prerequisite(self):
+    m = RadarSessionManager(moving_takeover=True)
+    _stock(m, standstill=True, gate=False)
+    assert m.status.state == StockEcuState.STARTING
+    _stock(m, standstill=True, bus_healthy=False)
+    assert m.status.state == StockEcuState.STARTING
+    _stock(m, standstill=True, stock_engaged=True)
+    assert m.status.state == StockEcuState.STOCK_CRUISE_ON
+    _stock(m, standstill=True)
+    assert m.state == RadarSessionState.SILENCING and m.status.state == StockEcuState.STARTING
+
+  def test_ready_restoring_restored(self):
+    m = RadarSessionManager()
+    _stock(m, standstill=True)
+    while not m.programming_sent:
+      _stock(m, standstill=True)
+    _stock(m, standstill=True, alive=False, owned=True)
+    assert m.status.state == StockEcuState.READY
+    m.update(True, False, True, standstill=True, session_refused=False, stock_radar_gone=True)
+    assert m.status.state == StockEcuState.RESTORING
+    for _ in range(CarControllerParams.RADAR_UDS_STEP + RADAR_RESTORE_FRAMES):
+      m.update(True, True, True, standstill=True, session_refused=False, stock_radar_gone=False)
+    assert (m.status.state, m.status.handback_completed) == (StockEcuState.RESTORED, True)
+
+  def test_restore_timeout_is_a_failure_until_late_recovery(self):
+    m = RadarSessionManager()
+    _stock(m, standstill=True, alive=False)
+    for _ in range(RADAR_SESSION_LIMIT_FRAMES + 2):
+      m.update(True, False, True, standstill=True, session_refused=False, stock_radar_gone=True)
+    assert (m.status.state, m.status.handback_failed) == (StockEcuState.FAILED, True)
+    for _ in range(RADAR_RESTORE_FRAMES):
+      m.update(True, True, True, standstill=True, session_refused=False, stock_radar_gone=False)
+    assert (m.status.state, m.status.handback_failed, m.status.handback_completed) == (StockEcuState.RESTORED, False, True)
+
+
+class TestControllerStatus:
+  def test_alpha_long_controller_publishes_the_contract(self, cc, cs):
+    assert cc.stock_ecu_status is cc.radar_session.status
+    boot_step(cc, cs, stock_radar_alive=True, fsc_settled=False)
+    assert cc.stock_ecu_status.state == StockEcuState.STARTING
+    boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, cruise_engaged=True)
+    assert cc.stock_ecu_status.state == StockEcuState.STOCK_CRUISE_ON
+    boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True)
+    assert cc.radar_session.state == RadarSessionState.SILENCING
+
+  def test_stock_long_controller_has_no_status(self, stock_cc):
+    assert not hasattr(stock_cc, "stock_ecu_status")
+
+  def test_ready_follows_carstate_guard(self, cc, cs):
+    boot_step(cc, cs, stock_radar_alive=False, fsc_settled=True)
+    assert cc.radar_session.state == RadarSessionState.SILENCED and cc.stock_ecu_status.state == StockEcuState.STARTING
+    cs.radar_owned = True
+    boot_step(cc, cs, stock_radar_alive=False, fsc_settled=True)
+    assert cc.stock_ecu_status.state == StockEcuState.READY

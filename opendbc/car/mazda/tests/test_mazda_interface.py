@@ -14,7 +14,8 @@ from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.fingerprints import FW_VERSIONS
 from opendbc.car.mazda.tests.conftest import DBC_NAME, car_params, car_params_sp
-from opendbc.car.mazda.values import CAR, DBC, G46L_RADAR_FW, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaFlags, MazdaSafetyFlags
+from opendbc.car.mazda.values import CAR, DBC, G46L_RADAR_FW, LKAS_LIMITS, MOVING_TAKEOVER_RADAR_FW, STEER_TO_ZERO_EPS_FW, MazdaFlags, \
+  MazdaSafetyFlags
 
 Ecu = structs.CarParams.Ecu
 
@@ -321,3 +322,21 @@ def test_non_gen1_platform_refused_at_admission():
   CP.flags = 0
   with pytest.raises(NotImplementedError):
     CarController({Bus.pt: DBC_NAME}, CP, CP_SP)
+
+
+class TestMovingTakeoverCapability:
+  """The moving takeover is offered per validated radar firmware, never per dialect."""
+
+  def test_validation_radar_carries_the_flag_under_alpha_long(self):
+    fw = sorted(MOVING_TAKEOVER_RADAR_FW)[0]
+    CP = car_params(CAR.MAZDA_CX5_2022, alpha_long=True, car_fw=[*eps_fw(SWAPPED_EPS_FW), radar_fw(fw + b'\x00' * (24 - len(fw)))])
+    assert CP.openpilotLongitudinalControl
+    assert CP.flags & MazdaFlags.MOVING_TAKEOVER
+
+  def test_other_radars_and_stock_long_do_not(self):
+    fw = sorted(MOVING_TAKEOVER_RADAR_FW)[0]
+    other = car_params(CAR.MAZDA_CX5_2022, alpha_long=True, car_fw=[*eps_fw(SWAPPED_EPS_FW), radar_fw(b'K131-67XK2-E' + b'\x00' * 12)])
+    assert other.openpilotLongitudinalControl and not other.flags & MazdaFlags.MOVING_TAKEOVER
+    stock = car_params(CAR.MAZDA_CX5_2022, alpha_long=False, car_fw=[*eps_fw(SWAPPED_EPS_FW), radar_fw(fw + b'\x00' * (24 - len(fw)))])
+    assert not stock.flags & MazdaFlags.MOVING_TAKEOVER
+    assert not car_params(CAR.MAZDA_CX5_2022, alpha_long=True).flags & MazdaFlags.MOVING_TAKEOVER
