@@ -26,8 +26,7 @@ class StockEcuState(StrEnum):
   PARK_TO_TAKE_OVER = "parkToTakeOver"  # this session takes over at the next stop
   STOCK_CRUISE_ON = "stockCruiseOn"  # the driver's own stock engagement holds the takeover
   READY = "ready"                    # owned and guarded; engage normally
-  RESTORING = "restoring"            # the default session is requested, stock traffic not back
-  RESTORED = "restored"              # sustained stock traffic after the ordered hand-back
+  RESTORING = "restoring"            # the ordered hand-back, requested or done: stock cruise until the stop
   FAILED = "failed"                  # a bounded attempt ended without the ECU answering
 
 

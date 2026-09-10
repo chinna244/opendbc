@@ -75,7 +75,7 @@ class TestRadarSessionBounds:
     for alive in (True, False):
       for _ in range(5):
         assert m.update(True, alive, True, standstill=True, session_refused=False, stock_radar_gone=not alive) == RadarSessionState.STOCK
-    assert m.status.state == StockEcuState.RESTORED
+    assert m.status.state == StockEcuState.RESTORING
 
   def test_withdrawn_request_after_the_restore_is_a_fresh_start(self):
     # forced offroad cancelled once the radar was handed back: the next takeover is a first one
@@ -431,7 +431,7 @@ class TestStockEcuStatus:
     assert m.status.state == StockEcuState.RESTORING
     for _ in range(CarControllerParams.RADAR_UDS_STEP + RADAR_RESTORE_FRAMES):
       m.update(True, True, True, standstill=True, session_refused=False, stock_radar_gone=False)
-    assert (m.status.state, m.status.handback_completed) == (StockEcuState.RESTORED, True)
+    assert (m.status.state, m.status.handback_completed) == (StockEcuState.RESTORING, True)
 
   def test_restore_timeout_is_a_failure_until_late_recovery(self):
     m = RadarSessionManager()
@@ -441,7 +441,7 @@ class TestStockEcuStatus:
     assert (m.status.state, m.status.handback_failed) == (StockEcuState.FAILED, True)
     for _ in range(RADAR_RESTORE_FRAMES):
       m.update(True, True, True, standstill=True, session_refused=False, stock_radar_gone=False)
-    assert (m.status.state, m.status.handback_failed, m.status.handback_completed) == (StockEcuState.RESTORED, False, True)
+    assert (m.status.state, m.status.handback_failed, m.status.handback_completed) == (StockEcuState.RESTORING, False, True)
 
 
 class TestControllerStatus:

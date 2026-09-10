@@ -190,7 +190,7 @@ class RadarSessionManager:
     elif self.state == RadarSessionState.SILENCED:
       state = StockEcuState.READY if owned else StockEcuState.STARTING
     elif self.handback_completed:
-      state = StockEcuState.RESTORED
+      state = StockEcuState.RESTORING
     elif self.silencing_failed:
       state = StockEcuState.FAILED
     elif self.state == RadarSessionState.STOCK and gate_passed and stock_engaged:
