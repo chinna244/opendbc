@@ -171,7 +171,9 @@ class MazdaFlags(IntFlag):
 
   # The G46L radar's dialect bit; see G46L_RADAR_FW below.
   G46L_RADAR = 8
-  # The radar may be taken over while the car is moving; see MOVING_TAKEOVER_RADAR_FW below.
+  # The radar may be taken over while the car is moving: the developer's MazdaMovingTakeover
+  # param (opendbc/sunnypilot/car/interfaces.py), until a moving handover is on record for a
+  # radar firmware and this can become a fingerprint rule.
   MOVING_TAKEOVER = 16
 
 
@@ -259,15 +261,6 @@ STEER_TO_ZERO_EPS_FW = {
 # checksum. Stored unpadded; matched with nulls stripped so UDS padding cannot break it.
 G46L_RADAR_FW = {
   b'G46L-67XA1-C',
-}
-
-# Radars that may be taken over while moving: the programming-session request lands at speed
-# and the camera and body accept the handover. Every other radar takes over parked only, the
-# path with the whole corpus behind it. Grown one measured firmware at a time: entry here needs
-# a driver-coordinated moving takeover on record with no camera, EPS or body fault, not a shared
-# dialect. Stored unpadded, matched with nulls stripped.
-MOVING_TAKEOVER_RADAR_FW = {
-  b'K131-67XK2-F',  # CX-5 2022, the validation vehicle (on-car validation pending)
 }
 
 

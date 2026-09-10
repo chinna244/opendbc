@@ -75,7 +75,7 @@ class TestRadarSessionBounds:
     for alive in (True, False):
       for _ in range(5):
         assert m.update(True, alive, True, standstill=True, session_refused=False, stock_radar_gone=not alive) == RadarSessionState.STOCK
-    assert m.status.state == StockEcuState.RESTORING
+    assert m.status == StockEcuState.RESTORED
 
   def test_withdrawn_request_after_the_restore_is_a_fresh_start(self):
     # forced offroad cancelled once the radar was handed back: the next takeover is a first one
@@ -86,7 +86,7 @@ class TestRadarSessionBounds:
       m.update(True, True, True, standstill=True, session_refused=False, stock_radar_gone=False)
     assert m.handback_completed
     assert m.update(True, True, False, standstill=True, session_refused=False, stock_radar_gone=False) == RadarSessionState.SILENCING
-    assert not m.handback_completed and not m.handback_ordered
+    assert not m.handback_completed
 
   def test_withdrawn_handback_finishes_restoration(self):
     # A reversal must finish restoration; card cycles using the latest toggle value.
@@ -304,8 +304,8 @@ class TestRadarSessionSequencing:
     assert len(synthetic(sends)) > 0
 
 
-def _stock(m, standstill, alive=True, refused=False, gate=True, **kw):
-  return m.update(gate, alive, False, standstill=standstill, session_refused=refused, stock_radar_gone=not alive, **kw)
+def _stock(m, standstill, alive=True, refused=False, gate=True, handback=False, **kw):
+  return m.update(gate, alive, handback, standstill=standstill, session_refused=refused, stock_radar_gone=not alive, **kw)
 
 
 class TestMovingTakeover:
@@ -320,15 +320,15 @@ class TestMovingTakeover:
     while not m.programming_sent:
       _stock(m, standstill=False)
     assert _stock(m, standstill=False, alive=False) == RadarSessionState.SILENCED
-    assert m.status.state == StockEcuState.STARTING  # owned, guard not yet passed
+    assert m.status == StockEcuState.STARTING  # owned, guard not yet passed
     _stock(m, standstill=False, alive=False, owned=True)
-    assert m.status.state == StockEcuState.READY
+    assert m.status == StockEcuState.READY
 
   def test_default_configuration_waits_for_the_stop(self):
     m = RadarSessionManager()
     for _ in range(300):
       assert _stock(m, standstill=False) == RadarSessionState.STOCK
-    assert m.status.state == StockEcuState.PARK_TO_TAKE_OVER
+    assert m.status == StockEcuState.PARK_TO_TAKE_OVER
     assert _stock(m, standstill=True) == RadarSessionState.SILENCING
 
   @pytest.mark.parametrize("how", ["refused", "timeout"])
@@ -343,13 +343,13 @@ class TestMovingTakeover:
       for _ in range(RADAR_SESSION_LIMIT_FRAMES + 1):
         state = _stock(m, standstill=False)
       assert state == RadarSessionState.HANDBACK
-    assert m.moving_closed and not m.silencing_failed
+    assert not m.moving_open and not m.silencing_failed
     for _ in range(CarControllerParams.RADAR_UDS_STEP + RADAR_RESTORE_FRAMES):
       _stock(m, standstill=False)
     assert m.state == RadarSessionState.STOCK and not m.handback_completed
     for _ in range(200):
       assert _stock(m, standstill=False) == RadarSessionState.STOCK
-    assert m.status.state == StockEcuState.PARK_TO_TAKE_OVER
+    assert m.status == StockEcuState.PARK_TO_TAKE_OVER
     assert _stock(m, standstill=True) == RadarSessionState.SILENCING
     assert not m.attempt_moving
 
@@ -362,7 +362,7 @@ class TestMovingTakeover:
       _stock(m, standstill=True)
     for standstill in (True, False):
       assert _stock(m, standstill=standstill) == RadarSessionState.STOCK
-    assert m.status.state == StockEcuState.FAILED
+    assert m.status == StockEcuState.FAILED
 
   def test_motion_change_mid_attempt(self):
     # capable: a parked attempt carries on when the car pulls away and a moving one when it
@@ -402,7 +402,7 @@ class TestMovingTakeover:
     assert _stock(m, standstill=False) == RadarSessionState.STOCK
     for _ in range(200):
       assert _stock(m, standstill=False) == RadarSessionState.STOCK
-    assert m.status.state == StockEcuState.PARK_TO_TAKE_OVER
+    assert m.status == StockEcuState.PARK_TO_TAKE_OVER
     assert _stock(m, standstill=True) == RadarSessionState.SILENCING
 
 
@@ -412,13 +412,13 @@ class TestStockEcuStatus:
   def test_starting_covers_every_prerequisite(self):
     m = RadarSessionManager(moving_takeover=True)
     _stock(m, standstill=True, gate=False)
-    assert m.status.state == StockEcuState.STARTING
+    assert m.status == StockEcuState.STARTING
     _stock(m, standstill=True, bus_healthy=False)
-    assert m.status.state == StockEcuState.STARTING
+    assert m.status == StockEcuState.STARTING
     _stock(m, standstill=True, stock_engaged=True)
-    assert m.status.state == StockEcuState.STOCK_CRUISE_ON
+    assert m.status == StockEcuState.STOCK_CRUISE_ON
     _stock(m, standstill=True)
-    assert m.state == RadarSessionState.SILENCING and m.status.state == StockEcuState.STARTING
+    assert m.state == RadarSessionState.SILENCING and m.status == StockEcuState.STARTING
 
   def test_ready_restoring_restored(self):
     m = RadarSessionManager()
@@ -426,40 +426,39 @@ class TestStockEcuStatus:
     while not m.programming_sent:
       _stock(m, standstill=True)
     _stock(m, standstill=True, alive=False, owned=True)
-    assert m.status.state == StockEcuState.READY
-    m.update(True, False, True, standstill=True, session_refused=False, stock_radar_gone=True)
-    assert m.status.state == StockEcuState.RESTORING
+    assert m.status == StockEcuState.READY
+    _stock(m, standstill=True, alive=False, handback=True)
+    assert m.status == StockEcuState.RESTORING
     for _ in range(CarControllerParams.RADAR_UDS_STEP + RADAR_RESTORE_FRAMES):
-      m.update(True, True, True, standstill=True, session_refused=False, stock_radar_gone=False)
-    assert (m.status.state, m.status.handback_completed) == (StockEcuState.RESTORING, True)
+      _stock(m, standstill=True, handback=True)
+    assert (m.status, m.handback_completed) == (StockEcuState.RESTORED, True)
 
   def test_restore_timeout_is_a_failure_until_late_recovery(self):
     m = RadarSessionManager()
     _stock(m, standstill=True, alive=False)
     for _ in range(RADAR_SESSION_LIMIT_FRAMES + 2):
-      m.update(True, False, True, standstill=True, session_refused=False, stock_radar_gone=True)
-    assert (m.status.state, m.status.handback_failed) == (StockEcuState.FAILED, True)
+      _stock(m, standstill=True, alive=False, handback=True)
+    assert (m.status, m.handback_failed) == (StockEcuState.FAILED, True)
     for _ in range(RADAR_RESTORE_FRAMES):
-      m.update(True, True, True, standstill=True, session_refused=False, stock_radar_gone=False)
-    assert (m.status.state, m.status.handback_failed, m.status.handback_completed) == (StockEcuState.RESTORING, False, True)
+      _stock(m, standstill=True, handback=True)
+    assert (m.status, m.handback_failed, m.handback_completed) == (StockEcuState.RESTORED, False, True)
 
 
 class TestControllerStatus:
   def test_alpha_long_controller_publishes_the_contract(self, cc, cs):
-    assert cc.stock_ecu_status is cc.radar_session.status
     boot_step(cc, cs, stock_radar_alive=True, fsc_settled=False)
-    assert cc.stock_ecu_status.state == StockEcuState.STARTING
+    assert cc.stock_ecu_state == StockEcuState.STARTING
     boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, cruise_engaged=True)
-    assert cc.stock_ecu_status.state == StockEcuState.STOCK_CRUISE_ON
+    assert cc.stock_ecu_state == StockEcuState.STOCK_CRUISE_ON
     boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True)
     assert cc.radar_session.state == RadarSessionState.SILENCING
 
-  def test_stock_long_controller_has_no_status(self, stock_cc):
-    assert not hasattr(stock_cc, "stock_ecu_status")
+  def test_stock_long_controller_needs_nothing(self, stock_cc):
+    assert stock_cc.stock_ecu_state == StockEcuState.NOT_NEEDED
 
   def test_ready_follows_carstate_guard(self, cc, cs):
     boot_step(cc, cs, stock_radar_alive=False, fsc_settled=True)
-    assert cc.radar_session.state == RadarSessionState.SILENCED and cc.stock_ecu_status.state == StockEcuState.STARTING
+    assert cc.radar_session.state == RadarSessionState.SILENCED and cc.stock_ecu_state == StockEcuState.STARTING
     cs.radar_owned = True
     boot_step(cc, cs, stock_radar_alive=False, fsc_settled=True)
-    assert cc.stock_ecu_status.state == StockEcuState.READY
+    assert cc.stock_ecu_state == StockEcuState.READY

@@ -5,7 +5,7 @@ from opendbc.car import DT_CTRL, make_tester_present_msg, uds
 from opendbc.car.can_definitions import CanData
 from opendbc.car.carlog import carlog
 from opendbc.car.mazda.values import CarControllerParams
-from opendbc.sunnypilot.car.stock_ecu import StockEcuState, StockEcuStatus
+from opendbc.sunnypilot.car.stock_ecu import StockEcuState
 
 RADAR_ADDR = 0x764
 RADAR_BUS = 0
@@ -44,11 +44,10 @@ class RadarSessionManager:
   """
 
   def __init__(self, moving_takeover: bool = False):
-    self.moving_takeover = moving_takeover
+    self.moving_open = moving_takeover  # a moving request may still be made this session
     self.state = RadarSessionState.STOCK
     self.state_frames = 0
     self.silencing_failed = False
-    self.handback_ordered = False
     self.handback_completed = False
     self.handback_failed = False
     self.programming_sent = False
@@ -58,9 +57,8 @@ class RadarSessionManager:
     self.stock_frames = 0
     self.replacement_active = False
     self.diagnostic_message: CanData | None = None
-    self.moving_closed = False
     self.attempt_moving = False
-    self.status = StockEcuStatus(state=StockEcuState.STARTING)
+    self.status = StockEcuState.STARTING
 
   def _transition(self, state: RadarSessionState, reason: str) -> None:
     if state != self.state:
@@ -75,9 +73,9 @@ class RadarSessionManager:
         self.stock_frames = 0
 
   def _close_moving(self, reason: str) -> None:
-    if self.moving_takeover and not self.moving_closed:
+    if self.moving_open:
       carlog.warning({"event": "mazdaRadarMovingTakeoverClosed", "reason": reason})
-    self.moving_closed = True
+    self.moving_open = False
 
   def _silencing_gave_up(self, reason: str) -> None:
     # A moving attempt that the radar refused or never answered says nothing about the parked
@@ -103,7 +101,6 @@ class RadarSessionManager:
       self.default_confirmed = True
 
     if handback:
-      self.handback_ordered = True
       if self.state in (RadarSessionState.SILENCING, RadarSessionState.SILENCED):
         self._transition(RadarSessionState.HANDBACK, "requested")
       elif self.state == RadarSessionState.STOCK and not self.handback_completed:
@@ -111,9 +108,9 @@ class RadarSessionManager:
           self.handback_completed = self.stock_frames >= RADAR_RESTORE_FRAMES
         else:
           self._transition(RadarSessionState.HANDBACK, "restore uncertain ownership")
-    elif self.handback_ordered and self.state != RadarSessionState.HANDBACK:
-      # the stop was withdrawn after the restore: the next takeover is a first one again
-      self.handback_ordered = self.handback_completed = False
+    else:
+      # a withdrawn stop: the next takeover is a first one again
+      self.handback_completed = False
 
     # the takeover gate: the camera's boot check done and no stock engagement to pull the radar from under
     gate_open = gate_passed and not stock_engaged
@@ -125,7 +122,7 @@ class RadarSessionManager:
       if self.default_sent and self.stock_frames >= RADAR_RESTORE_FRAMES:
         # An ordered hand-back keeps the radar stock while the request stands. Undoing our
         # own unanswered or refused request does not: the next attempt is still open.
-        self.handback_completed = self.handback_ordered
+        self.handback_completed = handback
         self.handback_failed = False
         self._transition(RadarSessionState.STOCK, "stock traffic restored")
       elif self.state_frames >= RADAR_SESSION_LIMIT_FRAMES and not self.handback_failed:
@@ -137,13 +134,11 @@ class RadarSessionManager:
          (not self.default_sent or not stock_radar_alive) and self.frame % CarControllerParams.RADAR_UDS_STEP == 0:
         self.diagnostic_message = create_radar_session_msg(uds.SESSION_TYPE.DEFAULT)
         self.default_sent = True
-    elif handback or self.handback_completed:
-      pass
-    else:
+    elif not handback:
       if self.state == RadarSessionState.SILENCED and stock_radar_alive:
         self._close_moving("stock radar returned")
         self._transition(RadarSessionState.STOCK, "stock radar returned")
-      takeover_allowed = standstill or (self.moving_takeover and not self.moving_closed)
+      takeover_allowed = standstill or self.moving_open
 
       if self.state == RadarSessionState.STOCK and gate_open and bus_healthy and not self.silencing_failed:
         if stock_radar_gone:
@@ -184,21 +179,17 @@ class RadarSessionManager:
       self.replacement_active = True
 
   def _update_status(self, gate_passed: bool, stock_engaged: bool, standstill: bool, owned: bool) -> None:
-    """The driver's view, in place. `owned` is carstate's silence guard on the owned radar."""
+    """The driver's view. `owned` is carstate's silence guard on the owned radar."""
     if self.state == RadarSessionState.HANDBACK:
-      state = StockEcuState.FAILED if self.handback_failed else StockEcuState.RESTORING
+      self.status = StockEcuState.FAILED if self.handback_failed else StockEcuState.RESTORING
     elif self.state == RadarSessionState.SILENCED:
-      state = StockEcuState.READY if owned else StockEcuState.STARTING
+      self.status = StockEcuState.READY if owned else StockEcuState.STARTING
     elif self.handback_completed:
-      state = StockEcuState.RESTORING
+      self.status = StockEcuState.RESTORED
     elif self.silencing_failed:
-      state = StockEcuState.FAILED
-    elif self.state == RadarSessionState.STOCK and gate_passed and stock_engaged:
-      state = StockEcuState.STOCK_CRUISE_ON
-    elif self.state == RadarSessionState.STOCK and gate_passed and not standstill and not (self.moving_takeover and not self.moving_closed):
-      state = StockEcuState.PARK_TO_TAKE_OVER
+      self.status = StockEcuState.FAILED
+    elif self.state == RadarSessionState.STOCK and gate_passed:
+      self.status = StockEcuState.STOCK_CRUISE_ON if stock_engaged else \
+                    StockEcuState.PARK_TO_TAKE_OVER if not standstill and not self.moving_open else StockEcuState.STARTING
     else:
-      state = StockEcuState.STARTING
-    self.status.state = state
-    self.status.handback_completed = self.handback_completed
-    self.status.handback_failed = self.handback_failed
+      self.status = StockEcuState.STARTING

@@ -12,6 +12,7 @@ from opendbc.car.mazda.radar_session import RadarSessionManager, RadarSessionSta
 from opendbc.car.mazda.values import CarControllerParams, Buttons, MazdaFlags
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
+from opendbc.sunnypilot.car.stock_ecu import StockEcuState
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -42,11 +43,6 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.long_counter = 0
     self.radar_counter = 0
     self.radar_session = RadarSessionManager(moving_takeover=bool(CP.flags & MazdaFlags.MOVING_TAKEOVER))
-    # The stock ECU transition contract (opendbc/sunnypilot/car/stock_ecu.py): card reads this
-    # one name and nothing brand-specific. Absent under stock longitudinal, as on any brand
-    # that silences nothing.
-    if CP.openpilotLongitudinalControl:
-      self.stock_ecu_status = self.radar_session.status
     self.accel_last = 0.
     self.release_ramp = None
     self.breakaway_frames = 0
@@ -156,6 +152,13 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     self.frame += 1
     return new_actuators, can_sends
+
+  @property
+  def stock_ecu_state(self):
+    """The stock ECU transition contract (opendbc/sunnypilot/car/stock_ecu.py): card reads this
+    one name and nothing brand-specific. NOT_NEEDED under stock longitudinal, as on any brand
+    that silences nothing."""
+    return self.radar_session.status if self.CP.openpilotLongitudinalControl else StockEcuState.NOT_NEEDED
 
   def update_camera_tja(self, CC, CS):
     """Press the camera's own TJA/CTS off, on its bus, whenever it is armed.

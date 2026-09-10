@@ -6,8 +6,7 @@ from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.carstate import CarState
 from opendbc.car.mazda.radar_interface import RadarInterface
-from opendbc.car.mazda.values import CAR, DBC, G46L_RADAR_FW, LKAS_LIMITS, MOVING_TAKEOVER_RADAR_FW, STEER_TO_ZERO_EPS_FW, MazdaFlags, \
-  MazdaSafetyFlags, platform_from_vin
+from opendbc.car.mazda.values import CAR, DBC, G46L_RADAR_FW, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaFlags, MazdaSafetyFlags, platform_from_vin
 
 
 class CarInterface(CarInterfaceBase):
@@ -59,11 +58,6 @@ class CarInterface(CarInterfaceBase):
       ret.radarUnavailable = True
       ret.stopAccel = -1.024  # stock MRCC standstill command
       ret.longitudinalActuatorDelay = 0.36  # measured ~0.3 s dead time + ~0.3 s first-order lag
-      # A moving takeover (a fresh session started with the car rolling: forced offroad exit,
-      # process restart) is offered only on a radar with a moving handover on record. The rest
-      # take over at the next stop, and the status says so.
-      if any(fw.ecu == 'fwdRadar' and fw.fwVersion.rstrip(b'\x00') in MOVING_TAKEOVER_RADAR_FW for fw in car_fw):
-        ret.flags |= MazdaFlags.MOVING_TAKEOVER.value
 
     # Older EPS firmware enforces hands-off and low-speed steering lockouts.
     # Docs mode carries no real EPS firmware, so leave dashcamOnly at the default.
