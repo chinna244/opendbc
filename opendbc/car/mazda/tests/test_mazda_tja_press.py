@@ -4,11 +4,12 @@ Copyright (c) 2026-, Zeph Leggett.
 This file is part of zoompilot and is licensed under the MIT License.
 See the LICENSE.md file in the root directory for more details.
 
-The camera press: while openpilot steers with the camera's own TJA/CTS armed (0x440 TJA
-nonzero), the controller presses the camera's button off on its own bus so the two
-lane-centering systems never run at once. One frame per press, at least one 0x440 period
-between presses, three per arming episode, then one stockLkas pulse; the episode resets when
-the camera reads 0. Not gated on the TJA button declaration.
+The camera press: whenever the camera's own TJA/CTS is armed (0x440 TJA nonzero), steering
+or not, the controller presses the camera's button off on its own bus so the two lane-centering
+systems never run at once and a MADS-off press cannot hand the wheel to the camera. One frame
+per press, at least one 0x440 period between presses, three per arming episode, then one
+stockLkas pulse if openpilot is steering; the episode resets when the camera reads 0. Not gated
+on the TJA button declaration.
 """
 from opendbc.car import DT_CTRL
 from opendbc.car.mazda.tests.conftest import CRZ_BTNS, car_controller, frames, mazda_car_state, step
@@ -44,12 +45,22 @@ class TestCameraPress:
     _, sends = step(cc, cs, lat_active=True, stock_tja=2, crz_btns_counter=7)
     assert frames(sends, CRZ_BTNS, bus=2)[0][3] == 0xc0 | (8 << 2)
 
-  def test_no_press_while_not_steering_or_with_the_camera_off(self):
+  def test_no_press_with_the_camera_off(self):
     cc, cs = rig()
-    for _ in range(3 * INTERVAL):
-      assert presses(step(cc, cs, lat_active=False, stock_tja=4)[1]) == 0
-    for _ in range(3 * INTERVAL):
-      assert presses(step(cc, cs, lat_active=True, stock_tja=0)[1]) == 0
+    for lat_active in (True, False):
+      for _ in range(3 * INTERVAL):
+        assert presses(step(cc, cs, lat_active=lat_active, stock_tja=0)[1]) == 0
+
+  def test_pressed_off_with_lateral_off_and_no_warning(self):
+    # the MADS-off press re-arms the camera (user report 2026-09-09): pressed off all the same,
+    # but a camera that stays on with openpilot not steering is stock behaviour, no stockLkas
+    cc, cs = rig()
+    n = 0
+    for i in range(5 * INTERVAL):
+      _, sends = step(cc, cs, lat_active=False, stock_tja=2)
+      n += presses(sends)
+      assert n == min(i // INTERVAL + 1, CarControllerParams.TJA_PRESS_MAX), i
+      assert not cs.stock_cts_stuck
 
   def test_cadence_cap_and_the_one_shot_warning(self):
     cc, cs = rig()

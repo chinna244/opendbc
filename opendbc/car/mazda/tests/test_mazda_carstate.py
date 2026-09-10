@@ -195,8 +195,10 @@ def feed_guard(CI, secs, radar_alive, start_frame=0, acc_active=False):
   pk = packer()
   ret = None
   n = int(secs / DT_CTRL)
+  CI.CS.radar_control_active = not radar_alive  # ownership supplied by the controller in production
   for i in range(start_frame, start_frame + n):
     msgs = [pk.make_can_msg("PEDALS", 0, {"ACC_OFF": 0 if acc_active else 1, "ACC_ACTIVE": 1 if acc_active else 0})]
+    msgs.append(pk.make_can_msg("ENGINE_DATA", 0, {"SPEED": 0}))
     if radar_alive:
       msgs.append(mazdacan.create_acc_command(pk, 0, i, 0., long_active=False, acc_available=True))
     ret, _ = feed(CI, i, *msgs)
@@ -242,11 +244,39 @@ class TestTwoMasterGuard:
     ret, n = feed_guard(CI, GUARD_T + 0.5, radar_alive=False, start_frame=n)
     ret, n = feed_guard(CI, 0.5, radar_alive=True, start_frame=n)
     assert ret.accFaulted
-    # A transient radar return reports a fault without revoking latched availability.
-    assert ret.cruiseState.available
+    # A returned radar revokes openpilot ownership and availability.
+    assert not ret.cruiseState.available
     ret, n = feed_guard(CI, GUARD_T + 0.5, radar_alive=False, start_frame=n)
     assert not ret.accFaulted
     assert ret.cruiseState.available
+
+  def test_a_bus_blip_does_not_rerun_the_guard(self):
+    # the radar is in its diagnostic session whatever the vehicle bus does: a witness gap the
+    # CANParser would also see as invalid (canValid blocks engagement on its own) neither
+    # revokes ownership nor re-runs the 1.27 s guard once the bus is back
+    CI = car_interface()
+    ret, n = feed_guard(CI, 5.0, radar_alive=True)
+    ret, n = feed_guard(CI, GUARD_T + 0.5, radar_alive=False, start_frame=n)
+    assert ret.cruiseState.available
+    for i in range(n, n + 30):  # 0.3 s of nothing at all, past both witness windows
+      ret, _ = feed(CI, i)
+    n += 30
+    assert not CI.CS.radar_bus_healthy
+    assert not CI.CS.stock_radar_gone  # the silence is the bus, not evidence
+    assert ret.cruiseState.available
+    assert not ret.accFaulted
+    ret, n = feed_guard(CI, 0.05, radar_alive=False, start_frame=n)
+    assert CI.CS.radar_bus_healthy
+    assert ret.cruiseState.available
+
+  def test_a_dead_bus_is_not_adopted_as_a_silenced_radar(self):
+    # boot with no vehicle traffic at all: the silence is the bus, not a teardown
+    CI = car_interface()
+    ret = None
+    for i in range(int((GUARD_T + 1.0) / DT_CTRL)):
+      ret, _ = feed(CI, i)
+    assert not CI.CS.stock_radar_gone
+    assert not ret.cruiseState.available
 
   def test_stock_engagement_inside_the_guard_is_not_reported(self):
     # Do not expose stock MRCC engagement before radar ownership transfers.
@@ -323,9 +353,10 @@ class TestCancelUnderBraking:
   def armed_and_silent(CI):
     # get past the two-master guard with the main armed so availability starts True
     pk = packer()
+    CI.CS.radar_control_active = True
     n = int((GUARD_T + 0.5) / DT_CTRL)
     for i in range(n):
-      ret, _ = feed(CI, i, pk.make_can_msg("PEDALS", 0, {"ACC_OFF": 1}))
+      ret, _ = feed(CI, i, pk.make_can_msg("PEDALS", 0, {"ACC_OFF": 1}), pk.make_can_msg("ENGINE_DATA", 0, {"SPEED": 0}))
     assert ret.cruiseState.available
     return pk, n
 
@@ -334,7 +365,7 @@ class TestCancelUnderBraking:
     ret = None
     n = int(secs / DT_CTRL)
     for i in range(n0, n0 + n):
-      ret, _ = feed(CI, i, pk.make_can_msg("PEDALS", 0, {"ACC_OFF": 0, "BRAKE_ON": int(brake)}),
+      ret, _ = feed(CI, i, pk.make_can_msg("ENGINE_DATA", 0, {"SPEED": 0}), pk.make_can_msg("PEDALS", 0, {"ACC_OFF": 0, "BRAKE_ON": int(brake)}),
                     pk.make_can_msg("CRZ_BTNS", 0, {"CAN_OFF": int(cancel)}))
     return ret, n0 + n
 
@@ -357,7 +388,8 @@ class TestCancelUnderBraking:
     pk, n = self.armed_and_silent(CI)
     ret = None
     for i in range(n, n + 5):  # cancel pressed, PEDALS not yet reacting
-      ret, _ = feed(CI, i, pk.make_can_msg("PEDALS", 0, {"ACC_OFF": 1}), pk.make_can_msg("CRZ_BTNS", 0, {"CAN_OFF": 1}))
+      ret, _ = feed(CI, i, pk.make_can_msg("ENGINE_DATA", 0, {"SPEED": 0}), pk.make_can_msg("PEDALS", 0, {"ACC_OFF": 1}),
+                    pk.make_can_msg("CRZ_BTNS", 0, {"CAN_OFF": 1}))
     assert ret.cruiseState.available
     ret, n = self.feed_pedals(CI, pk, n + 5, 0.2, brake=True, cancel=False)
     assert not ret.cruiseState.available
