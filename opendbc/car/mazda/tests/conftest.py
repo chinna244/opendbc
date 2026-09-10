@@ -152,7 +152,7 @@ def set_car_state(cs: CarState, out=None, *, brake_hold=False, stock_radar_alive
   cs.cruise_enabled = cs.out.cruiseState.enabled
   cs.cruise_available = cs.out.cruiseState.available
   cs.stock_radar_seen = True
-  cs.main_can_silent_frames = {name: 0 if radar_bus_healthy else 100 for name in cs.main_can_silent_frames}  # 100 > every window
+  cs.radar_bus_healthy = radar_bus_healthy
   cs.radar_session_response = radar_session_response
   if stock_radar_gone is None:
     stock_radar_gone = not stock_radar_alive

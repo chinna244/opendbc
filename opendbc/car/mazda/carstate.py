@@ -14,9 +14,10 @@ STOCK_RADAR_GUARD_FRAMES = round(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CT
 CANCEL_CONTEXT_FRAMES = int(CarControllerParams.CANCEL_CONTEXT_T / DT_CTRL)
 CAM_LANEINFO_FRESH_FRAMES = int(CarControllerParams.CAM_LANEINFO_FRESH_T / DT_CTRL)
 STOCK_CTS_ALERT_FRAMES = int(CarControllerParams.STOCK_CTS_ALERT_T / DT_CTRL)
-# Bus witnesses at the CANParser's own validity threshold, ten periods: PEDALS 50 Hz, ENGINE_DATA 100 Hz.
-# A stricter window would revoke radar ownership on a gap the parser still accepts.
-MAIN_CAN_FRESH_FRAMES = {"PEDALS": round(0.2 / DT_CTRL), "ENGINE_DATA": round(0.1 / DT_CTRL)}
+# Bus witnesses: independent vehicle messages whose silence says the bus is gone, not the radar.
+# Windows at the CANParser's own validity threshold, ten periods; a stricter window would revoke
+# radar ownership on a gap the parser still accepts. {message: (signal, fresh frames)}
+MAIN_CAN_WITNESSES = {"PEDALS": ("ACC_ACTIVE", round(0.2 / DT_CTRL)), "ENGINE_DATA": ("SPEED", round(0.1 / DT_CTRL))}
 
 
 class CarState(CarStateBase, CarStateExt):
@@ -71,7 +72,8 @@ class CarState(CarStateBase, CarStateExt):
     self.brake_pressed_prev = False
     self.stock_radar_silent_frames = 0
     self.stock_radar_seen = False
-    self.main_can_silent_frames = dict(MAIN_CAN_FRESH_FRAMES)
+    self.main_can_silent_frames = {name: fresh for name, (_, fresh) in MAIN_CAN_WITNESSES.items()}
+    self.radar_bus_healthy = False
     self.radar_control_active = False  # controller owns replacement traffic, read on the next update
     self.radar_restore_failed = False
     self.radar_handback_active = False
@@ -93,10 +95,6 @@ class CarState(CarStateBase, CarStateExt):
   @property
   def stock_radar_alive(self) -> bool:
     return self.stock_radar_seen and self.stock_radar_silent_frames < STOCK_RADAR_ALIVE_FRAMES
-
-  @property
-  def radar_bus_healthy(self) -> bool:
-    return all(age < MAIN_CAN_FRESH_FRAMES[name] for name, age in self.main_can_silent_frames.items())
 
   @property
   def stock_radar_gone(self) -> bool:
@@ -246,9 +244,11 @@ class CarState(CarStateBase, CarStateExt):
 
       # Block engagement until stock radar ownership is clear. Radar traffic after a completed
       # teardown is a fault and triggers the alpha-long recovery path.
-      for name, signal in (("PEDALS", "ACC_ACTIVE"), ("ENGINE_DATA", "SPEED")):
-        self.main_can_silent_frames[name] = 0 if cp.vl_all[name][signal] else min(self.main_can_silent_frames[name] + 1,
-                                                                             MAIN_CAN_FRESH_FRAMES[name])
+      self.radar_bus_healthy = True
+      for name, (signal, fresh) in MAIN_CAN_WITNESSES.items():
+        silent = 0 if len(cp.vl_all[name][signal]) > 0 else min(self.main_can_silent_frames[name] + 1, fresh)
+        self.main_can_silent_frames[name] = silent
+        self.radar_bus_healthy &= silent < fresh
       if len(cp.vl_all["CRZ_INFO"]["CTR"]) > 0:
         self.stock_radar_seen = True
         self.stock_radar_silent_frames = 0
@@ -262,12 +262,13 @@ class CarState(CarStateBase, CarStateExt):
       # Validate single-frame session responses; firmware-query ISO-TP fragments and
       # unrelated service replies must not change session state.
       resp = cp.vl_all["RADAR_UDS_RESPONSE"]
-      self.radar_session_refused = any(
-        pci == 3 and sid == 0x7F and sub == uds.SERVICE_TYPE.DIAGNOSTIC_SESSION_CONTROL and nrc != 0x78
-        for pci, sid, sub, nrc in zip(resp["PCI"], resp["SID"], resp["SUB"], resp["NRC"], strict=True))
-      self.radar_session_response = next((int(sub) for pci, sid, sub in
-                                         reversed(list(zip(resp["PCI"], resp["SID"], resp["SUB"], strict=True)))
-                                         if pci == 6 and sid == 0x50 and sub in (1, 2)), 0)
+      self.radar_session_refused = False
+      self.radar_session_response = 0
+      for pci, sid, sub, nrc in zip(resp["PCI"], resp["SID"], resp["SUB"], resp["NRC"], strict=True):
+        if pci == 3 and sid == 0x7F and sub == uds.SERVICE_TYPE.DIAGNOSTIC_SESSION_CONTROL and nrc != 0x78:
+          self.radar_session_refused = True
+        elif pci == 6 and sid == 0x50 and sub in (1, 2):
+          self.radar_session_response = int(sub)  # last positive session response this frame
       # Ownership is established by the silence guard and then held on the controller's claim:
       # the radar stays in its diagnostic session through a bus blip, so recovery does not
       # re-run the guard. Stock traffic ends the claim on the alive window either way.

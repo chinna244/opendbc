@@ -16,6 +16,18 @@ from opendbc.car.mazda.tests.conftest import (CRZ_CTRL, CRZ_INFO, RADAR_STATIC, 
 from opendbc.car.mazda.values import CarControllerParams
 
 
+class RadarSessionManager(RadarSessionManager):
+  """Direct-driven manager: counts the controller frame the production caller passes in."""
+
+  def __init__(self):
+    super().__init__()
+    self.n = -1
+
+  def update(self, *args, **kwargs):
+    self.n += 1
+    return super().update(*args, frame=self.n, **kwargs)
+
+
 class TestRadarSessionBounds:
   """Diagnostic attempts are bounded; completion requires observed stock recovery."""
 

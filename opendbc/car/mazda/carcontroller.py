@@ -200,14 +200,15 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     # Start takeover only after the FSC boot check and any stock engagement have ended.
     stock_radar_alive = CS.stock_radar_alive
     setup_ok = CS.fsc_settled and not (stock_radar_alive and CS.cruise_enabled)
+    bus_healthy = CS.radar_bus_healthy
     session_state = self.radar_session.update(setup_ok, stock_radar_alive, CC_SP.stockEcuHandBack,
                                               standstill=CS.out.standstill,
                                               session_refused=CS.radar_session_refused,
                                               stock_radar_gone=CS.stock_radar_gone,
-                                              bus_healthy=CS.radar_bus_healthy and CS.out.canValid,
+                                              bus_healthy=bus_healthy and CS.out.canValid,
                                               session_response=CS.radar_session_response, frame=self.frame)
     # Continue synthetic radar frames through hand-back to avoid a camera-visible gap.
-    radar_master = self.radar_session.replacement_needed(stock_radar_alive, CS.radar_bus_healthy, CS.stock_radar_gone)
+    radar_master = self.radar_session.replacement_active
     CS.radar_control_active = radar_master and session_state == RadarSessionState.SILENCED
     CS.radar_restore_failed = self.radar_session.handback_failed
     CS.radar_handback_active = session_state == RadarSessionState.HANDBACK or self.radar_session.handback_completed
@@ -217,7 +218,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     stopping = CC.actuators.longControlState == LongCtrlState.stopping
     # Engaged bits follow CC.enabled. Gas is an override, not a disengagement.
-    control_ready = CS.radar_control_active and CS.radar_bus_healthy and CS.out.canValid
+    control_ready = CS.radar_control_active and bus_healthy and CS.out.canValid
     long_engaged = CC.enabled and control_ready
     long_active = CC.longActive and control_ready
     sm = self.stop_and_go
@@ -289,7 +290,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     if radar_master and self.frame % CarControllerParams.LONG_STEP == 0:
       # Preserve the driver's main-switch state through restoration without advertising
       # openpilot engagement. CarState's public availability is already revoked.
-      acc_available = CS.cruise_available if session_state == RadarSessionState.HANDBACK and CS.radar_bus_healthy else \
+      acc_available = CS.cruise_available if session_state == RadarSessionState.HANDBACK and bus_healthy else \
                       CS.out.cruiseState.available and control_ready
       # Mirror the driver's distance setting; stock defaults to gap 2.
       gap = (int(CC.hudControl.leadDistanceBars) or 2) if (long_engaged or acc_available) else 0
