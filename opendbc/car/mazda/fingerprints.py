@@ -7,6 +7,7 @@ Ecu = CarParams.Ecu
 FW_VERSIONS = {
   CAR.MAZDA_CX5_2022: {
     (Ecu.eps, 0x730, None): [
+      b'K0A1-3210X-A-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'K319-3210X-B-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'KBST-3210X-A-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
       b'KSD5-3210X-C-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',

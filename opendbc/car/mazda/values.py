@@ -252,6 +252,7 @@ class LKAS_LIMITS:
 
 # Keep steer-to-zero firmware synchronized with the CX-5 2022 EPS entries in fingerprints.py.
 STEER_TO_ZERO_EPS_FW = {
+  b'K0A1-3210X-A-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',  # CX-8 2023 (Japan)
   b'KBST-3210X-A-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
   b'KSD5-3210X-C-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
 }
