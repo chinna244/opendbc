@@ -6,7 +6,8 @@ from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.carstate import CarState
 from opendbc.car.mazda.radar_interface import RadarInterface
-from opendbc.car.mazda.values import CAR, DBC, G46L_RADAR_FW, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaFlags, MazdaSafetyFlags, platform_from_vin
+from opendbc.car.mazda.values import CAR, DBC, G46L_RADAR_FW, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, STEER_TO_ZERO_PLATFORMS, MazdaFlags, MazdaSafetyFlags, \
+  platform_from_vin
 
 
 class CarInterface(CarInterfaceBase):
@@ -30,10 +31,10 @@ class CarInterface(CarInterfaceBase):
 
     # Every gen1 Mazda EPS is the same hardware; only the firmware differs. Steer-to-zero follows
     # the EPS firmware, so a donor-EPS swap carries it and older firmware in a 2022 body loses it.
-    # Only an unread EPS (docs, a failed query) falls back to the platform: a forced CX-5 2022
+    # Only an unread EPS (docs, a failed query) falls back to the platform: a forced CX-5 2022 or CX-8
     # fingerprint on an unlisted older EPS then gets the floor and its banner, not a silent latch.
     eps_fw = {fw.fwVersion for fw in car_fw if fw.ecu == 'eps'}
-    steer_to_zero = bool(eps_fw & STEER_TO_ZERO_EPS_FW) or (not eps_fw and candidate == CAR.MAZDA_CX5_2022)
+    steer_to_zero = bool(eps_fw & STEER_TO_ZERO_EPS_FW) or (not eps_fw and candidate in STEER_TO_ZERO_PLATFORMS)
     if steer_to_zero:
       # Select panda's matching torque envelope from the detected EPS.
       ret.flags |= MazdaFlags.STEER_TO_ZERO_EPS.value
@@ -62,7 +63,7 @@ class CarInterface(CarInterfaceBase):
     # Older EPS firmware enforces hands-off and low-speed steering lockouts.
     # Docs mode carries no real EPS firmware, so leave dashcamOnly at the default.
     if not docs:
-      ret.dashcamOnly = candidate not in (CAR.MAZDA_CX5_2022, CAR.MAZDA_CX9_2021) and not steer_to_zero
+      ret.dashcamOnly = candidate not in (CAR.MAZDA_CX5_2022, CAR.MAZDA_CX8_2023, CAR.MAZDA_CX9_2021) and not steer_to_zero
 
     carlog.debug({"event": "mazdaRadarVerdict", "radarUnavailable": ret.radarUnavailable,
                   "platformClaim": Bus.radar in DBC[candidate], "g46lRadar": g46l_radar, "steerToZeroEps": steer_to_zero})

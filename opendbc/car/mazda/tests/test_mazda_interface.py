@@ -15,7 +15,7 @@ from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.fingerprints import FW_VERSIONS
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.tests.conftest import DBC_NAME, car_params, car_params_sp
-from opendbc.car.mazda.values import CAR, DBC, G46L_RADAR_FW, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, MazdaFlags, MazdaSafetyFlags
+from opendbc.car.mazda.values import CAR, DBC, G46L_RADAR_FW, LKAS_LIMITS, STEER_TO_ZERO_EPS_FW, STEER_TO_ZERO_PLATFORMS, MazdaFlags, MazdaSafetyFlags
 
 Ecu = structs.CarParams.Ecu
 
@@ -112,7 +112,7 @@ class TestMazdaEpsSwap:
     car_fw = eps_fw(SWAPPED_EPS_FW) if swapped else None
     CP = car_params(candidate, car_fw=car_fw, alpha_long=True)
     has_radar_dbc = Bus.radar in DBC[candidate]
-    expected = (candidate == CAR.MAZDA_CX5_2022 or swapped) and has_radar_dbc
+    expected = (candidate in STEER_TO_ZERO_PLATFORMS or swapped) and has_radar_dbc
     assert CP.alphaLongitudinalAvailable == expected
     assert CP.openpilotLongitudinalControl == expected
     assert bool(CP.safetyConfigs[0].safetyParam & MazdaSafetyFlags.LONG.value) == expected
@@ -241,7 +241,10 @@ class TestMazdaLegacyFwEps:
     from opendbc.car.mazda.fingerprints import FW_VERSIONS
     assert LEGACY_FW_EPS in FW_VERSIONS[CAR.MAZDA_CX5_2022][(Ecu.eps, 0x730, None)]
     assert LEGACY_FW_EPS not in STEER_TO_ZERO_EPS_FW
-    assert set(FW_VERSIONS[CAR.MAZDA_CX5_2022][(Ecu.eps, 0x730, None)]) == STEER_TO_ZERO_EPS_FW | {LEGACY_FW_EPS}
+    # the set is exactly what the steer-to-zero platforms list, plus the one older firmware on the 2022 body
+    listed = {fw for c in STEER_TO_ZERO_PLATFORMS for fw in FW_VERSIONS[c][(Ecu.eps, 0x730, None)]}
+    assert listed == STEER_TO_ZERO_EPS_FW | {LEGACY_FW_EPS}
+    assert set(FW_VERSIONS[CAR.MAZDA_CX8_2023][(Ecu.eps, 0x730, None)]) <= STEER_TO_ZERO_EPS_FW
 
 class TestForeignRadar:
   """The G46L is the one radar known never to publish 0x361-0x366 on bus 0.
@@ -322,7 +325,6 @@ def test_non_gen1_platform_refused_at_admission():
   CP.flags = 0
   with pytest.raises(NotImplementedError):
     CarController({Bus.pt: DBC_NAME}, CP, CP_SP)
-
 
 
 class TestMovingTakeoverCapability:

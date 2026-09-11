@@ -2865,6 +2865,16 @@
     ],
     "package": "All"
   },
+  "Mazda CX-8 2023": {
+    "platform": "MAZDA_CX8_2023",
+    "make": "Mazda",
+    "brand": "mazda",
+    "model": "CX-8",
+    "year": [
+      "2023"
+    ],
+    "package": "All"
+  },
   "Mazda CX-9 2016-20": {
     "platform": "MAZDA_CX9",
     "make": "Mazda",

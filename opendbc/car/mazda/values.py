@@ -241,6 +241,14 @@ class CAR(Platforms):
     MazdaCX5_2022CarSpecs(mass=3728 * CV.LB_TO_KG, wheelbase=2.698, steerRatio=18.1),  # 15.5 is factory spec; 18.1 from paramsd learner (2.9M samples)
     wmis={WMI.JAPAN_CROSSOVER}, chassis_codes={'KF'}, years={'N', 'P', 'R', 'S'},  # 2022-25
   )
+  MAZDA_CX8_2023 = MazdaPlatformConfig(
+    [MazdaCarDocs("Mazda CX-8 2023")],
+    # Three-row CX-5 derivative on the CX-9 wheelbase, sold in Japan and Australia. Specs copied from
+    # the CX-9 2021 pending a learned set. Japan-market cars carry a chassis number, not a VIN, and
+    # Australian JM0 VINs have no model-year field, so it fingerprints by firmware alone.
+    MazdaCarSpecs(mass=4409 * CV.LB_TO_KG, wheelbase=2.93, steerRatio=17.6),
+    chassis_codes={'KG'},
+  )
 
 
 class LKAS_LIMITS:
@@ -249,12 +257,15 @@ class LKAS_LIMITS:
   ENABLE_SPEED = 52     # kph
 
 
-# Keep steer-to-zero firmware synchronized with the CX-5 2022 EPS entries in fingerprints.py.
+# Keep steer-to-zero firmware synchronized with the CX-5 2022 and CX-8 2023 EPS entries in fingerprints.py.
 STEER_TO_ZERO_EPS_FW = {
   b'K0A1-3210X-A-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',  # CX-8 2023 (Japan)
   b'KBST-3210X-A-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
   b'KSD5-3210X-C-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
 }
+
+# Platforms that ship the steer-to-zero EPS from the factory: what an unread EPS falls back to.
+STEER_TO_ZERO_PLATFORMS = {CAR.MAZDA_CX5_2022, CAR.MAZDA_CX8_2023}
 
 # The 2016.5-era radar kept by an EPS-swapped older body. Listed for fingerprinting, but
 # it never publishes 0x361-0x366 on bus 0; its one frame is fully static — no counter, no
