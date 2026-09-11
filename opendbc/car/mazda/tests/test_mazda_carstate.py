@@ -206,36 +206,38 @@ def feed_guard(CI, secs, radar_alive, start_frame=0, acc_active=False):
 
 
 class TestTwoMasterGuard:
-  """The stock-radar guard wears two hats: before the first teardown it is the expected boot
-  phase and must only hold availability low (no fault alert); once the radar has been silenced,
-  hearing it again is a genuine two-master conflict and must raise accFaulted."""
+  """Availability is the main switch from the first frame (lateral needs only that, and the
+  panda reads the same PEDALS sample). The radar guard gates cruise: before the first teardown
+  it is the expected boot phase and must only hold enabled low (no fault alert); once the radar
+  has been silenced, hearing it again is a genuine two-master conflict and must raise accFaulted."""
 
   def test_boot_phase_is_not_a_fault(self):
-    # radar broadcasting, teardown not started: engagement blocked quietly, no Cruise Fault
-    ret, _ = feed_guard(car_interface(), 5.0, radar_alive=True)
+    # radar broadcasting, teardown not started: main on shows (MADS may arm), cruise is not
+    # owned, no Cruise Fault
+    CI = car_interface()
+    ret, _ = feed_guard(CI, 5.0, radar_alive=True)
     assert not ret.accFaulted
-    assert not ret.cruiseState.available
+    assert ret.cruiseState.available
+    assert not ret.cruiseState.enabled
+    assert not CI.CS.radar_owned
 
-  def test_availability_arrives_with_radar_silence(self):
+  def test_ownership_arrives_with_radar_silence(self):
     CI = car_interface()
     ret, n = feed_guard(CI, 5.0, radar_alive=True)
     ret, n = feed_guard(CI, GUARD_T + 0.5, radar_alive=False, start_frame=n)
     assert not ret.accFaulted
+    assert CI.CS.radar_owned
     assert ret.cruiseState.available
 
-  def test_availability_trails_the_pandas_radar_latch(self):
-    # carstate availability must follow panda's matching radar-ownership guard.
-    panda_latch = (CarControllerParams.STOCK_RADAR_ALIVE_T + CarControllerParams.LONG_STEP * DT_CTRL +
-                   CarControllerParams.PANDA_RADAR_SILENT_T)
-    assert panda_latch < GUARD_T
+  def test_ownership_needs_the_whole_guard(self):
     CI = car_interface()
     ret, n = feed_guard(CI, 5.0, radar_alive=True)
-    ret, n = feed_guard(CI, panda_latch + 0.05, radar_alive=False, start_frame=n)
-    assert not ret.cruiseState.available
-    assert not CI.CS.stock_radar_alive
+    ret, n = feed_guard(CI, GUARD_T - 0.1, radar_alive=False, start_frame=n)
+    assert not CI.CS.radar_owned
     assert not CI.CS.stock_radar_gone
-    ret, n = feed_guard(CI, GUARD_T - panda_latch, radar_alive=False, start_frame=n)
-    assert ret.cruiseState.available
+    assert ret.cruiseState.available  # the main switch never waited
+    ret, n = feed_guard(CI, 0.2, radar_alive=False, start_frame=n)
+    assert CI.CS.radar_owned
     assert CI.CS.stock_radar_gone
 
   def test_radar_return_after_teardown_is_a_fault(self):
@@ -244,11 +246,12 @@ class TestTwoMasterGuard:
     ret, n = feed_guard(CI, GUARD_T + 0.5, radar_alive=False, start_frame=n)
     ret, n = feed_guard(CI, 0.5, radar_alive=True, start_frame=n)
     assert ret.accFaulted
-    # A returned radar revokes openpilot ownership and availability.
-    assert not ret.cruiseState.available
+    # A returned radar revokes ownership (cruise), not the main switch: lateral stays.
+    assert not CI.CS.radar_owned
+    assert ret.cruiseState.available
     ret, n = feed_guard(CI, GUARD_T + 0.5, radar_alive=False, start_frame=n)
     assert not ret.accFaulted
-    assert ret.cruiseState.available
+    assert CI.CS.radar_owned
 
   def test_a_bus_blip_does_not_rerun_the_guard(self):
     # the radar is in its diagnostic session whatever the vehicle bus does: a witness gap the
@@ -279,9 +282,9 @@ class TestTwoMasterGuard:
     assert not ret.cruiseState.available
 
   def test_stock_engagement_inside_the_guard_is_not_reported(self):
-    # Do not expose stock MRCC engagement before radar ownership transfers.
+    # A stock MRCC engagement before the takeover is the body's: main shows, enabled does not.
     ret, _ = feed_guard(car_interface(), 5.0, radar_alive=True, acc_active=True)
-    assert not ret.cruiseState.available
+    assert ret.cruiseState.available
     assert not ret.cruiseState.enabled
 
   def test_engagement_still_live_when_the_guard_lifts_is_not_adopted(self):

@@ -32,10 +32,9 @@ class CarControllerParams:
   FSC_SETTLE_T = 10.0          # observed-settled time before the teardown may start
   # This alive window detects a normal CRZ_INFO gap but does not establish ownership.
   STOCK_RADAR_ALIVE_T = 0.05
-  # Complete this ownership guard after panda's matching radar-silence guard.
-  PANDA_RADAR_SILENT_T = 1.0            # mazda.h MAZDA_RADAR_SILENT_FRAMES / 50 Hz PEDALS
-  STOCK_RADAR_GUARD_MARGIN_T = 0.2
-  STOCK_RADAR_GUARD_T = STOCK_RADAR_ALIVE_T + LONG_STEP * DT_CTRL + PANDA_RADAR_SILENT_T + STOCK_RADAR_GUARD_MARGIN_T  # 1.27 s
+  # Sustained radar silence before ownership is trusted (cruise; the main switch is not gated):
+  # about 12x the longest stock CRZ_INFO gap observed, the value every engaged drive ran on.
+  STOCK_RADAR_GUARD_T = 1.27
   RADAR_SESSION_LIMIT_T = 10.0  # per-attempt UDS budget
   # CAM_LANEINFO runs near 2 Hz, so its freshness window must exceed one period.
   CAM_LANEINFO_PERIOD_T = 0.563

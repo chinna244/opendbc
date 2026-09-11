@@ -278,14 +278,16 @@ class CarState(CarStateBase, CarStateExt):
       self.radar_was_silenced |= silenced
       self.radar_owned = silenced
 
-      # Gate enabled with available so a stock engagement inside the ownership guard cannot
-      # latch MADS. Require an idle transition before adopting a later engagement.
+      # available follows PEDALS arming from the first frame (the panda's acc_main_on reads the
+      # same sample); the radar guard gates enabled only, and a live stock engagement is not
+      # adopted the instant the guard lifts: it passes through idle once first. See
+      # docs/zoompilot/mazda-longitudinal.md, "Main is the main switch".
       if not silenced:
         self.cruise_enabled_blocked = True
       elif not self.cruise_enabled:
         self.cruise_enabled_blocked = False
 
-      ret.cruiseState.available = self.cruise_available and silenced
+      ret.cruiseState.available = self.cruise_available
       ret.cruiseState.enabled = self.cruise_enabled and not self.cruise_enabled_blocked
 
       # The FSC teardown gate requires fresh, settled CAM_LANEINFO without ERR_BIT. BIT2 is

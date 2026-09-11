@@ -13,7 +13,7 @@ nothing (NOT_NEEDED).
 
 The state is the driver's view: what, if anything, they have to do. Ownership details (which
 prerequisite, which UDS reply) go to carlog. READY is the vehicle's own guard on the silence
-(the two-master guard, which completes after the panda's), the point from which normal
+(the two-master guard), the point from which normal
 engagement can follow; a session acknowledgement is never readiness. RESTORED and FAILED are
 also the answers the lifecycle's hand-back request gets (stock_ecu_handback.py).
 """
@@ -29,3 +29,7 @@ class StockEcuState(StrEnum):
   RESTORING = "restoring"            # the default session is requested, stock traffic not back
   RESTORED = "restored"              # sustained stock traffic after the ordered hand-back
   FAILED = "failed"                  # a bounded attempt ended without the ECU answering
+
+
+# States in which a SET/RES press engages as on a stock car: nothing to explain to the driver.
+ENGAGES_NORMALLY = frozenset({StockEcuState.NOT_NEEDED, StockEcuState.READY, StockEcuState.RESTORED})
