@@ -32,10 +32,9 @@ class CarControllerParams:
   FSC_SETTLE_T = 10.0          # observed-settled time before the teardown may start
   # This alive window detects a normal CRZ_INFO gap but does not establish ownership.
   STOCK_RADAR_ALIVE_T = 0.05
-  # Complete this ownership guard after panda's matching radar-silence guard.
-  PANDA_RADAR_SILENT_T = 1.0            # mazda.h MAZDA_RADAR_SILENT_FRAMES / 50 Hz PEDALS
-  STOCK_RADAR_GUARD_MARGIN_T = 0.2
-  STOCK_RADAR_GUARD_T = STOCK_RADAR_ALIVE_T + LONG_STEP * DT_CTRL + PANDA_RADAR_SILENT_T + STOCK_RADAR_GUARD_MARGIN_T  # 1.27 s
+  # Sustained radar silence before ownership is trusted (cruise; the main switch is not gated):
+  # about 12x the longest stock CRZ_INFO gap observed, the value every engaged drive ran on.
+  STOCK_RADAR_GUARD_T = 1.27
   RADAR_SESSION_LIMIT_T = 10.0  # per-attempt UDS budget
   # CAM_LANEINFO runs near 2 Hz, so its freshness window must exceed one period.
   CAM_LANEINFO_PERIOD_T = 0.563
@@ -171,6 +170,10 @@ class MazdaFlags(IntFlag):
 
   # The G46L radar's dialect bit; see G46L_RADAR_FW below.
   G46L_RADAR = 8
+  # The radar may be taken over while the car is moving: the developer's MazdaMovingTakeover
+  # param (opendbc/sunnypilot/car/interfaces.py), until a moving handover is on record for a
+  # radar firmware and this can become a fingerprint rule.
+  MOVING_TAKEOVER = 16
 
 
 class MazdaSafetyFlags(IntFlag):
@@ -238,6 +241,13 @@ class CAR(Platforms):
     MazdaCX5_2022CarSpecs(mass=3728 * CV.LB_TO_KG, wheelbase=2.698, steerRatio=18.1),  # 15.5 is factory spec; 18.1 from paramsd learner (2.9M samples)
     wmis={WMI.JAPAN_CROSSOVER}, chassis_codes={'KF'}, years={'N', 'P', 'R', 'S'},  # 2022-25
   )
+  MAZDA_CX8_2023 = MazdaPlatformConfig(
+    [MazdaCarDocs("Mazda CX-8 2023")],
+    # Three-row CX-5 derivative on the CX-9 wheelbase (chassis KG), sold in Japan and Australia; the CX-9
+    # specs stand in until a learned set exists. Japan-market cars carry a chassis number, not a VIN,
+    # and Australian JM0 VINs have no model-year field, so it fingerprints by firmware alone.
+    MAZDA_CX9_2021.specs,
+  )
 
 
 class LKAS_LIMITS:
@@ -246,11 +256,17 @@ class LKAS_LIMITS:
   ENABLE_SPEED = 52     # kph
 
 
-# Keep steer-to-zero firmware synchronized with the CX-5 2022 EPS entries in fingerprints.py.
+# Keep steer-to-zero firmware synchronized with the STEER_TO_ZERO_PLATFORMS EPS entries in fingerprints.py.
 STEER_TO_ZERO_EPS_FW = {
+  b'K0A1-3210X-A-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',  # CX-8 2023 (Japan)
   b'KBST-3210X-A-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
   b'KSD5-3210X-C-00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
 }
+
+# Platforms that ship the steer-to-zero EPS from the factory: what an unread EPS falls back to.
+STEER_TO_ZERO_PLATFORMS = frozenset({CAR.MAZDA_CX5_2022, CAR.MAZDA_CX8_2023})
+# Bodies supported on their stock EPS; any other Mazda needs a steer-to-zero EPS swapped in.
+SUPPORTED_PLATFORMS = STEER_TO_ZERO_PLATFORMS | {CAR.MAZDA_CX9_2021}
 
 # The 2016.5-era radar kept by an EPS-swapped older body. Listed for fingerprinting, but
 # it never publishes 0x361-0x366 on bus 0; its one frame is fully static — no counter, no

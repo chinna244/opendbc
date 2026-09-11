@@ -12,6 +12,7 @@ from opendbc.car.mazda.radar_session import RadarSessionManager, RadarSessionSta
 from opendbc.car.mazda.values import CarControllerParams, Buttons, MazdaFlags
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
+from opendbc.sunnypilot.car.stock_ecu import StockEcuState
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
@@ -41,7 +42,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.lead_adv = AdvertisedLead()
     self.long_counter = 0
     self.radar_counter = 0
-    self.radar_session = RadarSessionManager()
+    self.radar_session = RadarSessionManager(moving_takeover=bool(CP.flags & MazdaFlags.MOVING_TAKEOVER))
     self.accel_last = 0.
     self.release_ramp = None
     self.breakaway_frames = 0
@@ -152,6 +153,13 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.frame += 1
     return new_actuators, can_sends
 
+  @property
+  def stock_ecu_state(self):
+    """The stock ECU transition contract (opendbc/sunnypilot/car/stock_ecu.py): card reads this
+    one name and nothing brand-specific. NOT_NEEDED under stock longitudinal, as on any brand
+    that silences nothing."""
+    return self.radar_session.status if self.CP.openpilotLongitudinalControl else StockEcuState.NOT_NEEDED
+
   def update_camera_tja(self, CC, CS):
     """Press the camera's own TJA/CTS off, on its bus, whenever it is armed.
 
@@ -199,14 +207,16 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     # Start takeover only after the FSC boot check and any stock engagement have ended.
     stock_radar_alive = CS.stock_radar_alive
-    setup_ok = CS.fsc_settled and not (stock_radar_alive and CS.cruise_enabled)
+    stock_engaged = stock_radar_alive and CS.cruise_enabled
     bus_healthy = CS.radar_bus_healthy
-    session_state = self.radar_session.update(setup_ok, stock_radar_alive, CC_SP.stockEcuHandBack,
+    # carstate's guard from the previous frame is the ownership the engagement path sees
+    session_state = self.radar_session.update(CS.fsc_settled, stock_radar_alive, CC_SP.stockEcuHandBack,
                                               standstill=CS.out.standstill,
                                               session_refused=CS.radar_session_refused,
                                               stock_radar_gone=CS.stock_radar_gone,
                                               bus_healthy=bus_healthy and CS.out.canValid,
-                                              session_response=CS.radar_session_response, frame=self.frame)
+                                              session_response=CS.radar_session_response, frame=self.frame,
+                                              stock_engaged=stock_engaged, owned=CS.radar_owned)
     # Continue synthetic radar frames through hand-back to avoid a camera-visible gap.
     radar_master = self.radar_session.replacement_active
     CS.radar_control_active = radar_master and session_state == RadarSessionState.SILENCED
