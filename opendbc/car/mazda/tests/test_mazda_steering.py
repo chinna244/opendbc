@@ -16,7 +16,7 @@ import pytest
 from opendbc.car import DT_CTRL, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.mazda.tests.conftest import LongCtrlState, car_controller, car_params, controller_params, mazda_car_state, step
-from opendbc.car.mazda.values import CAR, CarControllerParams, STEER_TO_ZERO_EPS_FW
+from opendbc.car.mazda.values import CAR, CarControllerParams
 
 Ecu = structs.CarParams.Ecu
 
@@ -30,7 +30,7 @@ def _eps_fw(version: bytes) -> list[structs.CarParams.CarFw]:
   return [fw]
 
 
-SWAPPED_EPS_FW = _eps_fw(sorted(STEER_TO_ZERO_EPS_FW)[0])
+SWAPPED_EPS_FW = _eps_fw(b'KSD5-3210X-C-00\x00\x00\x00\x00\x00\x00\x00\x00\x00')
 LEGACY_FW_EPS = _eps_fw(b'K319-3210X-B-00' + b'\x00' * 9)  # THACO CX-5 2023, keeps the floor
 
 

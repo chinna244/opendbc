@@ -24,10 +24,8 @@ laf_bp      = [2.67, 2.70, 2.56, 1.53, 1.28, 1.72, 1.97]
 friction_bp = [0.161, 0.154, 0.116, 0.163, 0.136, 0.128, 0.108]
 
 [MAZDA_CX8_2023]
-# Copied from the CX-9 2021 pending a learned set from a CX-8.
-speed_bp    = [6.5, 9.5, 12.0, 16.4, 21.0, 28.0, 35.0]
-laf_bp      = [2.67, 2.70, 2.56, 1.53, 1.28, 1.72, 1.97]
-friction_bp = [0.161, 0.154, 0.116, 0.163, 0.136, 0.128, 0.108]
+# The CX-9 2021 seeds stand in until a CX-8 has learned its own.
+substitute = "MAZDA_CX9_2021"
 
 [MAZDA_CX5_KE]
 # Apply these values only to a KE with a detected CX-5 2022 donor EPS. The stock EPS

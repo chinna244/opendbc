@@ -8,7 +8,7 @@ import pytest
 
 from opendbc.car import gen_empty_fingerprint
 from opendbc.car.mazda.interface import CarInterface
-from opendbc.car.mazda.values import CAR, STEER_TO_ZERO_EPS_FW, MazdaFlags
+from opendbc.car.mazda.values import CAR, MazdaFlags
 from opendbc.car.structs import CarParams
 from opendbc.sunnypilot.car.interfaces import (get_speed_dep_config, get_speed_dep_config_for_car, get_steer_max_schedule,
                                              get_steer_rail_schedule, get_steer_slew_schedule)
@@ -29,7 +29,7 @@ def ke_swapped_cp() -> CarParams:
   fw.ecu = CarParams.Ecu.eps
   fw.address = 0x730
   fw.subAddress = 0
-  fw.fwVersion = sorted(STEER_TO_ZERO_EPS_FW)[0]
+  fw.fwVersion = b'KSD5-3210X-C-00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
   cp = CarInterface.get_params(CAR.MAZDA_CX5_KE, gen_empty_fingerprint(), [fw], alpha_long=False, is_release=False, docs=False)
   assert cp.flags & MazdaFlags.STEER_TO_ZERO_EPS and cp.minSteerSpeed == 0.0
   return cp

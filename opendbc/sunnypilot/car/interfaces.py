@@ -44,7 +44,12 @@ def get_speed_dep_config():
   from opendbc.car.common.basedir import BASEDIR
   path = Path(BASEDIR) / 'torque_data/speed_dependent.toml'
   with open(path, 'rb') as f:
-    return tomllib.load(f)
+    cfg = tomllib.load(f)
+  # An entry may borrow another platform's table with 'substitute'; its own keys override.
+  for name, entry in cfg.items():
+    if 'substitute' in entry:
+      cfg[name] = {**cfg[entry['substitute']], **{k: v for k, v in entry.items() if k != 'substitute'}}
+  return cfg
 
 
 def get_steer_max_schedule(CP):

@@ -20,7 +20,7 @@ from opendbc.car.mazda.values import CAR, DBC, G46L_RADAR_FW, LKAS_LIMITS, STEER
 Ecu = structs.CarParams.Ecu
 
 # The steer-to-zero EPS a swap donates, and a stock pre-2022 CX-5 EPS for contrast
-SWAPPED_EPS_FW = sorted(STEER_TO_ZERO_EPS_FW)[0]
+SWAPPED_EPS_FW = b'KSD5-3210X-C-00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
 STOCK_CX5_EPS_FW = b'K319-3210X-A-00' + b'\x00' * 9
 # The 2022 EPS hardware on firmware that keeps the 45 kph floor (THACO CX-5 2023), and a revision listed nowhere
 LEGACY_FW_EPS = b'K319-3210X-B-00' + b'\x00' * 9
@@ -105,7 +105,7 @@ class TestMazdaEpsSwap:
   @pytest.mark.parametrize("candidate", list(CAR))
   @pytest.mark.parametrize("swapped", [False, True], ids=["stock", "swapped_eps"])
   def test_alpha_long_follows_the_eps(self, candidate, swapped):
-    # alpha long is offered wherever the 2022 CX-5 EPS is: the CX-5 2022 itself and any
+    # alpha long is offered wherever the steer-to-zero EPS is: the platforms that ship it and any
     # Mazda with that EPS swapped in. A stock older EPS cuts lateral below 45 kph, so
     # stop-and-go would run unsteered; those cars are not offered it. Neither is a platform
     # whose DBC has no radar bus (the pre-2021 CX-9), since the port has never seen its radar
@@ -241,10 +241,9 @@ class TestMazdaLegacyFwEps:
     from opendbc.car.mazda.fingerprints import FW_VERSIONS
     assert LEGACY_FW_EPS in FW_VERSIONS[CAR.MAZDA_CX5_2022][(Ecu.eps, 0x730, None)]
     assert LEGACY_FW_EPS not in STEER_TO_ZERO_EPS_FW
-    # the set is exactly what the steer-to-zero platforms list, plus the one older firmware on the 2022 body
     listed = {fw for c in STEER_TO_ZERO_PLATFORMS for fw in FW_VERSIONS[c][(Ecu.eps, 0x730, None)]}
     assert listed == STEER_TO_ZERO_EPS_FW | {LEGACY_FW_EPS}
-    assert set(FW_VERSIONS[CAR.MAZDA_CX8_2023][(Ecu.eps, 0x730, None)]) <= STEER_TO_ZERO_EPS_FW
+    assert LEGACY_FW_EPS not in FW_VERSIONS[CAR.MAZDA_CX8_2023][(Ecu.eps, 0x730, None)]
 
 class TestForeignRadar:
   """The G46L is the one radar known never to publish 0x361-0x366 on bus 0.
