@@ -10,15 +10,32 @@ from opendbc.car.mazda import mazdacan
 from opendbc.car.mazda.longitudinal import BREAKAWAY_FRAMES, AdvertisedLead, StandstillHold
 from opendbc.car.mazda.radar_session import RadarSessionManager, RadarSessionState
 from opendbc.car.mazda.values import CarControllerParams, Buttons, MazdaFlags
+from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP
 
 from opendbc.sunnypilot.car.mazda.icbm import IntelligentCruiseButtonManagementInterface
 from opendbc.sunnypilot.car.stock_ecu import StockEcuState
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
+SendButtonState = structs.IntelligentCruiseButtonManagement.SendButtonState
+ICBM_SET_BUTTONS = (
+  SendButtonState.increase,
+  SendButtonState.decrease,
+  SendButtonState.increaseHold,
+  SendButtonState.decreaseHold,
+)
 
 # Send synthetic radar frames to both consumers; panda does not forward locally generated frames.
 LONG_BUSES = (0, 2)
+TJA_MRCC_RELEASE_WAIT_FRAMES = 25
+TJA_MRCC_FIRST_TX_DELAY_NANOS = 50_000_000
+TJA_MRCC_MAX_TX_FRAMES = 3
+# PEDALS can briefly report both ACC bits low during a brake transition. Require
+# raw-off to persist before it overrides the intentionally brake-held public cruise
+# state. Route 56's real TJA cleanup stayed raw-off for seconds, so this remains well
+# inside the interval before another deliberate button press.
+TJA_MRCC_RAW_OFF_CONFIRM_FRAMES = 5
+MADS_WHITE_HUD_OFF_CONFIRM_FRAMES = int(0.5 / DT_CTRL)
 
 
 class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterface):
@@ -52,9 +69,23 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.tja_press_count = 0
     self.tja_press_frame: int | None = None
     self.tja_episode_alerted = False
+    self.tja_button_prev = False
+    self.tja_mrcc_unarm_pending = False
+    self.tja_mrcc_saw_armed = False
+    self.tja_mrcc_release_counter: int | None = None
+    self.tja_mrcc_release_wait_frames = 0
+    self.tja_mrcc_first_tx_not_before_nanos: int | None = None
+    self.tja_mrcc_wait_for_fresh_counter_after_op = False
+    self.tja_mrcc_press_frames = 0
+    self.tja_mrcc_tx_frames = 0
+    self.tja_mrcc_armed_prev: bool | None = None
+    self.tja_mrcc_raw_off_frames = 0
+    self.mads_white_hud_off_frames = 0
+    self.mads_white_hud_on_bus = False
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
+    tja_mrcc_cleanup_tx = False
 
     apply_torque = 0
 
@@ -120,6 +151,171 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       if self.resume_requested(CC) and self.frame % 5 == 0:
         can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.RESUME))
 
+    # On the CX-5 2022, the physical TJA button also arms Mazda MRCC on bus 0.
+    # Panda can strip the camera-forwarded copy, but it cannot hide a frame from ECUs
+    # already sharing bus 0. If MRCC was off before TJA, undo only that side effect
+    # after TJA release with a physical-style MRCC-off hold. Route 61 showed three
+    # isolated later retries can all be ignored; a physical press stays asserted on
+    # consecutive counters. Never send more than three frames total for one ownership
+    # episode. A later physical TJA can interrupt the hold; any replacement hold uses
+    # only the remaining global budget. Stop immediately on raw-off and preserve MRCC
+    # that was already armed before TJA.
+    if self.CP_SP.flags & MazdaFlagsSP.TJA_BUTTON:
+      tja_button = bool(getattr(CS, "tja_button", 0))
+      crz_btns_counter = int(CS.crz_btns_counter)
+      filtered_mrcc_armed = bool(CS.cruise_available) if hasattr(CS, "cruise_available") else \
+        bool(getattr(getattr(CS.out, "cruiseState", None), "available", False))
+      raw_mrcc_armed = bool(getattr(CS, "mrcc_armed_raw", filtered_mrcc_armed))
+      self.tja_mrcc_raw_off_frames = 0 if raw_mrcc_armed else self.tja_mrcc_raw_off_frames + 1
+      raw_off_confirmed = self.tja_mrcc_raw_off_frames >= TJA_MRCC_RAW_OFF_CONFIRM_FRAMES
+      # The filtered state protects against momentary brake-only dropouts. Once raw-off
+      # is sustained, it is authoritative for this cleanup even if cruise_available is
+      # deliberately cached until brake release.
+      mrcc_armed = raw_mrcc_armed or (filtered_mrcc_armed and not raw_off_confirmed)
+      tja_pressed = tja_button and not self.tja_button_prev
+      tja_released = not tja_button and self.tja_button_prev
+
+      if tja_pressed:
+        if not self.tja_mrcc_unarm_pending:
+          # PEDALS may already show the TJA-induced arm in the same update as the button
+          # edge. The previous stable sample is the state that existed before the press.
+          mrcc_armed_before_press = self.tja_mrcc_armed_prev if self.tja_mrcc_armed_prev is not None else mrcc_armed
+          if not mrcc_armed_before_press:
+            # Acquire a new ownership episode. The cumulative three-frame budget resets
+            # only here, never for a later TJA while leftover MRCC remains armed.
+            self.tja_mrcc_unarm_pending = True
+            self.tja_mrcc_saw_armed = False
+            self.tja_mrcc_tx_frames = 0
+            self.tja_mrcc_press_frames = 0
+        elif self.tja_mrcc_press_frames > 0:
+          # Route 5d: the second TJA ends this uninterrupted hold, but not ownership
+          # of the TJA-caused arm. Any replacement hold uses only the global budget
+          # remaining after the already-transmitted frames.
+          self.tja_mrcc_press_frames = 0
+        # Keep ownership and wait for the newest release. No TX while TJA is held.
+        self.tja_mrcc_release_counter = None
+        self.tja_mrcc_release_wait_frames = 0
+        self.tja_mrcc_first_tx_not_before_nanos = None
+        self.tja_mrcc_wait_for_fresh_counter_after_op = False
+
+      if self.tja_mrcc_unarm_pending:
+        self.tja_mrcc_saw_armed |= raw_mrcc_armed
+        if (CS.cancel_button == 1 or getattr(CS, "resume_button", 0) == 1 or
+            CS.accel_button or CS.decel_button or getattr(CS, "mrcc_button", 0) == 1):
+          # Driver cruise-button activity owns CRZ_BTNS regardless of whether TJA
+          # is held or a cleanup counter has been anchored.
+          self.tja_mrcc_unarm_pending = False
+          self.tja_mrcc_press_frames = 0
+        elif (CC.cruiseControl.cancel or CC.cruiseControl.resume) and self.tja_mrcc_tx_frames > 0:
+          # A synthetic hold has already spent budget. Do not allow cancel/resume
+          # during TJA hold to resume later as a replacement press.
+          self.tja_mrcc_unarm_pending = False
+          self.tja_mrcc_press_frames = 0
+        elif self.tja_mrcc_saw_armed and raw_off_confirmed:
+          self.tja_mrcc_unarm_pending = False
+          self.tja_mrcc_press_frames = 0
+        elif tja_released:
+          if self.tja_mrcc_tx_frames > 0 and not raw_mrcc_armed:
+            # Delayed acknowledgement of an interrupted press can arrive while TJA is
+            # held. Observe it before arming a replacement press.
+            self.tja_mrcc_unarm_pending = False
+            self.tja_mrcc_press_frames = 0
+          else:
+            # Experimentally delay only the first actual MRCC_OFF frame. Replacement
+            # holds after transmission retain the existing consecutive-counter behavior.
+            self.tja_mrcc_release_counter = crz_btns_counter
+            self.tja_mrcc_release_wait_frames = 0
+            self.tja_mrcc_first_tx_not_before_nanos = (
+              now_nanos + TJA_MRCC_FIRST_TX_DELAY_NANOS if self.tja_mrcc_tx_frames == 0 else None
+            )
+            self.tja_mrcc_wait_for_fresh_counter_after_op = False
+        elif self.tja_mrcc_release_counter is not None:
+          if not raw_mrcc_armed:
+            # Raw-off is sufficient to stop an in-flight transaction. Waiting for the
+            # filtered state here could send another toggle after a manual/accepted off.
+            self.tja_mrcc_unarm_pending = False
+            self.tja_mrcc_press_frames = 0
+          elif CC.cruiseControl.cancel or CC.cruiseControl.resume:
+            # No budget has been spent. Wait for a new OEM counter after this
+            # command clears rather than sending from an old retained sample.
+            self.tja_mrcc_release_counter = crz_btns_counter
+            self.tja_mrcc_release_wait_frames = 0
+            self.tja_mrcc_wait_for_fresh_counter_after_op = True
+          elif self.tja_mrcc_tx_frames >= TJA_MRCC_MAX_TX_FRAMES:
+            self.tja_mrcc_unarm_pending = False
+            self.tja_mrcc_press_frames = 0
+          else:
+            self.tja_mrcc_release_wait_frames += 1
+            counter_delta = (crz_btns_counter - self.tja_mrcc_release_counter) % 16
+            first_tx_waiting = (
+              self.tja_mrcc_tx_frames == 0 and
+              self.tja_mrcc_first_tx_not_before_nanos is not None
+            )
+            first_tx_due = (
+              first_tx_waiting and
+              now_nanos >= self.tja_mrcc_first_tx_not_before_nanos and
+              not self.tja_mrcc_wait_for_fresh_counter_after_op
+            )
+            if first_tx_waiting:
+              if self.tja_mrcc_wait_for_fresh_counter_after_op:
+                if counter_delta == 1:
+                  self.tja_mrcc_wait_for_fresh_counter_after_op = False
+                elif counter_delta > 1:
+                  self.tja_mrcc_release_counter = crz_btns_counter
+              if not self.tja_mrcc_wait_for_fresh_counter_after_op:
+                # Keep the release anchor synchronized with the latest OEM counter.
+                # At the deadline, create_mrcc_off_cmd packs latest_counter + 1.
+                self.tja_mrcc_release_counter = crz_btns_counter
+                self.tja_mrcc_release_wait_frames = 0
+                first_tx_due = now_nanos >= self.tja_mrcc_first_tx_not_before_nanos
+
+            # Experimental change: the delayed first frame is deadline-gated rather
+            # than counter-delta-gated. Follow-ups retain the delta == 1 requirement.
+            if first_tx_due or (not first_tx_waiting and counter_delta == 1):
+              if raw_mrcc_armed:
+                can_sends.append(mazdacan.create_mrcc_off_cmd(self.packer, crz_btns_counter))
+                tja_mrcc_cleanup_tx = True
+                self.tja_mrcc_tx_frames += 1
+                self.tja_mrcc_press_frames += 1
+                self.tja_mrcc_release_counter = crz_btns_counter
+                self.tja_mrcc_release_wait_frames = 0
+                self.tja_mrcc_first_tx_not_before_nanos = None
+                self.tja_mrcc_wait_for_fresh_counter_after_op = False
+                if self.tja_mrcc_tx_frames >= TJA_MRCC_MAX_TX_FRAMES:
+                  self.tja_mrcc_unarm_pending = False
+                  self.tja_mrcc_press_frames = 0
+              else:
+                self.tja_mrcc_unarm_pending = False
+                self.tja_mrcc_press_frames = 0
+            elif first_tx_waiting:
+              if self.tja_mrcc_release_wait_frames > TJA_MRCC_RELEASE_WAIT_FRAMES:
+                self.tja_mrcc_unarm_pending = False
+                self.tja_mrcc_press_frames = 0
+            elif counter_delta > 1:
+              if self.tja_mrcc_press_frames > 0:
+                # The physical-style hold has been broken.
+                self.tja_mrcc_unarm_pending = False
+                self.tja_mrcc_press_frames = 0
+              elif self.tja_mrcc_release_wait_frames > TJA_MRCC_RELEASE_WAIT_FRAMES:
+                # Repeated pre-start jumps must not suppress ICBM forever.
+                self.tja_mrcc_unarm_pending = False
+                self.tja_mrcc_press_frames = 0
+              else:
+                # Press has not started. A skipped OEM counter is not a broken hold;
+                # wait for the next consecutive counter from here.
+                self.tja_mrcc_release_counter = crz_btns_counter
+            elif self.tja_mrcc_release_wait_frames > TJA_MRCC_RELEASE_WAIT_FRAMES:
+              # A dead/stale CRZ_BTNS stream must not suppress ICBM indefinitely.
+              self.tja_mrcc_unarm_pending = False
+              self.tja_mrcc_press_frames = 0
+
+      if not self.tja_mrcc_unarm_pending:
+        self.tja_mrcc_first_tx_not_before_nanos = None
+        self.tja_mrcc_wait_for_fresh_counter_after_op = False
+
+      self.tja_button_prev = tja_button
+      self.tja_mrcc_armed_prev = mrcc_armed
+
     self.apply_torque_last = apply_torque
 
     if self.CP.openpilotLongitudinalControl:
@@ -127,20 +323,106 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
     can_sends.extend(self.update_camera_tja(CC, CS))
 
-    # send HUD alerts
-    if self.frame % 50 == 0:
-      ldw = CC.hudControl.visualAlert == VisualAlert.ldw
-      steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
-      # TODO: find a way to silence audible warnings so we can add more hud alerts
-      steer_required = steer_required and CS.lkas_allowed_speed
-      can_sends.append(mazdacan.create_alert_command(self.packer, CS.cam_laneinfo, ldw, steer_required))
+    # CAM_LANEINFO.TJA=2 draws the WHITE wheel, but it is not display-only: the
+    # Mazda body/MRCC consumes it too. Fail closed around every cruise/TJA
+    # interaction. Only expose WHITE after MRCC has been completely off and quiet
+    # for 0.5 s; ARMED and ACTIVE are hard denies.
+    cruise_state = getattr(CS.out, "cruiseState", None)
+    if self.CP.openpilotLongitudinalControl:
+      filtered_mrcc_available = bool(getattr(CS, "cruise_available", False))
+      filtered_mrcc_enabled = bool(getattr(CS, "cruise_enabled", False))
+    else:
+      filtered_mrcc_available = (
+        cruise_state is not None and bool(getattr(cruise_state, "available", False))
+      )
+      filtered_mrcc_enabled = (
+        cruise_state is not None and bool(getattr(cruise_state, "enabled", False))
+      )
+
+    mrcc_off = (
+      not bool(getattr(CS, "mrcc_armed_raw", True)) and
+      not bool(getattr(CS, "cruise_available", True)) and
+      not bool(getattr(CS, "cruise_enabled", False)) and
+      cruise_state is not None and
+      not filtered_mrcc_available and
+      not filtered_mrcc_enabled
+    )
+
+    icbm = getattr(CC_SP, "intelligentCruiseButtonManagement", None)
+    icbm_set_activity = (
+      icbm is not None and icbm.sendButton in ICBM_SET_BUTTONS
+    )
+    hud_button_activity = (
+      bool(getattr(CS, "tja_button", 0)) or
+      bool(getattr(CS, "mrcc_button", 0)) or
+      bool(getattr(CS, "main_button", 0)) or
+      bool(getattr(CS, "mode_x", 0)) or
+      bool(getattr(CS, "mode_y", 0)) or
+      bool(getattr(CS, "cancel_button", 0)) or
+      bool(getattr(CS, "resume_button", 0)) or
+      bool(getattr(CS, "accel_button", 0)) or
+      bool(getattr(CS, "decel_button", 0)) or
+      bool(getattr(CS, "distance_button", 0)) or
+      icbm_set_activity or
+      CC.cruiseControl.cancel or CC.cruiseControl.resume
+    )
+    ldw = CC.hudControl.visualAlert == VisualAlert.ldw
+    steer_required = CC.hudControl.visualAlert == VisualAlert.steerRequired
+    # TODO: find a way to silence audible warnings so we can add more hud alerts
+    steer_required = steer_required and CS.lkas_allowed_speed
+    alert = mazdacan.create_alert_command(self.packer, getattr(CS, "cam_laneinfo", {}) or {}, ldw, steer_required)
+    packed_laneinfo = alert[1]
+    fsc_raw = getattr(CS, "cam_laneinfo_raw", None)
+    hud_base = mazdacan.white_hud_allowlist_base(fsc_raw)
+    normalized_base = hud_base is not None
+
+    tja_button_mazda = bool(self.CP_SP.flags & MazdaFlagsSP.TJA_BUTTON)
+    white_hud_trusted = (
+      tja_button_mazda and
+      bool(getattr(getattr(CC_SP, "mads", None), "active", False)) and
+      getattr(CS, "cam_laneinfo_live", False) and
+      normalized_base and
+      CC.hudControl.visualAlert == VisualAlert.none and
+      not hud_button_activity
+    )
+
+    white_hud_off_base_allowed = (
+      tja_button_mazda and
+      white_hud_trusted and
+      mrcc_off
+    )
+    if white_hud_off_base_allowed:
+      self.mads_white_hud_off_frames = min(
+        self.mads_white_hud_off_frames + 1,
+        MADS_WHITE_HUD_OFF_CONFIRM_FRAMES,
+      )
+    else:
+      self.mads_white_hud_off_frames = 0
+
+    white_hud = (
+      white_hud_off_base_allowed and
+      self.mads_white_hud_off_frames >= MADS_WHITE_HUD_OFF_CONFIRM_FRAMES
+    )
+    withdraw_white_now = self.mads_white_hud_on_bus and not white_hud
+
+    # Preserve the normal 2 Hz cadence. Exception: immediate OEM withdraw when WHITE
+    # becomes unsafe (button / ARMED / warning / stale / unknown payload).
+    if self.frame % 50 == 0 or withdraw_white_now:
+      payload = hud_base if white_hud and hud_base is not None else packed_laneinfo
+      alert = (alert[0], mazdacan.apply_mads_white_hud(fsc_raw, payload, white_hud), alert[2])
+      can_sends.append(alert)
+      self.mads_white_hud_on_bus = mazdacan.is_mads_white_hud(alert[1])
 
     # send steering command
     can_sends.append(mazdacan.create_steering_control(self.packer, self.CP,
                                                       self.frame, apply_torque, CS.cam_lkas))
 
-    # Suppress ICBM while cancel or resume is active to avoid competing button frames.
-    icbm_suppress = CC.cruiseControl.cancel or CC.cruiseControl.resume or CS.cancel_button == 1
+    # Suppress ICBM while cancel/resume or cleanup owns CRZ_BTNS.
+    icbm_suppress = (
+      CC.cruiseControl.cancel or CC.cruiseControl.resume or CS.cancel_button == 1 or
+      (tja_button_mazda and
+       (getattr(CS, "tja_button", 0) == 1 or self.tja_mrcc_unarm_pending or tja_mrcc_cleanup_tx))
+    )
     if not icbm_suppress:
       can_sends.extend(IntelligentCruiseButtonManagementInterface.update(self, CC_SP, CS, self.packer, self.frame, self.last_button_frame))
 
@@ -310,9 +592,16 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
                                                      long_active=long_engaged, acc_available=acc_available,
                                                      brake_pressed=CS.out.brakePressed,
                                                      stopping=sm.stop_bits, resume_unlatching=sm.resume_unlatching))
-        can_sends.append(mazdacan.create_crz_ctrl(self.packer, bus, long_engaged, acc_available, gap,
-                                                  self.lead_adv.has_lead, self.lead_adv.ctrl_phase,
-                                                  acc_active_2))
+        crz_ctrl = mazdacan.create_crz_ctrl(self.packer, bus, long_engaged, acc_available, gap,
+                                            self.lead_adv.has_lead, self.lead_adv.ctrl_phase,
+                                            acc_active_2)
+        if (bus == 0 and bool(getattr(getattr(CC_SP, "mads", None), "active", False)) and
+            not CS.mrcc_armed_raw and not CS.cruise_available and not CS.cruise_enabled):
+          addr, dat, crz_bus = crz_ctrl
+          dat = bytearray(dat)
+          dat[4] |= 0x20
+          crz_ctrl = (addr, bytes(dat), crz_bus)
+        can_sends.append(crz_ctrl)
       self.long_counter += 1
 
     return can_sends
