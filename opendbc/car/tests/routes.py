@@ -57,6 +57,8 @@ non_tested_cars = [
 
   # no public route yet, the 2016.5 swap car is the only known device-validated KE
   MAZDA.MAZDA_CX5_KE,
+  # no public route yet, one user car in Japan
+  MAZDA.MAZDA_CX8_2023,
 ]
 
 

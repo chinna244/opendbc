@@ -9,11 +9,11 @@ import pytest
 from opendbc.car import structs
 from opendbc.car.fw_versions import match_fw_to_car
 from opendbc.car.mazda.fingerprints import FW_VERSIONS
-from opendbc.car.mazda.values import CAR, STEER_TO_ZERO_EPS_FW, match_fw_to_car_fuzzy, platform_from_vin
+from opendbc.car.mazda.values import CAR, match_fw_to_car_fuzzy, platform_from_vin
 from opendbc.car.vin import VIN_UNKNOWN
 
 # a steer-to-zero EPS a swap donates; the CX-5 2022 list also carries legacy firmware now
-DONOR_EPS_FW = sorted(STEER_TO_ZERO_EPS_FW)[0]
+DONOR_EPS_FW = b'KSD5-3210X-C-00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
 
 Ecu = structs.CarParams.Ecu
 

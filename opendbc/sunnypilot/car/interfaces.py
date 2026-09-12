@@ -19,6 +19,7 @@ from opendbc.car.toyota.values import ToyotaSafetyFlags
 from opendbc.sunnypilot.car.hyundai.enable_radar_tracks import enable_radar_tracks as hyundai_enable_radar_tracks
 from opendbc.sunnypilot.car.hyundai.longitudinal.helpers import LongitudinalTuningType
 from opendbc.sunnypilot.car.hyundai.values import HyundaiFlagsSP
+from opendbc.car.mazda.values import MazdaFlags
 from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP, MazdaSafetyFlagsSP
 from opendbc.sunnypilot.car.subaru.values_ext import SubaruFlagsSP, SubaruSafetyFlagsSP
 from opendbc.sunnypilot.car.tesla.values import MadsScreenButtonType, TeslaFlagsSP, TeslaSafetyFlagsSP
@@ -43,7 +44,12 @@ def get_speed_dep_config():
   from opendbc.car.common.basedir import BASEDIR
   path = Path(BASEDIR) / 'torque_data/speed_dependent.toml'
   with open(path, 'rb') as f:
-    return tomllib.load(f)
+    cfg = tomllib.load(f)
+  # An entry may borrow another platform's table with 'substitute'; its own keys override.
+  for name, entry in cfg.items():
+    if 'substitute' in entry:
+      cfg[name] = {**cfg[entry['substitute']], **{k: v for k, v in entry.items() if k != 'substitute'}}
+  return cfg
 
 
 def get_steer_max_schedule(CP):
@@ -293,3 +299,8 @@ def _initialize_mazda(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_
     if int(params_dict.get("MazdaTjaButton", 0)) == 1:
       CP_SP.flags |= MazdaFlagsSP.TJA_BUTTON.value
       CP_SP.safetyParam |= MazdaSafetyFlagsSP.TJA_BUTTON
+    # A developer's declaration, off by default: the radar takeover may be requested while the
+    # car is moving (a fresh session after a forced-offroad exit or a process restart). No
+    # radar has a moving handover on record yet; when one does, this becomes a firmware rule.
+    if CP.openpilotLongitudinalControl and int(params_dict.get("MazdaMovingTakeover", 0)) == 1:
+      CP.flags |= MazdaFlags.MOVING_TAKEOVER.value
