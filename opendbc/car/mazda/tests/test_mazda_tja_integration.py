@@ -22,15 +22,24 @@ def _tja_cc():
 class TestCameraTjaDoesNotTriggerMrccCleanup:
   """B: synthetic camera-bus TJA TX must not own MRCC cleanup."""
 
-  def test_synthetic_camera_tja_only_no_mrcc_off(self):
+  def test_benign_camera_tja_two_sends_nothing(self):
     cc = _tja_cc()
     cs = mazda_car_state(cc.CP, cc.CP_SP)
     for _ in range(3 * INTERVAL):
       _, sends = step(cc, cs, lat_active=True, stock_tja=2, cruise_available=False, mrcc_armed_raw=False)
-      assert presses(sends) in (0, 1)
+      assert presses(sends) == 0
       assert not frames(sends, CRZ_BTNS, bus=0), "camera TJA must not produce bus-0 CRZ_BTNS"
       assert not cc.tja_mrcc_unarm_pending
       assert cc.tja_mrcc_tx_frames == 0
+
+  def test_active_camera_tja_press_does_not_trigger_mrcc_off(self):
+    cc = _tja_cc()
+    cs = mazda_car_state(cc.CP, cc.CP_SP)
+    _, sends = step(cc, cs, lat_active=True, stock_tja=4, cruise_available=False, mrcc_armed_raw=False)
+    assert presses(sends) == 1
+    assert not frames(sends, CRZ_BTNS, bus=0)
+    assert not cc.tja_mrcc_unarm_pending
+    assert cc.tja_mrcc_tx_frames == 0
 
 
 class TestPhysicalTjaWithCameraPressAndMrccCleanup:
@@ -46,7 +55,7 @@ class TestPhysicalTjaWithCameraPressAndMrccCleanup:
 
     side._step(cc, CC, CC_SP, tja=0, armed=False, raw_armed=False, stock_tja=0)
     sends = side._step(cc, CC, CC_SP, tja=1, armed=False, raw_armed=False, stock_tja=2)
-    assert len(frames(sends, CRZ_BTNS, bus=2)) == 1
+    assert not frames(sends, CRZ_BTNS, bus=2)
     assert not frames(sends, CRZ_BTNS, bus=0)
 
     sends = side._step(cc, CC, CC_SP, tja=1, armed=True, raw_armed=True, stock_tja=2)
