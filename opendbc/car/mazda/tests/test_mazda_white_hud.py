@@ -52,8 +52,8 @@ def test_allowlist_payload_only_flips_white_tja_bits(base):
   assert mazdacan.is_mads_white_hud(out)
 
 
-def test_allowlist_stays_twenty_eight_stable_bases():
-  assert len(mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS) == 28
+def test_allowlist_stays_thirty_four_stable_bases():
+  assert len(mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS) == 34
   assert bytes.fromhex("4102000400001040") not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
   assert NEARBY_4221_10E0 not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
   # Night/high-beam LINE_VISIBLE twins of 4102/4122…1040 (route 52).
@@ -729,3 +729,54 @@ class TestWhiteHudController:
       raw = TRANS_4102 if i % 2 else LANE_VISIBLE_4102
       controller.update(CC, CC_SP, self._carstate(raw=raw), round((MADS_WHITE_HUD_OFF_CONFIRM_FRAMES + 2 + i) * DT_CTRL * 1e9))
     assert controller.mads_white_hud_off_frames == MADS_WHITE_HUD_OFF_CONFIRM_FRAMES
+
+
+# Route 94 one-lane WHITE HUD regression coverage.
+ROUTE94_ONE_LANE_BASES = (
+  bytes.fromhex("4123000000000040"),
+  bytes.fromhex("4124000000000040"),
+  bytes.fromhex("4123000000001040"),
+  bytes.fromhex("4124000000001040"),
+  bytes.fromhex("4123000000004040"),
+  bytes.fromhex("4124000000004040"),
+)
+
+ROUTE94_UNREVIEWED_BASES = (
+  bytes.fromhex("5221000000004040"),
+  bytes.fromhex("6122000000001040"),
+  bytes.fromhex("6122000000001045"),
+  bytes.fromhex("4122000000001045"),
+  bytes.fromhex("4222000000004040"),
+)
+
+
+def test_route94_one_lane_bases_are_allowlisted():
+  for base in ROUTE94_ONE_LANE_BASES:
+    assert base in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+    assert mazdacan.white_hud_allowlist_base(base) == base
+
+
+def test_route94_observed_one_lane_transition_frames_normalize():
+  observed = (
+    ("4123000c00004040", "4123000000004040"),
+    ("4124000c00004040", "4124000000004040"),
+  )
+
+  for raw_hex, base_hex in observed:
+    assert mazdacan.white_hud_allowlist_base(bytes.fromhex(raw_hex)) == bytes.fromhex(base_hex)
+
+
+def test_route94_existing_lane2_0040_remains_allowlisted():
+  base = bytes.fromhex("4122000000000040")
+  assert base in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+  assert mazdacan.white_hud_allowlist_base(base) == base
+
+
+def test_route94_unreviewed_states_remain_fail_closed():
+  for base in ROUTE94_UNREVIEWED_BASES:
+    assert base not in mazdacan.MADS_HUD_SAFE_BASE_PAYLOADS
+    assert mazdacan.white_hud_allowlist_base(base) is None
+
+
+def test_route94_normalization_mask_unchanged():
+  assert mazdacan.CAM_LANEINFO_TJA_NORMALIZE_MASK == 0xFFFFFFF08FFFFFFF
