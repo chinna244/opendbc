@@ -225,6 +225,14 @@ MADS_HUD_SAFE_BASE_PAYLOADS = frozenset({
   # Same BIT1/BIT3/S1 pattern as trusted 4102…1040; TJA XOR only.
   bytes.fromhex("4103000000001040"),
   bytes.fromhex("4104000000001040"),
+  # Route 94: BIT2=1 LANE_LINES=3/4 one-lane states observed with the
+  # 0040/1040/4040 suffix families. Exact bases only; do not widen normalization.
+  bytes.fromhex("4123000000000040"),
+  bytes.fromhex("4124000000000040"),
+  bytes.fromhex("4123000000001040"),
+  bytes.fromhex("4124000000001040"),
+  bytes.fromhex("4123000000004040"),
+  bytes.fromhex("4124000000004040"),
   # Byte-7 0x40/0x60 counter twins of allowlisted 4102/4122 LINE_VISIBLE families
   # (routes 45/46 observed 4102…1060; 4060/4122…1060 close the same audited nibble).
   bytes.fromhex("4102000000001060"),
