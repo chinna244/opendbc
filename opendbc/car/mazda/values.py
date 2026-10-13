@@ -59,6 +59,9 @@ class CarControllerParams:
   # Match stock's one-frame relaxation and subsequent release ramp.
   ACCEL_RELEASE_BAND = -0.26  # m/s2, the one-frame relax target at a never-latched release
   ACCEL_RELEASE_RAMP = 1.25   # m/s3, stock's release ramp (+25 raw per 50 Hz frame)
+  # Past the unlatch pulse window with the car still standing, build faster than stock: stock's
+  # ramp alone took 0.8 s to break away after the hold opened (routes 0000013a, 0000013b).
+  ACCEL_RELEASE_RAMP_STOPPED = 2.5  # m/s3
 
   # Permit a bounded breakaway ramp because Mazda longitudinal control has no integrator.
   ACCEL_BREAKAWAY_MAX = 1.45  # m/s2, ceiling for the still-stopped release ramp
@@ -67,8 +70,12 @@ class CarControllerParams:
   # Shape positive commands like stock MRCC: its accelerating command's ceiling by speed, and its
   # build rate (taken a third quicker once rolling: the plan sees a lead pull away before the radar
   # would). Positive commands only, so braking is never held longer than the plan asks.
-  ACCEL_CEILING_BP = [0., 4., 9., 14., 18., 25.]  # m/s
-  ACCEL_CEILING_V = [1.5, 1.75, 1.45, 1.05, 0.85, 0.65]  # m/s2
+  # The ceiling is held under stock's p99 ([1.5, 1.75, 1.45, 1.05, 0.85, 0.65] at [0, 4, 9, 14, 18, 25]
+  # m/s) above 5 m/s: the shape of this car's pull-aways with no lead (routes 0000013a, 0000013b),
+  # which ease off from 12 mph. Behind a lead the plan rode stock's p99 to 30 mph, which felt harsh.
+  # From 25 mph up it stays near stock so reaching a 45 to 55 mph set speed is not slow.
+  ACCEL_CEILING_BP = [0., 4., 5.5, 7., 9., 11., 13.5, 18., 25.]  # m/s
+  ACCEL_CEILING_V = [1.5, 1.7, 1.65, 1.3, 1.1, 0.9, 0.85, 0.8, 0.65]  # m/s2
   ACCEL_BUILD_BP = [3., 6.]   # m/s
   ACCEL_BUILD_V = [1.25, 0.8]  # m/s3
   # Stock's throttle lift rate, while the plan is still >= 0; a brake request skips it.

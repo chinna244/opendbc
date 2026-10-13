@@ -141,8 +141,13 @@ class AccelShaper:
         # at the relaxed command until the body lets go.
         accel = self.release_ramp
         if not (sm.latched_release and body_hold):
+          # Stock's ramp through the unlatch pulse window and once rolling; quicker while the car
+          # still stands after it, so the pull-away does not wait on the ramp.
+          ramp_rate = CarControllerParams.ACCEL_RELEASE_RAMP
+          if standstill and self.breakaway_frames > RESUME_UNLATCH_LATCHED_FRAMES and not sm.resume_unlatching:
+            ramp_rate = CarControllerParams.ACCEL_RELEASE_RAMP_STOPPED
           # Follow a falling plan ceiling at the winddown limit.
-          self.release_ramp = max(min(self.release_ramp + CarControllerParams.ACCEL_RELEASE_RAMP * DT_CTRL, ramp_ceiling),
+          self.release_ramp = max(min(self.release_ramp + ramp_rate * DT_CTRL, ramp_ceiling),
                                   self.release_ramp + CarControllerParams.ACCEL_WINDDOWN_LIMIT)
       else:
         self.release_ramp = None
