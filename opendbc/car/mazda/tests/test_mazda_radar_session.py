@@ -10,10 +10,12 @@ each state driven through the real CarController.update_longitudinal.
 import pytest
 
 from opendbc.car import DT_CTRL
+from opendbc.car import structs
+from opendbc.car.mazda.carcontroller import CRUISE_REQUEST_SETTLE_FRAMES
 from opendbc.car.mazda.radar_session import RADAR_SESSION_LIMIT_FRAMES, RADAR_RESTORE_FRAMES, RADAR_UDS_STEP, RadarSessionManager, \
   RadarSessionState
 from opendbc.car.mazda.tests.conftest import (CRZ_CTRL, CRZ_INFO, RADAR_STATIC, RADAR_UDS, SESSION_DFLT_DAT, SESSION_PROG_DAT,
-                                              TESTER_PRESENT_DAT, LongCtrlState, car_interface, frames, step_long)
+                                              TESTER_PRESENT_DAT, LongCtrlState, car_controller, car_interface, frames, step_long)
 from opendbc.car.mazda.values import CarControllerParams
 from opendbc.sunnypilot.car.stock_ecu import StockEcuState
 
@@ -142,11 +144,11 @@ class TestRadarSessionBounds:
 
 
 def boot_step(cc, cs, stock_radar_alive, fsc_settled, handback=False, cruise_engaged=False, standstill=True,
-              stock_radar_gone=None):
+              stock_radar_gone=None, buttons=(), available=False):
   # standstill=True models the parked boot; actively silencing a live radar is gated on it
-  return step_long(cc, cs, long_active=False, accel=0., long_state=LongCtrlState.off, lead_visible=False, available=False,
+  return step_long(cc, cs, long_active=False, accel=0., long_state=LongCtrlState.off, lead_visible=False, available=available,
                    stock_radar_alive=stock_radar_alive, stock_radar_gone=stock_radar_gone, fsc_settled=fsc_settled,
-                   handback=handback, cruise_engaged=cruise_engaged, standstill=standstill)
+                   handback=handback, cruise_engaged=cruise_engaged, standstill=standstill, buttons=buttons)
 
 
 def uds(sends):
@@ -379,3 +381,66 @@ class TestControllerStatus:
     cs.radar_owned = True
     boot_step(cc, cs, stock_radar_alive=False, fsc_settled=True)
     assert cc.stock_ecu_state == StockEcuState.READY
+
+
+ButtonType = structs.CarState.ButtonEvent.Type
+
+
+class TestCruiseRequestTakeover:
+  """The stock radar, and its AEB, stays in its default session until the driver presses SET/RES
+  in the drive; the takeover is at the stop after that press, once the press has settled."""
+
+  @pytest.fixture
+  def cc(self):
+    return car_controller(alpha_long=True, cruise_requested=False)
+
+  def test_no_banner_before_the_first_frame(self, cc):
+    # card publishes the state from ignition, seconds before the first controls frame
+    assert cc.stock_ecu_state == StockEcuState.PARK_TO_TAKE_OVER
+
+  def test_no_request_keeps_the_radar_stock(self, cc, cs):
+    # a whole parked drive with the camera settled and the main button pressed: nothing on the bus,
+    # and no "remain parked" banner state
+    for i in range(2000):
+      buttons = (ButtonType.mainCruise,) if i == 500 else ()
+      assert boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, buttons=buttons) == []
+      assert cc.stock_ecu_state == StockEcuState.PARK_TO_TAKE_OVER
+    assert cc.radar_session.state == RadarSessionState.STOCK
+
+  @pytest.mark.parametrize("button", [ButtonType.accelCruise, ButtonType.decelCruise, ButtonType.resumeCruise])
+  def test_press_at_a_stop_takes_over_after_the_settle(self, cc, cs, button):
+    boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, buttons=(button,), available=True)
+    assert cc.stock_ecu_state == StockEcuState.STARTING
+    for _ in range(CRUISE_REQUEST_SETTLE_FRAMES - 1):
+      assert boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True) == []
+    requested = False
+    for _ in range(RADAR_UDS_STEP + 2):
+      requested |= SESSION_PROG_DAT in uds(boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True))
+    assert requested
+
+  def test_press_while_moving_waits_for_the_stop(self, cc, cs):
+    boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, standstill=False, buttons=(ButtonType.accelCruise,), available=True)
+    assert cc.stock_ecu_state == StockEcuState.PARK_TO_TAKE_OVER
+    for _ in range(500):
+      assert boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, standstill=False) == []
+    assert cc.stock_ecu_state == StockEcuState.PARK_TO_TAKE_OVER
+    requested = False
+    for _ in range(RADAR_UDS_STEP + 2):
+      requested |= SESSION_PROG_DAT in uds(boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True))
+    assert requested
+
+  def test_press_with_main_off_is_not_a_request(self, cc, cs):
+    # SET with the main switch off arms nothing on the car: the radar stays stock
+    boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, buttons=(ButtonType.accelCruise,))
+    for _ in range(500):
+      assert boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, available=True) == []
+    assert cc.stock_ecu_state == StockEcuState.PARK_TO_TAKE_OVER
+
+  def test_press_that_engages_stock_cruise_holds_the_takeover(self, cc, cs):
+    # the press arms stock MRCC a few frames later, inside the settle: never a request under it
+    boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, buttons=(ButtonType.decelCruise,), available=True)
+    for _ in range(10):
+      assert boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True) == []
+    for _ in range(500):
+      assert boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, cruise_engaged=True) == []
+    assert cc.stock_ecu_state == StockEcuState.STOCK_CRUISE_ON

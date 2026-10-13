@@ -17,6 +17,7 @@ from opendbc.sunnypilot.car.stock_ecu import StockEcuState
 
 VisualAlert = structs.CarControl.HUDControl.VisualAlert
 LongCtrlState = structs.CarControl.Actuators.LongControlState
+ButtonType = structs.CarState.ButtonEvent.Type
 
 # Send synthetic radar frames to both consumers; panda does not forward locally generated frames.
 LONG_BUSES = (0, 2)
@@ -26,6 +27,11 @@ CANCEL_SETTLE_FRAMES = int(CarControllerParams.CANCEL_SETTLE_T / DT_CTRL)
 # The dash hands-on-wheel frame waits this long after lateral or cruise comes on: the driver is
 # on the button, and the EPS-standby banner (1.8 s) can outlive the block that raised it.
 DASH_STEER_WARNING_QUIET_FRAMES = int(2.0 / DT_CTRL)
+# The driver asking for cruise: until one of these is pressed with the main switch on in a drive,
+# the stock radar, and its AEB, stays in its default session.
+CRUISE_REQUEST_BUTTONS = (ButtonType.accelCruise, ButtonType.decelCruise, ButtonType.resumeCruise, ButtonType.setCruise)
+# The press may arm stock MRCC ~80 ms later: let that engagement show before the takeover gate opens.
+CRUISE_REQUEST_SETTLE_FRAMES = int(1.0 / DT_CTRL)
 
 
 class DashSteerWarning:
@@ -76,6 +82,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.long_counter = 0
     self.radar_counter = 0
     self.radar_session = RadarSessionManager()
+    self.cruise_requested = False  # latched for the drive on the first SET/RES press
+    # nothing asked for yet: no "remain parked" banner before the first controls frame either
+    self.radar_session.status = StockEcuState.PARK_TO_TAKE_OVER
+    self.cruise_request_frames = 0
     self.accel_shaper = AccelShaper()
     self.accel_last = 0.
     self.dash_steer_warning = DashSteerWarning()
@@ -212,14 +222,19 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     stock_radar_alive = CS.stock_radar_alive
     stock_engaged = stock_radar_alive and CS.cruise_enabled
     bus_healthy = CS.radar_bus_healthy
+    self.cruise_requested |= CS.cruise_available and any(be.pressed and be.type in CRUISE_REQUEST_BUTTONS
+                                                         for be in CS.out.buttonEvents)
+    self.cruise_request_frames = self.cruise_request_frames + 1 if self.cruise_requested else 0
+    gate_passed = CS.fsc_settled and self.cruise_request_frames > CRUISE_REQUEST_SETTLE_FRAMES
     # carstate's guard from the previous frame is the ownership the engagement path sees
-    session_state = self.radar_session.update(CS.fsc_settled, stock_radar_alive, CC_SP.stockEcuHandBack,
+    session_state = self.radar_session.update(gate_passed, stock_radar_alive, CC_SP.stockEcuHandBack,
                                               standstill=CS.out.standstill,
                                               session_refused=CS.radar_session_refused,
                                               stock_radar_gone=CS.stock_radar_gone,
                                               bus_healthy=bus_healthy and CS.out.canValid,
                                               frame=self.frame,
-                                              stock_engaged=stock_engaged, owned=CS.radar_owned)
+                                              stock_engaged=stock_engaged, owned=CS.radar_owned,
+                                              cruise_requested=self.cruise_requested)
     # Continue synthetic radar frames through hand-back to avoid a camera-visible gap.
     radar_master = self.radar_session.replacement_active
 

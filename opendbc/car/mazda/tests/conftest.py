@@ -15,7 +15,7 @@ import pytest
 
 from opendbc.can import CANPacker, CANParser
 from opendbc.car import Bus, gen_empty_fingerprint, structs
-from opendbc.car.mazda.carcontroller import CarController
+from opendbc.car.mazda.carcontroller import CRUISE_REQUEST_SETTLE_FRAMES, CarController
 from opendbc.car.mazda.carstate import CarState, CAM_LANEINFO_FRESH_FRAMES, FSC_SETTLE_FRAMES, STOCK_RADAR_ALIVE_FRAMES, STOCK_RADAR_GUARD_FRAMES
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams
@@ -96,17 +96,23 @@ def car_interface(alpha_long=True, candidate=CAR.MAZDA_CX5_2022, car_fw=None) ->
   return CarInterface(CP, CP_SP)
 
 
-def car_controller(alpha_long=True, candidate=CAR.MAZDA_CX5_2022) -> CarController:
+def car_controller(alpha_long=True, candidate=CAR.MAZDA_CX5_2022, cruise_requested=True) -> CarController:
+  """`cruise_requested`: a driver who has already pressed SET/RES this drive, past the settle,
+  so the radar takeover gate is the camera's alone."""
   CP = car_params(candidate, alpha_long=alpha_long)
   CP_SP = car_params_sp(CP, candidate, alpha_long=alpha_long)
   assert CP.openpilotLongitudinalControl == alpha_long
-  return CarController({Bus.pt: DBC_NAME}, CP, CP_SP)
+  cc = CarController({Bus.pt: DBC_NAME}, CP, CP_SP)
+  if cruise_requested:
+    cc.cruise_requested = True
+    cc.cruise_request_frames = CRUISE_REQUEST_SETTLE_FRAMES + 1
+  return cc
 
 
 # capnp messages
 
 def car_state(standstill=False, gas=False, brake_pressed=False, v_ego=0., driver_torque=0.,
-              steering_pressed=False, available=True, cruise_engaged=False, can_valid=True) -> structs.CarState:
+              steering_pressed=False, available=True, cruise_engaged=False, can_valid=True, buttons=()) -> structs.CarState:
   """structs.CarState with the fields the controller reads off CS.out."""
   ret = structs.CarState()
   ret.canValid = can_valid
@@ -119,6 +125,7 @@ def car_state(standstill=False, gas=False, brake_pressed=False, v_ego=0., driver
   ret.steeringPressed = steering_pressed
   ret.cruiseState.available = available
   ret.cruiseState.enabled = cruise_engaged
+  ret.buttonEvents = [structs.CarState.ButtonEvent(pressed=True, type=b) for b in buttons]
   return ret
 
 

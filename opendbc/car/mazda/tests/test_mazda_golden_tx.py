@@ -284,7 +284,7 @@ CAM_LANEINFO_PERIOD = 50
 IDLE_BUTTONS = {"CAN_OFF_INV": 1, "SET_P_INV": 1, "RES_INV": 1, "SET_M_INV": 1, "DISTANCE_LESS_INV": 1,
                 "DISTANCE_MORE_INV": 1, "MODE_X_INV": 1, "MODE_Y_INV": 1, "BIT1": 1, "BIT2": 1, "BIT3": 1}
 BUTTONS = {None: {}, "main": {"MODE_Y": 1, "MODE_Y_INV": 0}, "set": {"SET_M": 1, "SET_M_INV": 0},
-           "set_plus": {"SET_P": 1, "SET_P_INV": 0}, "tja": {"TJA_BUTTON": 1}, "mrcc": {"BIT1": 0, "BIT1_INV": 1}}
+           "set_plus": {"SET_P": 1, "SET_P_INV": 0}, "res": {"RES": 1, "RES_INV": 0}, "tja": {"TJA_BUTTON": 1}, "mrcc": {"BIT1": 0, "BIT1_INV": 1}}
 
 
 class SimCar:
@@ -466,8 +466,10 @@ def _takeover(laneinfo_frames):
   return [
     ("boot_camera_booting", laneinfo_frames, dict(PARKED, laneinfo=BOOT_LANEINFO), None),
     ("camera_settled", 720, dict(laneinfo=IDLE_LANEINFO), None),
-    ("radar_takeover", 200, {}, None),
+    # the radar, and its AEB, stays the car's until the driver asks for cruise with main on
     ("main_on", 60, {}, lambda i, _: {**_press("main", i), "armed": i >= 10}),
+    ("cruise_request", 60, {}, lambda i, _: _press("res", i)),
+    ("radar_takeover", 400, {}, None),
     ("set_engages", 60, {}, _set_engages(ENGAGED_LONG)),
   ]
 
@@ -578,7 +580,8 @@ def test_stack_reaches_every_state():
 
   # alpha long: the takeover, an engagement the panda allows, the unlatch pulse, the hand-back
   alpha = "alpha_long_cx5_2022"
-  assert sent(phase(alpha, "camera_settled"), 0x764)
+  assert not sent(phase(alpha, "camera_settled"), 0x764) and not sent(phase(alpha, "main_on"), 0x764)
+  assert sent(phase(alpha, "radar_takeover"), 0x764)
   assert cs(phase(alpha, "radar_takeover"), "stockEcu")[-1] == "ready"
   assert any(d[4] & 0x02 for d in sent(phase(alpha, "follow"), 0x21b))  # ACC_ACTIVE
   assert any(d[6] & 0x40 for d in sent(phase(alpha, "unlatch_release"), 0x21b))  # RESUME_UNLATCHING
