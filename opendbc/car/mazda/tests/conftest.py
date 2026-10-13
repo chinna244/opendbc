@@ -171,7 +171,7 @@ def set_car_state(cs: CarState, out=None, *, body_hold=False, stock_radar_alive=
                   cancel_button=0, accel_button=0, decel_button=0,
                   tja_button=0, mrcc_button=0,
                   mrcc_armed_raw=False, cruise_available=None, cruise_enabled=None,
-                  cam_laneinfo_raw=None, cam_laneinfo_live=False,
+                  cam_laneinfo_raw=None, cam_laneinfo_live=False, stock_set_allowed=True,
                   **out_kwargs) -> CarState:
   """Put the controller-facing state of a real CarState where a test wants it.
 
@@ -213,6 +213,7 @@ def set_car_state(cs: CarState, out=None, *, body_hold=False, stock_radar_alive=
   cs.tja_button = tja_button
   cs.mrcc_button = mrcc_button
   cs.mrcc_armed_raw = mrcc_armed_raw
+  cs.stock_set_allowed = stock_set_allowed
   cs.cam_laneinfo_raw = cam_laneinfo_raw
   cs.cam_laneinfo_stale_frames = 0 if cam_laneinfo_live else CAM_LANEINFO_FRESH_FRAMES
   return cs

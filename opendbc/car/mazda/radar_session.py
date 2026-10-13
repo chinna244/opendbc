@@ -59,6 +59,8 @@ class RadarSessionManager:
     # our replacement traffic is the radar, and the ordered hand-back is under way or done
     self.control_active = False
     self.handback_active = False
+    # the controller's: the hand-back in flight is the driver's main-off one, its failure no cruise fault
+    self.handback_by_driver = False
 
   def _transition(self, state: RadarSessionState, reason: str) -> None:
     if state != self.state:

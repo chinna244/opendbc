@@ -331,6 +331,16 @@ class TestTwoMasterGuard:
     ret, n = feed_guard(CI, 0.2, radar_alive=False, acc_active=True, start_frame=n)
     assert ret.cruiseState.enabled
 
+  def test_the_drivers_unanswered_hand_back_is_no_cruise_fault(self):
+    # main off handed the radar back and it never answered: the fault is the lifecycle's hand-back alone
+    CI = car_interface()
+    CI.CC.radar_session.handback_failed = True
+    ret, n = feed_guard(CI, 0.1, radar_alive=True)
+    assert ret.accFaulted
+    CI.CC.radar_session.handback_by_driver = True
+    ret, _ = feed_guard(CI, 0.1, radar_alive=True, start_frame=n)
+    assert not ret.accFaulted
+
 
 def speed_limit(*msgs):
   """carStateSP.speedLimit after two frames of the given messages."""
@@ -800,6 +810,19 @@ def test_intervention_bits_become_an_invalid_lkas_setting():
   assert not feed(CI, 12, on1_only)[0].invalidLkasSetting
   on2_only = pk.make_can_msg("CAM_SETTINGS", 2, {"LKAS_INERVENTION_ON1": 0, "ILKAS_NTERVENTION_ON2": 1})
   assert not feed(CI, 13, on2_only)[0].invalidLkasSetting
+
+
+def test_sbs_setting_follows_the_camera():
+  CI, pk = car_interface(alpha_long=True), packer()
+  feed(CI, 0)
+  assert not CI.CS.aeb_setting_off  # no setting frame yet: reads on
+  feed(CI, 1, pk.make_can_msg("CAM_SETTINGS", 2, {"SBS_SCBC": 1}))
+  assert CI.CS.aeb_setting_off
+  for i in range(2, 12):  # holds between the frame's arrivals
+    feed(CI, i)
+    assert CI.CS.aeb_setting_off
+  feed(CI, 12, pk.make_can_msg("CAM_SETTINGS", 2, {"SBS_SCBC": 2}))
+  assert not CI.CS.aeb_setting_off
 
 
 class TestLkasRearm:
