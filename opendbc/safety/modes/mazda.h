@@ -371,6 +371,17 @@ static bool mazda_fwd_hook(int bus_num, int addr) {
   return block_msg;
 }
 
+// Mutate only the bus0->bus2 forward copy of CRZ_BTNS. Panda RX and the OEM body/MRCC
+// keep the original bus0 frame, including physical TJA. Requires the declared TJA button and
+// the MADS feature (system_enabled), not heartbeat_engaged_mads, so the first button edge
+// cannot leak to the FSC during a USB-heartbeat transition.
+static void mazda_fwd_modify(int bus_num, CANPacket_t *msg) {
+  if (mazda_tja_button && m_mads_state.system_enabled && (bus_num == MAZDA_MAIN) &&
+      (msg->addr == MAZDA_CRZ_BTNS) && (GET_LEN(msg) >= 2U)) {
+    msg->data[MAZDA_TJA_BUTTON_BIT / 8U] &= (uint8_t)~(1U << (MAZDA_TJA_BUTTON_BIT % 8U));
+  }
+}
+
 static safety_config mazda_init(uint16_t param) {
   mazda_engage_btn_frames = 0U;
   mazda_main_off_samples = 0U;
@@ -440,4 +451,5 @@ const safety_hooks mazda_hooks = {
   .rx = mazda_rx_hook,
   .tx = mazda_tx_hook,
   .fwd = mazda_fwd_hook,
+  .fwd_modify = mazda_fwd_modify,
 };
