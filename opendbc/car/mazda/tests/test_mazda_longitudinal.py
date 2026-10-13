@@ -8,6 +8,7 @@ The accel command on the wire, driven through the real CarController.update_long
 frame rates, the slew limits, the standstill hold and its relax, the release grammar and the
 RESUME_UNLATCHING pulse, the breakaway ramp, the gas override and the disengaged patterns.
 """
+import numpy as np
 import pytest
 
 from opendbc.car import DT_CTRL
@@ -184,8 +185,8 @@ def test_throttle_lift_follows_stock_but_braking_does_not_wait(cc, cs):
   """Stock lifts the throttle at no more than 2.0 m/s3 (99.98% of falling positive frames). A plan
   easing off toward zero follows that; a plan asking for brake drops at the winddown limit."""
   for _ in range(seconds(3.0)):
-    step_long(cc, cs, accel=1.0, cruise_engaged=True, v_ego=10.)
-  assert cc.accel_last == pytest.approx(1.0, abs=1e-6)
+    step_long(cc, cs, accel=0.9, cruise_engaged=True, v_ego=10.)
+  assert cc.accel_last == pytest.approx(0.9, abs=1e-6)
   prev = cc.accel_last
   for _ in range(5):
     step_long(cc, cs, accel=0., cruise_engaged=True, v_ego=10.)
@@ -198,7 +199,10 @@ def test_throttle_lift_follows_stock_but_braking_does_not_wait(cc, cs):
 def test_ceiling_follows_stock_by_speed(cc, cs):
   """The wire never asks for more than stock's own accelerating command at that speed."""
   assert max(CarControllerParams.ACCEL_CEILING_V) <= CarControllerParams.ACCEL_MAX
-  for v_ego, ceiling in ((4., 1.75), (14., 1.05), (25., 0.65), (35., 0.65)):
+  bp, v = CarControllerParams.ACCEL_CEILING_BP, CarControllerParams.ACCEL_CEILING_V
+  stock_bp, stock_p99 = (0., 4., 9., 14., 18., 25.), (1.5, 1.75, 1.45, 1.05, 0.85, 0.65)
+  assert all(np.interp(x, bp, v) <= np.interp(x, stock_bp, stock_p99) + 1e-9 for x in sorted({*bp, *stock_bp}))
+  for v_ego, ceiling in ((4., 1.7), (9., 1.1), (13.5, 0.85), (35., 0.65)):
     cc.accel_last = 2.0
     for _ in range(seconds(1.0)):  # settles through the lift limit
       step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego)
@@ -404,9 +408,28 @@ def test_never_latched_release_speaks_the_stock_wire_grammar(cc, cs):
   assert all(cmd >= -280 for cmd, _, _ in post), f"command stayed at hold depth after the drop: {min(c for c, _, _ in post)}"
   assert post[0][0] <= -180, f"release did not start inside the stock band: {post[0][0]}"
   assert not any(unl for _, _, unl in rows), "a never-latched release pulsed"
-  # Match stock's 25-count-per-wire-frame release ramp.
+  # Match stock's 25-count-per-wire-frame release ramp through the nine-frame pulse window, then
+  # the quicker still-stopped build (50 counts).
   ramping = [c for c, _, _ in post][:20]
-  assert all(20 <= b - a <= 30 for a, b in zip(ramping, ramping[1:], strict=False)), f"off the stock ramp: {ramping}"
+  steps = [b - a for a, b in zip(ramping, ramping[1:], strict=False)]
+  assert all(20 <= d <= 30 for d in steps[:8]), f"off the stock ramp: {ramping}"
+  assert all(20 <= d <= 55 for d in steps[8:10]) and all(45 <= d <= 55 for d in steps[10:]), f"off the still-stopped ramp: {ramping}"
+
+
+def test_still_stopped_release_builds_faster_only_until_the_car_rolls(cc, cs):
+  """Past the pulse window the release builds at ACCEL_RELEASE_RAMP_STOPPED while the car still
+  stands, and returns to stock's ramp once it rolls (the wire lags the ramp by one frame)."""
+  for _ in range(seconds(2.0)):
+    step_long(cc, cs, long_state=STOPPING, accel=-1.024, standstill=True, **LEAD_4M)
+  for _ in range(RELEASE_DEBOUNCE_FRAMES + RESUME_UNLATCH_LATCHED_FRAMES + 2):
+    step_long(cc, cs, accel=1.0, standstill=True, **LEAD_4M)
+  prev = cc.accel_last
+  step_long(cc, cs, accel=1.0, standstill=True, **LEAD_4M)
+  assert cc.accel_last - prev == pytest.approx(CarControllerParams.ACCEL_RELEASE_RAMP_STOPPED * DT_CTRL, abs=1e-6)
+  step_long(cc, cs, accel=1.0, standstill=False, **LEAD_4M)
+  prev = cc.accel_last
+  step_long(cc, cs, accel=1.0, standstill=False, **LEAD_4M)
+  assert cc.accel_last - prev == pytest.approx(CarControllerParams.ACCEL_RELEASE_RAMP * DT_CTRL, abs=1e-6)
 
 
 @pytest.mark.parametrize("drop_wire_frames", [1, 2, 3])
