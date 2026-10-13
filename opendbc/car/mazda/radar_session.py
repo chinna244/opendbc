@@ -89,7 +89,7 @@ class RadarSessionManager:
   def update(self, gate_passed: bool, stock_radar_alive: bool, handback: bool,
              standstill: bool, session_refused: bool, stock_radar_gone: bool, *,
              bus_healthy: bool = True, session_response: int = 0, frame: int = 0,
-             stock_engaged: bool = False, owned: bool = False) -> RadarSessionState:
+             stock_engaged: bool = False, owned: bool = False, cruise_requested: bool = True) -> RadarSessionState:
     # the controller's frame is the one clock for every cadence, the UDS schedule included
     self.frame = frame
     self.diagnostic_message = None
@@ -166,7 +166,7 @@ class RadarSessionManager:
         self.diagnostic_message = make_tester_present_msg(RADAR_ADDR, RADAR_BUS, suppress_response=True)
 
     self._update_replacement(stock_radar_alive, bus_healthy, stock_radar_gone)
-    self._update_status(gate_passed, stock_engaged, standstill, owned)
+    self._update_status(gate_passed, stock_engaged, standstill, owned, cruise_requested)
     return self.state
 
   def _update_replacement(self, stock_radar_alive: bool, bus_healthy: bool, stock_radar_gone: bool) -> None:
@@ -178,8 +178,11 @@ class RadarSessionManager:
          (self.state == RadarSessionState.HANDBACK and bus_healthy and (self.programming_sent or stock_radar_gone)):
       self.replacement_active = True
 
-  def _update_status(self, gate_passed: bool, stock_engaged: bool, standstill: bool, owned: bool) -> None:
-    """The driver's view. `owned` is carstate's silence guard on the owned radar."""
+  def _update_status(self, gate_passed: bool, stock_engaged: bool, standstill: bool, owned: bool,
+                     cruise_requested: bool) -> None:
+    """The driver's view. `owned` is carstate's silence guard on the owned radar. Until the
+    driver asks for cruise (`cruise_requested`) the takeover waits for the stop after that press:
+    no "remain parked" banner at every stop of a drive without cruise."""
     if self.state == RadarSessionState.HANDBACK:
       self.status = StockEcuState.FAILED if self.handback_failed else StockEcuState.RESTORING
     elif self.state == RadarSessionState.SILENCED:
@@ -188,8 +191,9 @@ class RadarSessionManager:
       self.status = StockEcuState.RESTORED
     elif self.silencing_failed:
       self.status = StockEcuState.FAILED
-    elif self.state == RadarSessionState.STOCK and gate_passed:
+    elif self.state == RadarSessionState.STOCK and (gate_passed or not cruise_requested or not standstill):
       self.status = StockEcuState.STOCK_CRUISE_ON if stock_engaged else \
-                    StockEcuState.PARK_TO_TAKE_OVER if not standstill and not self.moving_open else StockEcuState.STARTING
+                    StockEcuState.PARK_TO_TAKE_OVER if not cruise_requested or (not standstill and not self.moving_open) else \
+                    StockEcuState.STARTING
     else:
       self.status = StockEcuState.STARTING
