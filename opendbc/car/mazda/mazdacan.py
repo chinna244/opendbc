@@ -55,7 +55,7 @@ def create_acc_command(packer, bus, counter, accel, *, long_active, acc_availabl
 
 
 def create_crz_ctrl(packer, bus, long_active, acc_available, gap_setting, radar_has_lead, stop_go_phase, acc_active_2,
-                    *, hbc_request=False):
+                    *, hbc_request=False, lkas_white=False):
   # CRZ_CTRL replaces radar cruise state and mirrors stop phase and driver gap selection.
   # NEW_SIGNAL_3 (bit 13) relays the camera's high-beam request (0x440 BIT2) as the stock radar
   # does; the body raises the lamps and the cluster's green HBC light on it.
@@ -71,7 +71,10 @@ def create_crz_ctrl(packer, bus, long_active, acc_available, gap_setting, radar_
     "ACC_ACTIVE_2": int(acc_active_2),
     "NEW_SIGNAL_3": int(hbc_request),
   }
-  return packer.make_can_msg("CRZ_CTRL", bus, values)
+  addr, dat, bus = packer.make_can_msg("CRZ_CTRL", bus, values)
+  if lkas_white:
+    dat = dat[:4] + bytes([dat[4] | 0x20]) + dat[5:]
+  return addr, dat, bus
 
 
 def create_lead_track(d_rel: float, v_rel: float) -> bytes:
