@@ -591,6 +591,57 @@ class TestMazdaTjaMads(MazdaTjaButtonBase):
     self.assertTrue(self.safety.get_acc_main_on())
 
 
+class TestMazdaTjaHiddenFromCamera(TestMazdaTjaMads):
+  """The camera (FSC) reads the TJA button from the forwarded CRZ_BTNS and arms its own TJA on it
+  whenever MRCC main is on, alongside MADS. Declared, the bus 0 -> bus 2 copy loses bit 11; the
+  car's side and the panda's own RX keep the press."""
+
+  def _fwd_copy(self, src_bus, msg):
+    orig = bytes(msg[0].data[0:8])
+    clone = libsafety_py.make_CANPacket(int(msg[0].addr), int(msg[0].bus), orig)
+    self.safety.safety_fwd_modify(src_bus, clone)
+    return orig, bytes(clone[0].data[0:8])
+
+  def test_declared_button_is_cleared_and_nothing_else(self):
+    self._init(tja_button=True)
+    for over in ({}, {"SET_P": 1}, {"RES": 1}, {"CAN_OFF": 1}, {"CTR": 9}):
+      orig, fwd = self._fwd_copy(0, self.packer.make_can_msg_safety("CRZ_BTNS", 0, {"TJA_BUTTON": 1, **over}))
+      self.assertTrue(orig[1] & 0x08)
+      expected = bytearray(orig)
+      expected[1] &= 0xf7
+      self.assertEqual(bytes(expected), fwd, f"{over=}")
+
+  def test_a_frame_without_the_press_is_untouched(self):
+    self._init(tja_button=True)
+    orig, fwd = self._fwd_copy(0, self._btns(False))
+    self.assertEqual(orig, fwd)
+
+  def test_the_panda_still_sees_the_press(self):
+    self._init(tja_button=True)
+    self.safety.safety_rx_hook(self._btns(False))
+    self.safety.safety_rx_hook(self._btns(True))
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+  def test_undeclared_or_mads_off_passes_the_press_through(self):
+    self._init(tja_button=False)
+    orig, fwd = self._fwd_copy(0, self._btns(True))
+    self.assertEqual(orig, fwd)
+    self._init(tja_button=True)
+    self.safety.set_mads_params(False, False, False)
+    orig, fwd = self._fwd_copy(0, self._btns(True))
+    self.assertEqual(orig, fwd)
+
+  def test_other_buses_and_addresses_are_untouched(self):
+    self._init(tja_button=True)
+    orig, fwd = self._fwd_copy(2, self._btns(True))
+    self.assertEqual(orig, fwd)
+    dat = bytes([0xff] * 8)
+    for addr in (0x9c, 0x9e, 0x165, 0x21c, 0x440):
+      clone = libsafety_py.make_CANPacket(addr, 0, dat)
+      self.safety.safety_fwd_modify(0, clone)
+      self.assertEqual(dat, bytes(clone[0].data[0:8]), f"{addr=:#x}")
+
+
 class TestMazdaIgnition(unittest.TestCase):
   TX_MSGS: list = []
 
