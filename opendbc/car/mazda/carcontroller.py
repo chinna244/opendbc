@@ -36,11 +36,48 @@ CANCEL_SETTLE_FRAMES = int(CarControllerParams.CANCEL_SETTLE_T / DT_CTRL)
 # The dash hands-on-wheel frame waits this long after lateral or cruise comes on: the driver is
 # on the button, and the EPS-standby banner (1.8 s) can outlive the block that raised it.
 DASH_STEER_WARNING_QUIET_FRAMES = int(2.0 / DT_CTRL)
-# The driver asking for cruise: until one of these is pressed with the main switch on in a drive,
-# the stock radar, and its AEB, stays in its default session.
-CRUISE_REQUEST_BUTTONS = (ButtonType.accelCruise, ButtonType.decelCruise, ButtonType.resumeCruise, ButtonType.setCruise)
+# The driver asking for alpha long: until RES is pressed with the main switch on, before the car's
+# own cruise has run since main came on, the stock radar, and its AEB, stays in its default
+# session. SET+/SET- start the car's cruise; once it has run, RES is its resume (it remembers a speed).
+ALPHA_LONG_REQUEST_BUTTONS = (ButtonType.resumeCruise,)
 # The press may arm stock MRCC ~80 ms later: let that engagement show before the takeover gate opens.
 CRUISE_REQUEST_SETTLE_FRAMES = int(1.0 / DT_CTRL)
+# The main switch turned off after a takeover hands the radar, and its AEB, back. The takeover
+# holds at least this long first, so a quick off/on never alternates radar sessions.
+RADAR_HANDBACK_HOLD_FRAMES = int(5.0 / DT_CTRL)
+# Back from a hand-back the radar withholds SET for ~12 s (route 0000012b, twice 11.9 s). Bounded,
+# since the same bit also drops for other reasons (a cancel, the brake).
+RADAR_WARMUP_MAX_FRAMES = int(20.0 / DT_CTRL)
+# Back from a hand-back, the radar's cruise needs ~12 s (11.9 s twice, route 0000012b). Whether its
+# AEB is back sooner is unknown, and no other module reports it (routes 0000012b/c: no bit outside
+# the radar's own frames follows its mode), so AEB counts as off for that long. Off when it may be
+# on is the safe error; the reverse is not.
+RADAR_RESTART_FRAMES = int(12.0 / DT_CTRL)
+# A takeover starts only at a real stop: one shorter than this (creeping traffic) would be cut short
+# by the next roll, turning AEB off and back on for nothing. Standing still since start counts.
+TAKEOVER_STOP_FRAMES = int(2.0 / DT_CTRL)
+
+
+def stock_ecu_driver_view(status: StockEcuState, session: RadarSessionState, *, stock_cruise_engaged: bool,
+                          main_on: bool, radar_warming: bool, stock_radar_live: bool) -> StockEcuState:
+  """What the driver is told about the radar, from the session manager's own status. First match wins:
+
+    radar the car's, its own cruise engaged, and no
+      hand-back standing (RESTORED is the lifecycle's
+      answer; main is off for the driver's)          -> STOCK_CRUISE_ON  chimes on its edges, SET silent
+    manager would say park-to-take-over, and
+      main on, radar still refusing SET (warm-up)    -> RESTORING        "Wait ~12 s", refuse sound
+      stock radar heard                              -> NOT_NEEDED       SET silent: it works on the car
+    anything else                                    -> the manager's status unchanged
+  """
+  if session == RadarSessionState.STOCK and stock_cruise_engaged and status != StockEcuState.RESTORED:
+    return StockEcuState.STOCK_CRUISE_ON
+  if status == StockEcuState.PARK_TO_TAKE_OVER:
+    if main_on and radar_warming:
+      return StockEcuState.RESTORING
+    if stock_radar_live:
+      return StockEcuState.NOT_NEEDED
+  return status
 
 
 class DashSteerWarning:
@@ -98,7 +135,20 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     self.cruise_requested = False  # latched for the drive on the first SET/RES press
     # nothing asked for yet: no "remain parked" banner before the first controls frame either
     self.radar_session.status = StockEcuState.PARK_TO_TAKE_OVER
+    self.cruise_off_handback = False  # the driver's hand-back: main off after a takeover
+    self.radar_silenced_frames = 0
+    self.radar_session_prev = RadarSessionState.STOCK
+    self.handback_by_driver = False  # the hand-back in flight is the driver's main-off one
+    self.main_on = True  # until the first frame says otherwise
+    self.main_seen_on = False  # main has been on this drive: only then can a request exist to withdraw
+    self.car_cruise_used = False  # the car's own cruise has run since main came on: RES is its resume
+    self.radar_off_prev = False  # the radar left its default session last frame (programming sent or held)
+    self.radar_warmup_frames = 0  # the stock radar, back from a hand-back, does not allow SET yet
+    self.stock_radar_live = True  # until the first frame says otherwise
+    self.stock_cruise_engaged = False
+    self.radar_restart_frames = 0  # back from a hand-back, its AEB not yet counted as on
     self.cruise_request_frames = 0
+    self.standstill_frames = TAKEOVER_STOP_FRAMES  # standing still since start is a real stop
     self.accel_last = 0.
     self.release_ramp = None
     self.breakaway_frames = 0
@@ -209,7 +259,64 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     """The stock ECU transition contract (opendbc/sunnypilot/car/stock_ecu.py): card reads this
     one name and nothing brand-specific. NOT_NEEDED under stock longitudinal, as on any brand
     that silences nothing."""
-    return self.radar_session.status if self.CP.openpilotLongitudinalControl else StockEcuState.NOT_NEEDED
+    if not self.CP.openpilotLongitudinalControl:
+      return StockEcuState.NOT_NEEDED
+    return stock_ecu_driver_view(self.radar_session.status, self.radar_session.state,
+                                 stock_cruise_engaged=self.stock_cruise_engaged, main_on=self.main_on,
+                                 radar_warming=self.radar_warmup_frames > 0, stock_radar_live=self.stock_radar_live)
+
+  @property
+  def alpha_long_requested(self) -> bool:
+    """The driver asked for alpha long (RES), main is on, and the radar is not held yet: card
+    publishes it for the "alpha long at the next stop" line. It stays up through a takeover that
+    a roll cuts short, so one request is announced once."""
+    return self.CP.openpilotLongitudinalControl and self.cruise_requested and self.main_on and \
+           self.radar_session.state != RadarSessionState.SILENCED and not self.radar_session.silencing_failed
+
+  @property
+  def stock_ecu_off(self) -> bool:
+    """The radar's own functions, AEB with them, off or not yet counted as back: programming
+    requested, silenced, mid hand-back, or within RADAR_RESTART_FRAMES of one. card publishes it
+    for the UI's AEB-off marker and the "AEB on" line."""
+    if not self.CP.openpilotLongitudinalControl:
+      return False
+    return self.radar_off_prev or self.radar_restart_frames > 0
+
+  def _track_radar_session(self, session_state: RadarSessionState, CS, CC_SP) -> None:
+    """Per-frame bookkeeping after the session manager ran: what carstate is told, and the timers
+    that follow a hand-back (SET warm-up, AEB restart) and a takeover (the hand-back hold)."""
+    entered_handback = session_state == RadarSessionState.HANDBACK and self.radar_session_prev != RadarSessionState.HANDBACK
+    restored = self.radar_session_prev == RadarSessionState.HANDBACK and session_state == RadarSessionState.STOCK
+    rs = self.radar_session
+    radar_off = session_state in (RadarSessionState.SILENCED, RadarSessionState.HANDBACK) or \
+                (session_state == RadarSessionState.SILENCING and rs.programming_sent)
+    if entered_handback:
+      self.handback_by_driver = self.cruise_off_handback and not CC_SP.stockEcuHandBack
+    # A driver's hand-back the radar never answered is no cruise fault: main is off, engagement
+    # stays blocked without the owned radar, and the fault would take MADS lateral with it.
+    CS.radar_restore_failed = self.radar_session.handback_failed and not self.handback_by_driver
+    # A completed hand-back is still in force only for the lifecycle's standing request; the
+    # driver's leaves a stock radar, and the main-off HUD, as on a car never taken over.
+    CS.radar_handback_active = session_state == RadarSessionState.HANDBACK or \
+                               (self.radar_session.handback_completed and CC_SP.stockEcuHandBack)
+    if restored:
+      CS.radar_was_silenced = False  # stock traffic restored: the radar is the car's again
+      self.radar_warmup_frames = RADAR_WARMUP_MAX_FRAMES
+    else:
+      if CS.stock_set_allowed or CC_SP.stockEcuHandBack or session_state != RadarSessionState.STOCK:
+        self.radar_warmup_frames = 0
+      else:
+        self.radar_warmup_frames = max(self.radar_warmup_frames - 1, 0)
+    # Any return to the default session restarts AEB: the driver's or lifecycle's hand-back, or the
+    # radar's own recovery, even one re-taken on the same frame. Counted only in STOCK and held
+    # otherwise, so a re-take not yet programmed leaves it as it was: no "AEB on" while restarting.
+    if self.radar_off_prev and not radar_off:
+      self.radar_restart_frames = RADAR_RESTART_FRAMES
+    elif session_state == RadarSessionState.STOCK:
+      self.radar_restart_frames = max(self.radar_restart_frames - 1, 0)
+    self.radar_off_prev = radar_off
+    self.radar_session_prev = session_state
+    self.radar_silenced_frames = self.radar_silenced_frames + 1 if session_state == RadarSessionState.SILENCED else 0
 
   def update_mrcc_cleanup(self, CC, CC_SP, CS):
     # Undo the MRCC arm a physical TJA press causes: the wheel's press reaches every bus-0
@@ -374,24 +481,56 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
     stock_radar_alive = CS.stock_radar_alive
     stock_engaged = stock_radar_alive and CS.cruise_enabled
     bus_healthy = CS.radar_bus_healthy
-    self.cruise_requested |= CS.cruise_available and any(be.pressed and be.type in CRUISE_REQUEST_BUTTONS
-                                                         for be in CS.out.buttonEvents)
+    # Main on withdraws the hand-back; the next takeover waits for a new SET/RES press and a stop.
+    self.main_on = CS.cruise_available
+    self.stock_radar_live = stock_radar_alive
+    self.stock_cruise_engaged = stock_engaged
+    # The car's own cruise running is the driver choosing it: a pending request goes, and until
+    # main goes off RES belongs to it (the car remembers its speed), not to alpha long.
+    self.car_cruise_used = CS.cruise_available and (self.car_cruise_used or stock_engaged)
+    if (self.car_cruise_used or stock_engaged) and self.radar_session.state != RadarSessionState.SILENCED:
+      self.cruise_requested = False  # also mid-takeover: the car's cruise at a stop aborts it
+      self.cruise_request_frames = 0
+    if CS.cruise_available:
+      self.cruise_off_handback = False
+      self.main_seen_on = True
+    elif self.main_seen_on and self.radar_session.state != RadarSessionState.SILENCED:
+      # main off with the radar not yet held: the request goes with it. A takeover in progress is
+      # abandoned (the manager's own abort, a hand-back if programming was sent) and none follows
+      # at the next stop. A held radar is the 5 s hold's, below.
+      self.cruise_requested = False
+      self.cruise_request_frames = 0
+    elif self.radar_silenced_frames > RADAR_HANDBACK_HOLD_FRAMES and not self.cruise_off_handback:
+      self.cruise_off_handback = True
+      self.cruise_requested = False
+      self.cruise_request_frames = 0
+    # A press while the radar is being handed back or restarting is the driver reaching for stock
+    # cruise (route 0000012c, three times), not a request for the radar again.
+    radar_returning = self.radar_session.state == RadarSessionState.HANDBACK or \
+                      (self.radar_warmup_frames > 0 and not CS.stock_set_allowed)
+    self.cruise_requested |= CS.cruise_available and not radar_returning and not self.car_cruise_used and \
+                             not self.radar_session.silencing_failed and \
+                             any(be.pressed and be.type in ALPHA_LONG_REQUEST_BUTTONS for be in CS.out.buttonEvents)
     self.cruise_request_frames = self.cruise_request_frames + 1 if self.cruise_requested else 0
     gate_passed = CS.fsc_settled and self.cruise_request_frames > CRUISE_REQUEST_SETTLE_FRAMES
+    self.standstill_frames = self.standstill_frames + 1 if CS.out.standstill else 0
     # carstate's guard from the previous frame is the ownership the engagement path sees
-    session_state = self.radar_session.update(gate_passed, stock_radar_alive, CC_SP.stockEcuHandBack,
-                                              standstill=CS.out.standstill,
+    session_state = self.radar_session.update(gate_passed, stock_radar_alive, CC_SP.stockEcuHandBack or self.cruise_off_handback,
+                                              standstill=self.standstill_frames >= TAKEOVER_STOP_FRAMES,
                                               session_refused=CS.radar_session_refused,
                                               stock_radar_gone=CS.stock_radar_gone,
                                               bus_healthy=bus_healthy and CS.out.canValid,
                                               session_response=CS.radar_session_response, frame=self.frame,
                                               stock_engaged=stock_engaged, owned=CS.radar_owned,
                                               cruise_requested=self.cruise_requested)
+    if self.radar_session.silencing_failed:
+      # the radar refused or never answered: no takeover is retried this drive, so nothing pends
+      self.cruise_requested = False
+      self.cruise_request_frames = 0
     # Continue synthetic radar frames through hand-back to avoid a camera-visible gap.
     radar_master = self.radar_session.replacement_active
     CS.radar_control_active = radar_master and session_state == RadarSessionState.SILENCED
-    CS.radar_restore_failed = self.radar_session.handback_failed
-    CS.radar_handback_active = session_state == RadarSessionState.HANDBACK or self.radar_session.handback_completed
+    self._track_radar_session(session_state, CS, CC_SP)
 
     if self.radar_session.diagnostic_message is not None:
       can_sends.append(self.radar_session.diagnostic_message)

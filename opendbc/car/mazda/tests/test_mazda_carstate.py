@@ -814,6 +814,19 @@ def test_intervention_bits_become_an_invalid_lkas_setting():
   assert not feed(CI, 13, on2_only)[0].invalidLkasSetting
 
 
+def test_sbs_setting_follows_the_camera():
+  CI, pk = car_interface(alpha_long=True), packer()
+  feed(CI, 0)
+  assert not CI.CS.aeb_setting_off  # no setting frame yet: reads on
+  feed(CI, 1, pk.make_can_msg("CAM_SETTINGS", 2, {"SBS_SCBC": 1}))
+  assert CI.CS.aeb_setting_off
+  for i in range(2, 12):  # holds between the frame's arrivals
+    feed(CI, i)
+    assert CI.CS.aeb_setting_off
+  feed(CI, 12, pk.make_can_msg("CAM_SETTINGS", 2, {"SBS_SCBC": 2}))
+  assert not CI.CS.aeb_setting_off
+
+
 class TestLkasRearm:
   """lkas_arming spans the EPS's re-arm after the car's lane keep comes back on (LKAS_REARM_T)."""
 
