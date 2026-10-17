@@ -236,7 +236,7 @@ def test_ceiling_follows_stock_by_speed(cc, cs):
   bp, v = CarControllerParams.ACCEL_CEILING_BP, CarControllerParams.ACCEL_CEILING_V
   stock_bp, stock_p99 = (0., 4., 9., 14., 18., 25.), (1.5, 1.75, 1.45, 1.05, 0.85, 0.65)
   assert all(np.interp(x, bp, v) <= np.interp(x, stock_bp, stock_p99) + 1e-9 for x in sorted({*bp, *stock_bp}))
-  for v_ego, ceiling in ((4., 1.7), (9., 1.1), (13.5, 0.85), (35., 0.65)):
+  for v_ego, ceiling in ((4., 1.7), (9., 1.1), (13.5, 0.85), (18., 0.55), (35., 0.55)):
     cc.accel_last = 2.0
     for _ in range(seconds(1.0)):  # settles through the lift limit
       step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego)

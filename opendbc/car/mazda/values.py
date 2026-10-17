@@ -73,9 +73,11 @@ class CarControllerParams:
   # The ceiling is held under stock's p99 ([1.5, 1.75, 1.45, 1.05, 0.85, 0.65] at [0, 4, 9, 14, 18, 25]
   # m/s) above 5 m/s: the shape of this car's pull-aways with no lead (routes 0000013a, 0000013b),
   # which ease off from 12 mph. Behind a lead the plan rode stock's p99 to 30 mph, which felt harsh.
-  # From 25 mph up it stays near stock so reaching a 45 to 55 mph set speed is not slow.
+  # From 40 mph up it is held at 0.55: in routes 00000160 and 00000163 every engaged downshift of two gears
+  # (5th to 4th, 4th to 3rd) came at a command of 0.61 or more and every one-gear downshift at 0.54 or less,
+  # and holding 0.55 gives up about 6 mph over 19 engaged minutes.
   ACCEL_CEILING_BP = [0., 4., 5.5, 7., 9., 11., 13.5, 18., 25.]  # m/s
-  ACCEL_CEILING_V = [1.5, 1.7, 1.65, 1.3, 1.1, 0.9, 0.85, 0.8, 0.65]  # m/s2
+  ACCEL_CEILING_V = [1.5, 1.7, 1.65, 1.3, 1.1, 0.9, 0.85, 0.55, 0.55]  # m/s2
   ACCEL_BUILD_BP = [3., 6.]   # m/s
   ACCEL_BUILD_V = [1.25, 0.8]  # m/s3
   # Stock's throttle lift rate, while the plan is still >= 0; a brake request skips it.
