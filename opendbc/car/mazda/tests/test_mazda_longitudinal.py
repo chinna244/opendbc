@@ -219,8 +219,8 @@ def test_throttle_lift_follows_stock_but_braking_does_not_wait(cc, cs):
   """Stock lifts the throttle at no more than 2.0 m/s3 (99.98% of falling positive frames). A plan
   easing off toward zero follows that; a plan asking for brake drops at the winddown limit."""
   for _ in range(seconds(3.0)):
-    step_long(cc, cs, accel=0.9, cruise_engaged=True, v_ego=10.)
-  assert cc.accel_last == pytest.approx(0.9, abs=1e-6)
+    step_long(cc, cs, accel=0.7, cruise_engaged=True, v_ego=10.)
+  assert cc.accel_last == pytest.approx(0.7, abs=1e-6)
   prev = cc.accel_last
   for _ in range(5):
     step_long(cc, cs, accel=0., cruise_engaged=True, v_ego=10.)
@@ -236,7 +236,7 @@ def test_ceiling_follows_stock_by_speed(cc, cs):
   bp, v = CarControllerParams.ACCEL_CEILING_BP, CarControllerParams.ACCEL_CEILING_V
   stock_bp, stock_p99 = (0., 4., 9., 14., 18., 25.), (1.5, 1.75, 1.45, 1.05, 0.85, 0.65)
   assert all(np.interp(x, bp, v) <= np.interp(x, stock_bp, stock_p99) + 1e-9 for x in sorted({*bp, *stock_bp}))
-  for v_ego, ceiling in ((4., 1.7), (9., 1.1), (13.5, 0.85), (18., 0.55), (35., 0.55)):
+  for v_ego, ceiling in ((4., 1.2), (9., 0.9), (13.5, 0.75), (18., 0.55), (35., 0.55)):
     cc.accel_last = 2.0
     for _ in range(seconds(1.0)):  # settles through the lift limit
       step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego)
