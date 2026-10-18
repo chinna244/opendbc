@@ -540,3 +540,18 @@ def test_disengaged_emits_stock_patterns(cc, cs, available, brake_pressed, prefi
   cc.frame = 0
   sends = step_long(cc, cs, long_active=False, long_state=OFF, available=available, brake_pressed=brake_pressed)
   assert frame(sends, CRZ_INFO).hex().startswith(prefix)
+
+
+@pytest.mark.parametrize("mads,engaged", [(True, True), (False, True), (True, False), (False, False)])
+def test_cruise_frame_wheel_follows_mads_with_cruise_on_or_off(cc, cs, mads, engaged):
+  """Under alpha long the dash's white wheel rides CRZ_CTRL byte 4 bit 0x20 whenever openpilot steers (MADS):
+  with cruise off through the camera frame's white state, with cruise engaged on its own. Never on bus 2."""
+  sends = []
+  for _ in range(seconds(1.0)):
+    sends += step_long(cc, cs, accel=0.3, cruise_engaged=engaged, mads_active=mads, v_ego=20.)
+  on_car = [d for a, d, b in sends if a == CRZ_CTRL and b == 0][-1:]
+  on_radar = [d for a, d, b in sends if a == CRZ_CTRL and b == 2][-1:]
+  on_car, on_radar = (on_car or [None])[0], (on_radar or [None])[0]
+  assert on_car is not None and on_radar is not None
+  assert bool(on_car[4] & 0x20) == mads
+  assert not on_radar[4] & 0x20
