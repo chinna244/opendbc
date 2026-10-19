@@ -162,7 +162,7 @@ def car_control_sp(handback=False, lead_d_rel=12.0, lead_v_rel=0.0, send_button=
 
 # CarState seeded without a bus
 
-def set_car_state(cs: CarState, out=None, *, body_hold=False, gear_box=4, stock_radar_alive=False, stock_radar_gone=None,
+def set_car_state(cs: CarState, out=None, *, body_hold=False, gear_box=0, stock_radar_alive=False, stock_radar_gone=None,
                   fsc_settled=True, radar_was_silenced=False, radar_session_refused=False,
                   radar_bus_healthy=True, steer_undelivered=False,
                   lkas_blocked=False, lkas_effective=0, steer_first_engage_hold=False, lkas_allowed_speed=True, lkas_rejected=0,

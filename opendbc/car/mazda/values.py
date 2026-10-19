@@ -88,6 +88,12 @@ class CarControllerParams:
   UPSHIFT_HOLD_FRAMES = int(3.0 / DT_CTRL)
   UPSHIFT_HOLD_SPEED = 11.2  # m/s, 25 mph
   UPSHIFT_HOLD_MIN_GEAR = 4
+  # Settled in 4th the transmission still kicks down to 3rd under a sustained push: in routes 00000160-00000167,
+  # engaged in 4th under 30 mph, 3 of 9 pushes peaking at 0.75 or more kicked down (route 00000167: 0.79 at 27
+  # mph, 1485 to 2283 rpm) and none of 7 peaking at 0.70 or less did. Under FOURTH_GEAR_SPEED in 4th the
+  # ceiling is FOURTH_GEAR_ACCEL.
+  FOURTH_GEAR_ACCEL = 0.65  # m/s2
+  FOURTH_GEAR_SPEED = 13.4  # m/s, 30 mph
   ACCEL_BUILD_BP = [3., 6.]   # m/s
   ACCEL_BUILD_V = [1.25, 0.8]  # m/s3
   # Stock's throttle lift rate, while the plan is still >= 0; a brake request skips it.

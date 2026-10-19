@@ -248,7 +248,8 @@ def test_ceiling_follows_stock_by_speed(cc, cs):
 
 
 def test_low_speed_upshift_eases_the_push_so_the_new_gear_holds(cc, cs):
-  """After 3rd to 4th under 25 mph the push eases to UPSHIFT_HOLD_ACCEL for UPSHIFT_HOLD_FRAMES, then rebuilds."""
+  """After 3rd to 4th under 25 mph the push eases to UPSHIFT_HOLD_ACCEL for UPSHIFT_HOLD_FRAMES, then rebuilds to
+  the settled-4th ceiling."""
   P = CarControllerParams
 
   def run(n, gear, v_ego=9.0, accel=0.8):
@@ -263,9 +264,9 @@ def test_low_speed_upshift_eases_the_push_so_the_new_gear_holds(cc, cs):
   run(seconds(2.0), 4)
   assert cc.accel_last == pytest.approx(P.UPSHIFT_HOLD_ACCEL, abs=1e-6)
   run(seconds(1.0), 4)  # hold over: rebuilds at the build rate
-  assert P.UPSHIFT_HOLD_ACCEL < cc.accel_last <= 0.8 + 1e-6
+  assert P.UPSHIFT_HOLD_ACCEL < cc.accel_last <= P.FOURTH_GEAR_ACCEL + 1e-6
   run(seconds(1.0), 4)
-  assert cc.accel_last == pytest.approx(0.8, abs=1e-6)
+  assert cc.accel_last == pytest.approx(P.FOURTH_GEAR_ACCEL, abs=1e-6)
 
 
 def test_upshift_hold_eases_at_the_lift_rate(cc, cs):
@@ -285,7 +286,10 @@ def test_upshift_hold_eases_at_the_lift_rate(cc, cs):
   ((4, 3), 9.0),     # downshift
 ])
 def test_upshift_hold_only_for_low_speed_upshifts_into_4th_and_above(cc, cs, gears, v_ego):
-  ceiling = float(np.interp(v_ego, CarControllerParams.ACCEL_CEILING_BP, CarControllerParams.ACCEL_CEILING_V))
+  P = CarControllerParams
+  ceiling = float(np.interp(v_ego, P.ACCEL_CEILING_BP, P.ACCEL_CEILING_V))
+  if gears[-1] == 4 and v_ego < P.FOURTH_GEAR_SPEED:
+    ceiling = min(ceiling, P.FOURTH_GEAR_ACCEL)  # settled in 4th, not the upshift hold
   for g in gears:
     for _ in range(seconds(1.5)):
       step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego, gear_box=g)
@@ -304,6 +308,33 @@ def test_upshift_hold_ends_on_a_downshift_and_never_holds_braking(cc, cs):
   for g in (3, 4):
     for _ in range(seconds(0.5)):
       step_long(cc, cs, accel=-1.5, cruise_engaged=True, v_ego=9.0, gear_box=g)
+  assert cc.accel_last == pytest.approx(-1.5, abs=1e-6)
+
+
+@pytest.mark.parametrize("gear, v_ego, capped", [
+  (4, 11.5, True),    # route 00000167: settled in 4th at 26 mph, 0.79 kicked it down to 3rd
+  (4, 9.0, True),
+  (4, 13.5, False),   # over 30 mph: stock's own ceiling
+  (3, 11.5, False),
+  (5, 11.5, False),
+  (0, 11.5, False),   # gear not seen
+])
+def test_settled_4th_stays_under_the_kickdown_push(cc, cs, gear, v_ego, capped):
+  P = CarControllerParams
+  ceiling = float(np.interp(v_ego, P.ACCEL_CEILING_BP, P.ACCEL_CEILING_V))
+  for _ in range(seconds(2.0)):
+    step_long(cc, cs, accel=0.8, cruise_engaged=True, v_ego=v_ego, gear_box=gear)
+  expected = min(0.8, ceiling, P.FOURTH_GEAR_ACCEL) if capped else min(0.8, ceiling)
+  assert cc.accel_last == pytest.approx(expected, abs=1e-6)
+
+
+def test_settled_4th_cap_eases_at_the_lift_rate_and_never_holds_braking(cc, cs):
+  P = CarControllerParams
+  cc.accel_last = 0.8
+  step_long(cc, cs, accel=0.8, cruise_engaged=True, v_ego=11.5, gear_box=4)
+  assert cc.accel_last == pytest.approx(0.8 + P.ACCEL_LIFT_LIMIT * DT_CTRL, abs=1e-6)
+  for _ in range(seconds(1.0)):
+    step_long(cc, cs, accel=-1.5, cruise_engaged=True, v_ego=11.5, gear_box=4)
   assert cc.accel_last == pytest.approx(-1.5, abs=1e-6)
 
 
