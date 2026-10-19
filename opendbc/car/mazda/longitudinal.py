@@ -137,9 +137,26 @@ class AccelShaper:
   def __init__(self):
     self.release_ramp: float | None = None
     self.breakaway_frames = 0
+    self.gear = 0  # last forward gear seen
+    self.upshift_hold_frames = 0
+
+  def _update_gear(self, gear_box: int, v_ego: float) -> None:
+    if self.upshift_hold_frames > 0:
+      self.upshift_hold_frames -= 1
+    if not 1 <= gear_box <= 6:
+      if gear_box != 15:  # mid-shift keeps the gear it left
+        self.gear = 0
+      return
+    if self.gear and gear_box > self.gear and gear_box >= CarControllerParams.UPSHIFT_HOLD_MIN_GEAR and \
+       v_ego < CarControllerParams.UPSHIFT_HOLD_SPEED:
+      self.upshift_hold_frames = CarControllerParams.UPSHIFT_HOLD_FRAMES
+    elif gear_box < self.gear:
+      self.upshift_hold_frames = 0
+    self.gear = gear_box
 
   def update(self, long_active: bool, plan_accel: float, accel_last: float, sm: StandstillHold,
-             standstill: bool, body_hold: bool, v_ego: float) -> float:
+             standstill: bool, body_hold: bool, v_ego: float, gear_box: int = 0) -> float:
+    self._update_gear(gear_box, v_ego)
     if sm.just_released:
       # Never-latched stops relax in one frame; latched holds ramp from the relaxed command.
       self.release_ramp = CarControllerParams.ACCEL_HOLD_LATCHED if sm.latched_release else \
@@ -181,6 +198,9 @@ class AccelShaper:
         if accel > 0.:
           # Shape positive commands to stock MRCC's ceiling and build rate at this speed.
           ceiling = float(np.interp(v_ego, CarControllerParams.ACCEL_CEILING_BP, CarControllerParams.ACCEL_CEILING_V))
+          if self.upshift_hold_frames > 0:
+            # Just upshifted at low speed: ask for what the new gear can give without kicking back down.
+            ceiling = min(ceiling, CarControllerParams.UPSHIFT_HOLD_ACCEL)
           build = float(np.interp(v_ego, CarControllerParams.ACCEL_BUILD_BP, CarControllerParams.ACCEL_BUILD_V)) * DT_CTRL
           accel = min(accel, ceiling, max(accel_last, 0.) + build)
         if accel_last > 0. and plan_accel >= 0.:

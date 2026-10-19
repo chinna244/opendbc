@@ -79,6 +79,15 @@ class CarControllerParams:
   # and holding 0.55 gives up about 6 mph over 19 engaged minutes.
   ACCEL_CEILING_BP = [0., 4., 5.5, 7., 9., 11., 13.5, 18., 25.]  # m/s
   ACCEL_CEILING_V = [1.2, 1.2, 1.1, 1.0, 0.9, 0.8, 0.75, 0.55, 0.55]  # m/s2
+  # Under the plan the transmission takes 4th at 19-20 mph and about 1600 rpm (this driver's own 3rd to
+  # 4th: 23-26 mph, about 2000 rpm). In routes 00000164-00000166 both 4th-to-3rd kickdowns within 3 s of
+  # such an upshift came at a command of 0.80, and every upshift held at 0.53-0.61 stayed in 4th. For
+  # UPSHIFT_HOLD_FRAMES after an upshift into UPSHIFT_HOLD_MIN_GEAR or above under UPSHIFT_HOLD_SPEED the
+  # ceiling is UPSHIFT_HOLD_ACCEL, reached at the lift rate.
+  UPSHIFT_HOLD_ACCEL = 0.6  # m/s2
+  UPSHIFT_HOLD_FRAMES = int(3.0 / DT_CTRL)
+  UPSHIFT_HOLD_SPEED = 11.2  # m/s, 25 mph
+  UPSHIFT_HOLD_MIN_GEAR = 4
   ACCEL_BUILD_BP = [3., 6.]   # m/s
   ACCEL_BUILD_V = [1.25, 0.8]  # m/s3
   # Stock's throttle lift rate, while the plan is still >= 0; a brake request skips it.

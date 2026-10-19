@@ -192,6 +192,8 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
 
     can_gear = int(cp.vl["GEAR"]["GEAR"])
     ret.gearShifter = self.parse_gear_shifter(self.shifter_values.get(can_gear, None))
+    # Gear engaged in the box: 1-6 forward, 0 P, 14 R, 15 mid-shift.
+    self.gear_box = int(cp.vl["GEAR"]["GEAR_BOX"])
     self.body_hold = body_holds(cp.vl)
 
     ret.genericToggle = bool(cp.vl["BLINK_INFO"]["HIGH_BEAMS"])

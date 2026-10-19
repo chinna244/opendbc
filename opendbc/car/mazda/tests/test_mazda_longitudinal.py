@@ -247,6 +247,66 @@ def test_ceiling_follows_stock_by_speed(cc, cs):
   assert cc.accel_last == pytest.approx(0.5, abs=1e-6)
 
 
+def test_low_speed_upshift_eases_the_push_so_the_new_gear_holds(cc, cs):
+  """After 3rd to 4th under 25 mph the push eases to UPSHIFT_HOLD_ACCEL for UPSHIFT_HOLD_FRAMES, then rebuilds."""
+  P = CarControllerParams
+
+  def run(n, gear, v_ego=9.0, accel=0.8):
+    for _ in range(n):
+      step_long(cc, cs, accel=accel, cruise_engaged=True, v_ego=v_ego, gear_box=gear)
+  run(seconds(2.0), 3)
+  assert cc.accel_last == pytest.approx(0.8, abs=1e-6)
+  run(1, 15)  # mid-shift
+  run(seconds(0.5), 4)
+  assert cc.accel_last == pytest.approx(P.UPSHIFT_HOLD_ACCEL, abs=1e-6)
+  # eased at the lift rate, not stepped
+  run(seconds(2.0), 4)
+  assert cc.accel_last == pytest.approx(P.UPSHIFT_HOLD_ACCEL, abs=1e-6)
+  run(seconds(1.0), 4)  # hold over: rebuilds at the build rate
+  assert P.UPSHIFT_HOLD_ACCEL < cc.accel_last <= 0.8 + 1e-6
+  run(seconds(1.0), 4)
+  assert cc.accel_last == pytest.approx(0.8, abs=1e-6)
+
+
+def test_upshift_hold_eases_at_the_lift_rate(cc, cs):
+  P = CarControllerParams
+  for _ in range(seconds(2.0)):
+    step_long(cc, cs, accel=0.8, cruise_engaged=True, v_ego=9.0, gear_box=3)
+  prev = cc.accel_last
+  step_long(cc, cs, accel=0.8, cruise_engaged=True, v_ego=9.0, gear_box=4)
+  assert cc.accel_last - prev == pytest.approx(P.ACCEL_LIFT_LIMIT * DT_CTRL, abs=1e-6)
+
+
+@pytest.mark.parametrize("gears, v_ego", [
+  ((2, 3), 6.0),     # into 3rd: never kicked back in the logs
+  ((3, 4), 12.0),    # above 25 mph
+  ((4, 4), 9.0),     # no shift
+  ((0, 4), 9.0),     # first gear seen after P
+  ((4, 3), 9.0),     # downshift
+])
+def test_upshift_hold_only_for_low_speed_upshifts_into_4th_and_above(cc, cs, gears, v_ego):
+  ceiling = float(np.interp(v_ego, CarControllerParams.ACCEL_CEILING_BP, CarControllerParams.ACCEL_CEILING_V))
+  for g in gears:
+    for _ in range(seconds(1.5)):
+      step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego, gear_box=g)
+  assert cc.accel_last == pytest.approx(ceiling, abs=1e-6)
+
+
+def test_upshift_hold_ends_on_a_downshift_and_never_holds_braking(cc, cs):
+  P = CarControllerParams
+  for g in (3, 4):
+    for _ in range(seconds(1.0)):
+      step_long(cc, cs, accel=0.8, cruise_engaged=True, v_ego=9.0, gear_box=g)
+  assert cc.accel_last == pytest.approx(P.UPSHIFT_HOLD_ACCEL, abs=1e-6)
+  for _ in range(seconds(1.0)):
+    step_long(cc, cs, accel=0.8, cruise_engaged=True, v_ego=9.0, gear_box=3)
+  assert cc.accel_last == pytest.approx(0.8, abs=1e-6)
+  for g in (3, 4):
+    for _ in range(seconds(0.5)):
+      step_long(cc, cs, accel=-1.5, cruise_engaged=True, v_ego=9.0, gear_box=g)
+  assert cc.accel_last == pytest.approx(-1.5, abs=1e-6)
+
+
 def test_accel_last_tracks_the_wire_not_the_plan(cc, cs):
   # update() reports accel_last as actuatorsOutput.accel, the way Toyota, Ford and Honda
   # report the value they sent. It must be the wire value, clip and hold included.
