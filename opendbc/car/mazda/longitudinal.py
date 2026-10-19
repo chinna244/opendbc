@@ -204,6 +204,9 @@ class AccelShaper:
           elif self.gear == 4 and v_ego < CarControllerParams.FOURTH_GEAR_SPEED:
             # Settled in 4th at city speed: stay under the push that kicks it down to 3rd.
             ceiling = min(ceiling, CarControllerParams.FOURTH_GEAR_ACCEL)
+          elif self.gear == 6:
+            # Settled in 6th: stay under the push that drops it to 5th.
+            ceiling = min(ceiling, CarControllerParams.SIXTH_GEAR_ACCEL)
           build = float(np.interp(v_ego, CarControllerParams.ACCEL_BUILD_BP, CarControllerParams.ACCEL_BUILD_V)) * DT_CTRL
           accel = min(accel, ceiling, max(accel_last, 0.) + build)
         if accel_last > 0. and plan_accel >= 0.:

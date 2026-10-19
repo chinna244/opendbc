@@ -94,6 +94,11 @@ class CarControllerParams:
   # ceiling is FOURTH_GEAR_ACCEL.
   FOURTH_GEAR_ACCEL = 0.65  # m/s2
   FOURTH_GEAR_SPEED = 13.4  # m/s, 30 mph
+  # In 6th the transmission drops to 5th under a small push and comes back once it eases: in routes 00000160 and
+  # 00000163 every engaged 6->5 came from a push of 0.23 or more (60-100% of pushes from 0.20 up) and none of 81
+  # under 0.20 did; 20 of the 24 engaged highway hunts were the set-speed or gap boost. This driver's own push in
+  # 6th is 0.17 at p90. In 6th the ceiling is SIXTH_GEAR_ACCEL.
+  SIXTH_GEAR_ACCEL = 0.2  # m/s2
   ACCEL_BUILD_BP = [3., 6.]   # m/s
   ACCEL_BUILD_V = [1.25, 0.8]  # m/s3
   # Stock's throttle lift rate, while the plan is still >= 0; a brake request skips it.
