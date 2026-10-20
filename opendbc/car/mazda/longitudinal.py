@@ -139,14 +139,23 @@ class AccelShaper:
     self.breakaway_frames = 0
     self.gear = 0  # last forward gear seen
     self.upshift_hold_frames = 0
+    self.kick_frames = 0  # frames in 6th the plan has asked for a kick
+    self.kick = False  # 6th's cap lifted for one deliberate downshift
+    self.kick_cooldown = 0
 
   def _update_gear(self, gear_box: int, v_ego: float) -> None:
     if self.upshift_hold_frames > 0:
       self.upshift_hold_frames -= 1
+    if self.kick_cooldown > 0:
+      self.kick_cooldown -= 1
     if not 1 <= gear_box <= 6:
       if gear_box != 15:  # mid-shift keeps the gear it left
         self.gear = 0
       return
+    if gear_box != self.gear:
+      self.kick_frames, self.kick = 0, False
+      if gear_box == 6 and self.gear:
+        self.kick_cooldown = CarControllerParams.SIXTH_KICK_COOLDOWN_FRAMES
     if self.gear and gear_box > self.gear and gear_box >= CarControllerParams.UPSHIFT_HOLD_MIN_GEAR and \
        v_ego < CarControllerParams.UPSHIFT_HOLD_SPEED:
       self.upshift_hold_frames = CarControllerParams.UPSHIFT_HOLD_FRAMES
@@ -154,9 +163,18 @@ class AccelShaper:
       self.upshift_hold_frames = 0
     self.gear = gear_box
 
+  def _update_kick(self, plan_accel: float) -> None:
+    P = CarControllerParams
+    if self.gear != 6 or self.kick_cooldown > 0 or plan_accel < P.SIXTH_KICK_RELEASE:
+      self.kick_frames, self.kick = 0, False
+    elif plan_accel >= P.SIXTH_KICK_ACCEL:
+      self.kick_frames += 1
+      self.kick = self.kick or self.kick_frames >= P.SIXTH_KICK_FRAMES
+
   def update(self, long_active: bool, plan_accel: float, accel_last: float, sm: StandstillHold,
              standstill: bool, body_hold: bool, v_ego: float, gear_box: int = 0) -> float:
     self._update_gear(gear_box, v_ego)
+    self._update_kick(plan_accel if long_active else 0.)
     if sm.just_released:
       # Never-latched stops relax in one frame; latched holds ramp from the relaxed command.
       self.release_ramp = CarControllerParams.ACCEL_HOLD_LATCHED if sm.latched_release else \
@@ -204,9 +222,12 @@ class AccelShaper:
           elif self.gear == 4 and v_ego < CarControllerParams.FOURTH_GEAR_SPEED:
             # Settled in 4th at city speed: stay under the push that kicks it down to 3rd.
             ceiling = min(ceiling, CarControllerParams.FOURTH_GEAR_ACCEL)
-          elif self.gear == 6:
-            # Settled in 6th: stay under the push that drops it to 5th.
+          elif self.gear == 6 and not self.kick:
+            # Settled in 6th: stay under the push that drops it to 5th, unless the plan asked for a kick.
             ceiling = min(ceiling, CarControllerParams.SIXTH_GEAR_ACCEL)
+          elif self.gear == 5:
+            # In 5th: stay under the push that drops it to 4th and back.
+            ceiling = min(ceiling, CarControllerParams.FIFTH_GEAR_ACCEL)
           build = float(np.interp(v_ego, CarControllerParams.ACCEL_BUILD_BP, CarControllerParams.ACCEL_BUILD_V)) * DT_CTRL
           accel = min(accel, ceiling, max(accel_last, 0.) + build)
         if accel_last > 0. and plan_accel >= 0.:

@@ -99,6 +99,18 @@ class CarControllerParams:
   # under 0.20 did; 20 of the 24 engaged highway hunts were the set-speed or gap boost. This driver's own push in
   # 6th is 0.17 at p90. In 6th the ceiling is SIXTH_GEAR_ACCEL.
   SIXTH_GEAR_ACCEL = 0.2  # m/s2
+  # A plan that asks SIXTH_KICK_ACCEL or more for SIXTH_KICK_FRAMES gets one deliberate downshift, as a driver
+  # flooring it to pass would; it lasts until the plan asks less than SIXTH_KICK_RELEASE or the gear changes.
+  # Back in 6th the cap holds for SIXTH_KICK_COOLDOWN_FRAMES, so a kick can never turn into a hunt. Routes
+  # 00000160 and 00000163: 2 such asks (about 4 s) in 16 min engaged in 6th.
+  SIXTH_KICK_ACCEL = 0.45  # m/s2
+  SIXTH_KICK_RELEASE = 0.25  # m/s2
+  SIXTH_KICK_FRAMES = int(1.0 / DT_CTRL)
+  SIXTH_KICK_COOLDOWN_FRAMES = int(15.0 / DT_CTRL)
+  # In 5th the transmission drops to 4th and back under a firm push: routes 00000160 and 00000163, all four
+  # engaged 5-4-5 hunts (38-60 mph) came from pushes of 0.59-0.75, and pushes up to 0.58 held. In 5th the
+  # ceiling is FIFTH_GEAR_ACCEL, the highway ceiling at any speed.
+  FIFTH_GEAR_ACCEL = 0.55  # m/s2
   ACCEL_BUILD_BP = [3., 6.]   # m/s
   ACCEL_BUILD_V = [1.25, 0.8]  # m/s3
   # Stock's throttle lift rate, while the plan is still >= 0; a brake request skips it.
