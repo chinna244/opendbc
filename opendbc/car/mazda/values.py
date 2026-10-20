@@ -102,8 +102,9 @@ class CarControllerParams:
   # A plan that asks SIXTH_KICK_ACCEL or more for SIXTH_KICK_FRAMES gets one deliberate downshift, as a driver
   # flooring it to pass would; it lasts until the plan asks less than SIXTH_KICK_RELEASE or the gear changes.
   # Back in 6th the cap holds for SIXTH_KICK_COOLDOWN_FRAMES, so a kick can never turn into a hunt. Routes
-  # 00000160 and 00000163: 2 such asks (about 4 s) in 16 min engaged in 6th.
-  SIXTH_KICK_ACCEL = 0.45  # m/s2
+  # 00000160 and 00000163: none in 16 min engaged in 6th. It sits above the set-speed floor's highway ceiling (0.5),
+  # so the floor alone never kicks: this driver catches up in 6th under 0.17 at p90 and almost never kicks down.
+  SIXTH_KICK_ACCEL = 0.55  # m/s2
   SIXTH_KICK_RELEASE = 0.25  # m/s2
   SIXTH_KICK_FRAMES = int(1.0 / DT_CTRL)
   SIXTH_KICK_COOLDOWN_FRAMES = int(15.0 / DT_CTRL)

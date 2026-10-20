@@ -355,6 +355,16 @@ def test_5th_stays_under_the_5_4_hunt_push(cc, cs, v_ego):
   assert cc.accel_last == pytest.approx(min(ceiling, P.FIFTH_GEAR_ACCEL), abs=1e-6)
 
 
+def test_an_upshift_hold_into_5th_still_keeps_5ths_cap(cc, cs):
+  # review: the hold's 0.6 overrode 5th's 0.55 for 3 s after a low-speed upshift into 5th
+  P = CarControllerParams
+  for g in (4, 5):
+    for _ in range(seconds(1.0)):
+      step_long(cc, cs, accel=0.9, cruise_engaged=True, v_ego=10.5, gear_box=g)
+  assert cc.accel_shaper.upshift_hold_frames > 0
+  assert cc.accel_last == pytest.approx(min(P.UPSHIFT_HOLD_ACCEL, P.FIFTH_GEAR_ACCEL), abs=1e-6)
+
+
 def test_a_sustained_big_ask_in_6th_gets_one_kick(cc, cs):
   P = CarControllerParams
   ceiling = float(np.interp(30., P.ACCEL_CEILING_BP, P.ACCEL_CEILING_V))
@@ -364,10 +374,10 @@ def test_a_sustained_big_ask_in_6th_gets_one_kick(cc, cs):
       step_long(cc, cs, accel=accel, cruise_engaged=True, v_ego=30., gear_box=gear)
   run(seconds(2.0), 0.3)
   assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)  # a modest ask stays capped
-  run(P.SIXTH_KICK_FRAMES - 1, 0.5)
+  run(P.SIXTH_KICK_FRAMES - 1, 0.6)
   assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)  # not before a full second
-  run(seconds(1.0), 0.5)
-  assert cc.accel_last == pytest.approx(min(0.5, ceiling), abs=1e-6)  # the kick: the cap is lifted
+  run(seconds(1.0), 0.6)
+  assert cc.accel_last == pytest.approx(min(0.6, ceiling), abs=1e-6)  # the kick: the cap is lifted
   run(seconds(1.0), 0.3)
   assert cc.accel_last == pytest.approx(min(0.3, ceiling), abs=1e-6)  # lasts while the plan still asks
   run(seconds(1.0), 0.2)
@@ -380,10 +390,10 @@ def test_back_in_6th_the_cap_holds_through_the_cooldown(cc, cs):
   def run(n, accel, gear):
     for _ in range(n):
       step_long(cc, cs, accel=accel, cruise_engaged=True, v_ego=30., gear_box=gear)
-  run(seconds(1.0), 0.5, 5)
-  run(P.SIXTH_KICK_COOLDOWN_FRAMES - P.SIXTH_KICK_FRAMES, 0.5, 6)  # still asking, but just upshifted
+  run(seconds(1.0), 0.6, 5)
+  run(P.SIXTH_KICK_COOLDOWN_FRAMES - P.SIXTH_KICK_FRAMES, 0.6, 6)  # still asking, but just upshifted
   assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)
-  run(P.SIXTH_KICK_FRAMES + seconds(2.0), 0.5, 6)  # the cooldown ends, then a full second of asking
+  run(P.SIXTH_KICK_FRAMES + seconds(2.0), 0.6, 6)  # the cooldown ends, then a full second of asking
   assert cc.accel_last > P.SIXTH_GEAR_ACCEL + 0.1
 
 

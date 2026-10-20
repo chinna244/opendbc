@@ -375,6 +375,8 @@ class TestSpeedSignLimit:
     (2, 127),  # all-ones: invalid sentinel
     (3, 50),   # undefined state
     (1, 0),    # displayed-but-zero
+    (1, 5),    # route 00000169: a 5 mph misread
+    (2, 10),   # 10 km/h
   ])
   def test_implausible_frames_read_as_no_limit(self, sign_on, speed_sign):
     assert speed_limit(packer().make_can_msg("CAM_TRAFFIC_SIGNS", 2, {"SPEED_SIGN_UNIT": sign_on, "SPEED_SIGN": speed_sign})) == 0.0
@@ -400,6 +402,12 @@ class TestNavSpeedLimit:
     if cam is not None:
       msgs.append((CAM_TRAFFIC_SIGNS, bytes.fromhex(cam), 2))
     assert speed_limit(*msgs) == pytest.approx(expected_ms, rel=1e-6, abs=1e-12)
+
+  def test_a_camera_misread_lets_the_nav_limit_through(self):
+    # review: a 5 mph camera misread hid the nav unit's 25 mph
+    nav = (NAV_SPEED_LIMIT, bytes.fromhex("000000065011051a"), 0)
+    cam = packer().make_can_msg("CAM_TRAFFIC_SIGNS", 2, {"SPEED_SIGN_UNIT": 1, "SPEED_SIGN": 5})
+    assert speed_limit(nav, cam) == pytest.approx(25 * CV.MPH_TO_MS, rel=1e-6)
 
   def test_metric_nav_limit(self):
     assert speed_limit(packer().make_can_msg("NAV_SPEED_LIMIT", 0, {"SPEED_SIGN_UNIT": 2, "SPEED_SIGN": 60})) == pytest.approx(60 * CV.KPH_TO_MS)

@@ -219,8 +219,9 @@ class AccelShaper:
           if self.upshift_hold_frames > 0:
             # Just upshifted at low speed: ask for what the new gear can give without kicking back down.
             ceiling = min(ceiling, CarControllerParams.UPSHIFT_HOLD_ACCEL)
-          elif self.gear == 4 and v_ego < CarControllerParams.FOURTH_GEAR_SPEED:
-            # Settled in 4th at city speed: stay under the push that kicks it down to 3rd.
+          # The gear's own cap applies with or without the hold: the lower one wins.
+          if self.gear == 4 and v_ego < CarControllerParams.FOURTH_GEAR_SPEED:
+            # In 4th at city speed: stay under the push that kicks it down to 3rd.
             ceiling = min(ceiling, CarControllerParams.FOURTH_GEAR_ACCEL)
           elif self.gear == 6 and not self.kick:
             # Settled in 6th: stay under the push that drops it to 5th, unless the plan asked for a kick.
