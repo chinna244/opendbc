@@ -384,6 +384,21 @@ def test_a_sustained_big_ask_in_6th_gets_one_kick(cc, cs):
   assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)  # released under SIXTH_KICK_RELEASE
 
 
+def test_two_short_big_asks_in_6th_do_not_add_up_to_a_kick(cc, cs):
+  # review: 0.5 s at 0.6, 30 s at 0.3, 0.5 s at 0.6 kicked on the second half-second
+  P = CarControllerParams
+
+  def run(n, accel):
+    for _ in range(n):
+      step_long(cc, cs, accel=accel, cruise_engaged=True, v_ego=30., gear_box=6)
+  run(seconds(1.0), 0.3)
+  run(seconds(0.5), 0.6)
+  run(seconds(30.0), 0.3)
+  run(seconds(0.5), 0.6)
+  assert not cc.accel_shaper.kick
+  assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)
+
+
 def test_back_in_6th_the_cap_holds_through_the_cooldown(cc, cs):
   P = CarControllerParams
 

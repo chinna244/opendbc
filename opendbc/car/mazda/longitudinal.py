@@ -170,6 +170,9 @@ class AccelShaper:
     elif plan_accel >= P.SIXTH_KICK_ACCEL:
       self.kick_frames += 1
       self.kick = self.kick or self.kick_frames >= P.SIXTH_KICK_FRAMES
+    elif not self.kick:
+      # an armed kick holds down to the release; a partial count does not wait out a softer stretch
+      self.kick_frames = 0
 
   def update(self, long_active: bool, plan_accel: float, accel_last: float, sm: StandstillHold,
              standstill: bool, body_hold: bool, v_ego: float, gear_box: int = 0) -> float:
