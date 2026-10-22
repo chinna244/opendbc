@@ -83,16 +83,19 @@ class CarControllerParams:
   # 4th: 23-26 mph, about 2000 rpm). In routes 00000164-00000166 both 4th-to-3rd kickdowns within 3 s of
   # such an upshift came at a command of 0.80, and every upshift held at 0.53-0.61 stayed in 4th. For
   # UPSHIFT_HOLD_FRAMES after an upshift into UPSHIFT_HOLD_MIN_GEAR or above under UPSHIFT_HOLD_SPEED the
-  # ceiling is UPSHIFT_HOLD_ACCEL, reached at the lift rate.
-  UPSHIFT_HOLD_ACCEL = 0.6  # m/s2
+  # ceiling is UPSHIFT_HOLD_ACCEL, reached at the lift rate. Raised from 0.6 with FOURTH_GEAR_ACCEL: together with the
+  # planner floor they held town pickups to 0.6 (20-28 mph 6.2 s against this driver's own 5.3 s), and a useful
+  # kickdown under a steady push is allowed. At the 4th-gear value the hold adds nothing in 4th or 5th.
+  UPSHIFT_HOLD_ACCEL = 0.75  # m/s2
   UPSHIFT_HOLD_FRAMES = int(3.0 / DT_CTRL)
   UPSHIFT_HOLD_SPEED = 11.2  # m/s, 25 mph
   UPSHIFT_HOLD_MIN_GEAR = 4
   # Settled in 4th the transmission still kicks down to 3rd under a sustained push: in routes 00000160-00000167,
   # engaged in 4th under 30 mph, 3 of 9 pushes peaking at 0.75 or more kicked down (route 00000167: 0.79 at 27
   # mph, 1485 to 2283 rpm) and none of 7 peaking at 0.70 or less did. Under FOURTH_GEAR_SPEED in 4th the
-  # ceiling is FOURTH_GEAR_ACCEL.
-  FOURTH_GEAR_ACCEL = 0.65  # m/s2
+  # ceiling is FOURTH_GEAR_ACCEL. At 0.75 (routes 00000147-00000177): 23 of 25 pushes at 0.75 or less stayed in
+  # 4th; of 5 at 0.75 or more, 4 shifted, each followed by a steady pull and none shifting down twice in one pull.
+  FOURTH_GEAR_ACCEL = 0.75  # m/s2
   FOURTH_GEAR_SPEED = 13.4  # m/s, 30 mph
   # In 6th the transmission drops to 5th under a small push and comes back once it eases: in routes 00000160 and
   # 00000163 every engaged 6->5 came from a push of 0.23 or more (60-100% of pushes from 0.20 up) and none of 81
@@ -102,8 +105,9 @@ class CarControllerParams:
   # A plan that asks SIXTH_KICK_ACCEL or more for SIXTH_KICK_FRAMES gets one deliberate downshift, as a driver
   # flooring it to pass would; it lasts until the plan asks less than SIXTH_KICK_RELEASE or the gear changes.
   # Back in 6th the cap holds for SIXTH_KICK_COOLDOWN_FRAMES, so a kick can never turn into a hunt. Routes
-  # 00000160 and 00000163: none in 16 min engaged in 6th. It sits above the set-speed floor's highway ceiling (0.5),
-  # so the floor alone never kicks: this driver catches up in 6th under 0.17 at p90 and almost never kicks down.
+  # 00000160 and 00000163: none in 16 min engaged in 6th. It sits above the set-speed floor's highway ceiling (0.5
+  # from 56 mph; the floor alone can reach it below about 52 mph): this driver catches up in 6th under 0.17 at p90 and
+  # almost never kicks down. With the floor at 0.8, a replay of the same 16 min still had no kick.
   SIXTH_KICK_ACCEL = 0.55  # m/s2
   SIXTH_KICK_RELEASE = 0.25  # m/s2
   SIXTH_KICK_FRAMES = int(1.0 / DT_CTRL)

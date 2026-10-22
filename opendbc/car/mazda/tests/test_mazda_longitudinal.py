@@ -500,7 +500,7 @@ def test_ceiling_follows_stock_by_speed(cc, cs):
 
 def test_low_speed_upshift_eases_the_push_so_the_new_gear_holds(cc, cs):
   """After 3rd to 4th under 25 mph the push eases to UPSHIFT_HOLD_ACCEL for UPSHIFT_HOLD_FRAMES, then rebuilds to
-  the settled-4th ceiling."""
+  the settled-4th ceiling (nothing to rebuild while the two are equal)."""
   P = CarControllerParams
 
   def run(n, gear, v_ego=9.0, accel=0.8):
@@ -514,10 +514,24 @@ def test_low_speed_upshift_eases_the_push_so_the_new_gear_holds(cc, cs):
   # eased at the lift rate, not stepped
   run(seconds(2.0), 4)
   assert cc.accel_last == pytest.approx(P.UPSHIFT_HOLD_ACCEL, abs=1e-6)
-  run(seconds(1.0), 4)  # hold over: rebuilds at the build rate
-  assert P.UPSHIFT_HOLD_ACCEL < cc.accel_last <= P.FOURTH_GEAR_ACCEL + 1e-6
+  run(seconds(1.0), 4)  # hold over: rebuilds at the build rate (nothing to rebuild while the two are equal)
+  assert P.UPSHIFT_HOLD_ACCEL <= cc.accel_last <= P.FOURTH_GEAR_ACCEL + 1e-6
   run(seconds(1.0), 4)
   assert cc.accel_last == pytest.approx(P.FOURTH_GEAR_ACCEL, abs=1e-6)
+
+
+@pytest.mark.parametrize("v_ego", [9.0, 12.0])
+def test_fourth_gear_passes_a_075_push(cc, cs, v_ego):
+  """Gear study (routes 00000147-00000177): in 4th under 30 mph, right after a low-speed upshift and settled, a 0.75
+  push goes through; a 0.9 plan is still held to 0.75."""
+  def run(n, gear, accel):
+    for _ in range(n):
+      step_long(cc, cs, accel=accel, cruise_engaged=True, v_ego=v_ego, gear_box=gear)
+  run(seconds(2.0), 3, 0.75)
+  run(seconds(0.5), 4, 0.75)
+  assert cc.accel_last == pytest.approx(0.75, abs=1e-6)
+  run(seconds(4.0), 4, 0.9)
+  assert cc.accel_last == pytest.approx(0.75, abs=1e-6)
 
 
 def test_upshift_hold_eases_at_the_lift_rate(cc, cs):
