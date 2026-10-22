@@ -114,6 +114,18 @@ class CarControllerParams:
   FIFTH_GEAR_ACCEL = 0.55  # m/s2
   ACCEL_BUILD_BP = [3., 6.]   # m/s
   ACCEL_BUILD_V = [1.25, 0.8]  # m/s3
+  # A rolling gas override zeroes the command, and the plan comes back at the car's own acceleration: the build rate
+  # alone took 0.6-1.0 s to catch up, the car sagging from +0.63 to +0.11 m/s2 (median of 29 rolling returns, routes
+  # 0000016d-00000175). With no lead shown and the car still pulling, the command climbs at HANDOVER_BUILD up to that
+  # pull, at most HANDOVER_MAX, under the same ceilings. Only an override while engaged counts. A lead, a brake request
+  # or the end of HANDOVER_FRAMES ends the climb. At any time, a brake request of HANDOVER_BRAKE or more, or any slowing
+  # with a lead shown, is answered with no more than the shaper without the climb would send, so braking is never later
+  # than before, at the window's end or after it; with no lead, a plan only easing off lifts at the usual rates.
+  HANDOVER_BUILD = 4.0  # m/s3
+  HANDOVER_BRAKE = -0.3  # m/s2
+  HANDOVER_MAX = 0.6  # m/s2
+  HANDOVER_MIN_SPEED = 3.0  # m/s
+  HANDOVER_FRAMES = int(1.0 / DT_CTRL)
   # Stock's throttle lift rate, while the plan is still >= 0; a brake request skips it.
   ACCEL_LIFT_LIMIT = -2.0  # m/s3
   # Limit upward plan-command slew in the brake region without delaying braking response.

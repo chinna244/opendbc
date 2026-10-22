@@ -110,7 +110,7 @@ def car_controller(alpha_long=True, candidate=CAR.MAZDA_CX5_2022, cruise_request
 
 # capnp messages
 
-def car_state(standstill=False, gas=False, brake_pressed=False, v_ego=0., driver_torque=0.,
+def car_state(standstill=False, gas=False, brake_pressed=False, v_ego=0., a_ego=0., driver_torque=0.,
               steering_pressed=False, available=True, cruise_engaged=False, can_valid=True, buttons=()) -> structs.CarState:
   """structs.CarState with the fields the controller reads off CS.out."""
   ret = structs.CarState()
@@ -120,6 +120,7 @@ def car_state(standstill=False, gas=False, brake_pressed=False, v_ego=0., driver
   ret.brakePressed = brake_pressed
   ret.vEgoRaw = v_ego
   ret.vEgo = v_ego
+  ret.aEgo = a_ego
   ret.steeringTorque = driver_torque
   ret.steeringPressed = steering_pressed
   ret.cruiseState.available = available

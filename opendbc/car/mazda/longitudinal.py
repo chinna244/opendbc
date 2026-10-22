@@ -142,6 +142,12 @@ class AccelShaper:
     self.kick_frames = 0  # frames in 6th the plan has asked for a kick
     self.kick = False  # 6th's cap lifted for one deliberate downshift
     self.kick_cooldown = 0
+    self.long_active_last = False
+    self.handover_frames = 0  # frames left of a rolling return from a gas override
+    self.baseline = 0.  # the command the shaper would have sent without the handover climb
+    self.handover_climb = False  # still climbing to the pull of that return
+    self.handover_pull = 0.  # m/s2 the car was pulling at that return
+    self.gas_override = False  # engaged, with the gas holding control off since it was last active
 
   def _update_gear(self, gear_box: int, v_ego: float) -> None:
     if self.upshift_hold_frames > 0:
@@ -174,10 +180,77 @@ class AccelShaper:
       # an armed kick holds down to the release; a partial count does not wait out a softer stretch
       self.kick_frames = 0
 
+  def _update_handover(self, long_engaged: bool, long_active: bool, standstill: bool, v_ego: float, a_ego: float,
+                       lead_visible: bool, gas_pressed: bool, plan_accel: float) -> bool:
+    """Whether to climb for a rolling return from an engaged gas override. A lead, a brake request, standstill,
+    losing control or the window running out ends it."""
+    P = CarControllerParams
+    returning = long_active and not self.long_active_last
+    self.long_active_last = long_active
+    from_gas = self.gas_override
+    # Only an override while engaged counts, and disengaging forgets it.
+    self.gas_override = long_engaged and not long_active and (self.gas_override or gas_pressed)
+    if returning and from_gas and not standstill and not lead_visible and v_ego >= P.HANDOVER_MIN_SPEED and a_ego > 0.:
+      self.handover_frames, self.handover_climb = P.HANDOVER_FRAMES, True
+      self.handover_pull = min(a_ego, P.HANDOVER_MAX)
+    elif self.handover_frames > 0:
+      self.handover_frames = self.handover_frames - 1 if long_active and not standstill else 0
+    if self.handover_frames == 0 or lead_visible or plan_accel <= P.HANDOVER_BRAKE:
+      self.handover_climb = False
+    return self.handover_climb
+
+  def _shape(self, accel: float, last: float, plan_accel: float, v_ego: float, climb: bool) -> float:
+    """The plan slew-limited from last, its positive part under stock's ceiling and build rate (and a handover's
+    climb), lifting at stock's rate."""
+    P = CarControllerParams
+    accel = rate_limit(accel, last, P.ACCEL_WINDDOWN_LIMIT, P.ACCEL_WINDUP_LIMIT)
+    if accel > 0.:
+      # Shape positive commands to stock MRCC's ceiling and build rate at this speed.
+      ceiling = float(np.interp(v_ego, P.ACCEL_CEILING_BP, P.ACCEL_CEILING_V))
+      if self.upshift_hold_frames > 0:
+        # Just upshifted at low speed: ask for what the new gear can give without kicking back down.
+        ceiling = min(ceiling, P.UPSHIFT_HOLD_ACCEL)
+      # The gear's own cap applies with or without the hold: the lower one wins.
+      if self.gear == 4 and v_ego < P.FOURTH_GEAR_SPEED:
+        # In 4th at city speed: stay under the push that kicks it down to 3rd.
+        ceiling = min(ceiling, P.FOURTH_GEAR_ACCEL)
+      elif self.gear == 6 and not self.kick:
+        # Settled in 6th: stay under the push that drops it to 5th, unless the plan asked for a kick.
+        ceiling = min(ceiling, P.SIXTH_GEAR_ACCEL)
+      elif self.gear == 5:
+        # In 5th: stay under the push that drops it to 4th and back.
+        ceiling = min(ceiling, P.FIFTH_GEAR_ACCEL)
+      build = float(np.interp(v_ego, P.ACCEL_BUILD_BP, P.ACCEL_BUILD_V)) * DT_CTRL
+      step_cap = max(last, 0.) + build
+      if climb:
+        # Back from a rolling gas override: climb quickly to the pull the car already had, no further.
+        step_cap = max(step_cap, min(max(last, 0.) + P.HANDOVER_BUILD * DT_CTRL, self.handover_pull))
+      accel = min(accel, ceiling, step_cap)
+    if last > 0. and plan_accel >= 0.:
+      # Lift the throttle at stock's rate; a brake request bypasses this above.
+      accel = max(accel, last + P.ACCEL_LIFT_LIMIT * DT_CTRL)
+    return accel
+
+  @staticmethod
+  def _hold(accel: float, last: float, plan_accel: float, sm: StandstillHold) -> float:
+    """The standstill hold's own commands, last of all. last is the command sent the frame before."""
+    if sm.car_has_hold:
+      # Stop requesting brake hold after the body ECU takes ownership.
+      accel = CarControllerParams.ACCEL_HOLD_LATCHED
+    elif sm.holding:
+      # Freeze the braking command while STOPPING is asserted.
+      accel = min(accel, 0.) if plan_accel <= 0. else min(last, 0.)
+    if sm.resume_unlatching:
+      # Bound the latched release pulse to stock's command range.
+      accel = min(max(accel, CarControllerParams.ACCEL_HOLD_LATCHED), CarControllerParams.ACCEL_RESUME_PULSE_MAX)
+    return accel
+
   def update(self, long_active: bool, plan_accel: float, accel_last: float, sm: StandstillHold,
-             standstill: bool, body_hold: bool, v_ego: float, gear_box: int = 0) -> float:
+             standstill: bool, body_hold: bool, v_ego: float, gear_box: int = 0, a_ego: float = 0.,
+             lead_visible: bool = True, gas_pressed: bool = False, long_engaged: bool = False) -> float:
     self._update_gear(gear_box, v_ego)
     self._update_kick(plan_accel if long_active else 0.)
+    climb = self._update_handover(long_engaged, long_active, standstill, v_ego, a_ego, lead_visible, gas_pressed, plan_accel)
     if sm.just_released:
       # Never-latched stops relax in one frame; latched holds ramp from the relaxed command.
       self.release_ramp = CarControllerParams.ACCEL_HOLD_LATCHED if sm.latched_release else \
@@ -186,7 +259,7 @@ class AccelShaper:
       # Re-holds and driver overrides terminate the release ramp.
       self.release_ramp = None
 
-    accel = 0.
+    accel, plain, baseline = 0., False, 0.
     if long_active:
       accel = float(np.clip(plan_accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
       # Continue a bounded release ramp while stopped because the plan may not break static hold.
@@ -213,38 +286,20 @@ class AccelShaper:
                                   self.release_ramp + CarControllerParams.ACCEL_WINDDOWN_LIMIT)
       else:
         self.release_ramp = None
+        plain = True
         # Track overrides in accel_last so control resumes through the slew limiter.
-        accel = rate_limit(accel, accel_last, CarControllerParams.ACCEL_WINDDOWN_LIMIT,
-                           CarControllerParams.ACCEL_WINDUP_LIMIT)
-        if accel > 0.:
-          # Shape positive commands to stock MRCC's ceiling and build rate at this speed.
-          ceiling = float(np.interp(v_ego, CarControllerParams.ACCEL_CEILING_BP, CarControllerParams.ACCEL_CEILING_V))
-          if self.upshift_hold_frames > 0:
-            # Just upshifted at low speed: ask for what the new gear can give without kicking back down.
-            ceiling = min(ceiling, CarControllerParams.UPSHIFT_HOLD_ACCEL)
-          # The gear's own cap applies with or without the hold: the lower one wins.
-          if self.gear == 4 and v_ego < CarControllerParams.FOURTH_GEAR_SPEED:
-            # In 4th at city speed: stay under the push that kicks it down to 3rd.
-            ceiling = min(ceiling, CarControllerParams.FOURTH_GEAR_ACCEL)
-          elif self.gear == 6 and not self.kick:
-            # Settled in 6th: stay under the push that drops it to 5th, unless the plan asked for a kick.
-            ceiling = min(ceiling, CarControllerParams.SIXTH_GEAR_ACCEL)
-          elif self.gear == 5:
-            # In 5th: stay under the push that drops it to 4th and back.
-            ceiling = min(ceiling, CarControllerParams.FIFTH_GEAR_ACCEL)
-          build = float(np.interp(v_ego, CarControllerParams.ACCEL_BUILD_BP, CarControllerParams.ACCEL_BUILD_V)) * DT_CTRL
-          accel = min(accel, ceiling, max(accel_last, 0.) + build)
-        if accel_last > 0. and plan_accel >= 0.:
-          # Lift the throttle at stock's rate; a brake request bypasses this above.
-          accel = max(accel, accel_last + CarControllerParams.ACCEL_LIFT_LIMIT * DT_CTRL)
-      if sm.car_has_hold:
-        # Stop requesting brake hold after the body ECU takes ownership.
-        accel = CarControllerParams.ACCEL_HOLD_LATCHED
-      elif sm.holding:
-        # Freeze the braking command while STOPPING is asserted.
-        accel = min(accel, 0.) if plan_accel <= 0. else min(accel_last, 0.)
-      if sm.resume_unlatching:
-        # Bound the latched release pulse to stock's command range.
-        accel = min(max(accel, CarControllerParams.ACCEL_HOLD_LATCHED),
-                    CarControllerParams.ACCEL_RESUME_PULSE_MAX)
+        target = accel
+        accel = self._shape(target, accel_last, plan_accel, v_ego, climb)
+        baseline = self._shape(target, self.baseline, plan_accel, v_ego, False)
+        if plan_accel <= CarControllerParams.HANDOVER_BRAKE or (lead_visible and plan_accel < 0.):
+          # A brake request, or any slowing behind a lead, is never answered later than it would have been without
+          # the handover climb.
+          accel = min(accel, baseline)
+      if not plain:
+        baseline = accel
+      accel = self._hold(accel, accel_last, plan_accel, sm)
+      # The reference goes through the same hold rules on its own history, so it is the whole command the shaper
+      # without the handover climb would have sent.
+      baseline = self._hold(baseline, self.baseline, plan_accel, sm)
+    self.baseline = baseline
     return accel
