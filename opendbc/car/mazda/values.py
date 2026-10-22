@@ -1,11 +1,11 @@
 from dataclasses import dataclass, field
-from enum import IntFlag, StrEnum
+from enum import Enum, IntFlag, StrEnum
 
 from opendbc.car import Bus, CarSpecs, DbcDict, DT_CTRL, PlatformConfig, Platforms
 from opendbc.car.carlog import carlog
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.structs import CarParams
-from opendbc.car.docs_definitions import CarHarness, CarDocs, CarParts
+from opendbc.car.docs_definitions import CarFootnote, CarHarness, CarDocs, CarParts, Column
 from opendbc.car.fw_query_definitions import FwQueryConfig, Request, StdQueries
 from opendbc.car.vin import Vin, is_valid_vin
 
@@ -19,8 +19,8 @@ class CarControllerParams:
   # their numbers from here. Evidence for every constant below: the Constants tables in
   # docs/zoompilot/mazda-lateral.md and mazda-longitudinal.md.
   EPS_STEER_MAX = 1200            # theoretical max_steer 2047
-  STEER_DELTA_UP = 12             # torque increase per refresh, the EPS's own slew
-  STEER_DELTA_DOWN = 12           # torque decrease per refresh
+  STEER_DELTA_UP = 10             # torque increase per refresh: the EPS's own ~1000 counts/s slew
+  STEER_DELTA_DOWN = 10           # torque decrease per refresh
   STEER_DRIVER_ALLOWANCE = 15     # allowed driver torque before start limiting
   STEER_DRIVER_MULTIPLIER = 15    # weight driver torque, tuned for the 2022 EPS
   STEER_DRIVER_FACTOR = 1         # from dbc
@@ -32,6 +32,8 @@ class CarControllerParams:
 
   ACCEL_MAX = 2.0   # m/s2
   ACCEL_MIN = -3.5  # m/s2
+  # CRZ_INFO.ACCEL_CMD resolution: stock's holds sit at raw -1024 and -410, i.e. -1.0 and -0.4 m/s2.
+  ACCEL_CMD_LSB = 1 / 1024  # m/s2 per count
 
   # Longitudinal message periods in 100 Hz control frames.
   LONG_STEP = 2        # CRZ_INFO/CRZ_CTRL at 50 Hz, matching stock
@@ -51,14 +53,14 @@ class CarControllerParams:
   CANCEL_SETTLE_T = 0.2       # s a cancel request must hold before the first press; the car answers its own inside it
 
   # Relax the command after the body ECU takes ownership of the brake hold.
-  ACCEL_HOLD_LATCHED = -0.001  # m/s2
+  ACCEL_HOLD_LATCHED = -ACCEL_CMD_LSB  # m/s2, raw -1
 
   # Match stock's ACCEL_CMD ceiling during a latched release pulse.
-  ACCEL_RESUME_PULSE_MAX = 0.25  # m/s2, latched releases only
+  ACCEL_RESUME_PULSE_MAX = 250 * ACCEL_CMD_LSB  # m/s2, raw 250, latched releases only
 
   # Match stock's one-frame relaxation and subsequent release ramp.
-  ACCEL_RELEASE_BAND = -0.26  # m/s2, the one-frame relax target at a never-latched release
-  ACCEL_RELEASE_RAMP = 1.25   # m/s3, stock's release ramp (+25 raw per 50 Hz frame)
+  ACCEL_RELEASE_BAND = -260 * ACCEL_CMD_LSB  # m/s2, raw -260, the one-frame relax target at a never-latched release
+  ACCEL_RELEASE_RAMP = 25 * ACCEL_CMD_LSB * 50  # m/s3, stock's release ramp (+25 raw per 50 Hz frame)
   # Past the unlatch pulse window with the car still standing, build faster than stock: stock's
   # ramp alone took 0.8 s to break away after the hold opened (routes 0000013a, 0000013b).
   ACCEL_RELEASE_RAMP_STOPPED = 2.5  # m/s3
@@ -117,7 +119,7 @@ class CarControllerParams:
   # ceiling is FIFTH_GEAR_ACCEL, the highway ceiling at any speed.
   FIFTH_GEAR_ACCEL = 0.55  # m/s2
   ACCEL_BUILD_BP = [3., 6.]   # m/s
-  ACCEL_BUILD_V = [1.25, 0.8]  # m/s3
+  ACCEL_BUILD_V = [ACCEL_RELEASE_RAMP, 0.8]  # m/s3
   # A rolling gas override zeroes the command, and the plan comes back at the car's own acceleration: the build rate
   # alone took 0.6-1.0 s to catch up, the car sagging from +0.63 to +0.11 m/s2 (median of 29 rolling returns, routes
   # 0000016d-00000175). With no lead shown and the car still pulling, the command climbs at HANDOVER_BUILD up to that
@@ -166,6 +168,14 @@ class CarControllerParams:
 class MazdaCarDocs(CarDocs):
   package: str = "All"
   car_parts: CarParts = field(default_factory=CarParts.common([CarHarness.mazda]))
+  footnotes: list[Enum] = field(default_factory=lambda: [Footnote.COMMA_POWER_REQUIRED])
+  requires_comma_power: bool = True
+
+
+class Footnote(Enum):
+  COMMA_POWER_REQUIRED = CarFootnote(
+    "Mazda vehicles <b>require</b> comma power installation.",
+    Column.MAKE, setup_note=True)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -193,6 +203,10 @@ class MazdaFlags(IntFlag):
 
   # The G46L radar's dialect bit; see G46L_RADAR_FW below.
   G46L_RADAR = 8
+
+  # Blind spot frame 0x477 present. 16 was the moving radar takeover until 2026-10: do not reuse
+  # it, older logs carry it.
+  HAS_BSM = 32
 
 
 class MazdaSafetyFlags(IntFlag):
@@ -224,42 +238,42 @@ class MazdaPlatformConfig(PlatformConfig):
 class CAR(Platforms):
   MAZDA_CX5_KE = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-5 2012-16")],
-    MazdaCarSpecs(mass=3433 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=18.1),  # steer ratio from the 2022 CX-5: same rack hardware
+    MazdaCarSpecs(wheelbase=2.7, steerRatio=18.1),  # steer ratio from the 2022 CX-5: same rack hardware
     # This radar does not publish 0x361-0x366 tracks on bus 0.
     dbc_dict={Bus.pt: 'mazda_2017'},
     wmis={WMI.JAPAN_CROSSOVER, WMI.EXPORT_CROSSOVER}, chassis_codes={'KE'}, years={'C', 'D', 'E', 'F', 'G'},  # 2012-16
   )
   MAZDA_CX5 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-5 2017-21")],
-    MazdaCarSpecs(mass=3655 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=18.1),  # steer ratio from the 2022 CX-5: same rack hardware
+    MazdaCarSpecs(wheelbase=2.7, steerRatio=18.1),  # steer ratio from the 2022 CX-5: same rack hardware
     wmis={WMI.JAPAN_CROSSOVER, WMI.EXPORT_CROSSOVER}, chassis_codes={'KF'}, years={'H', 'J', 'K', 'L', 'M'},  # 2017-21
   )
   MAZDA_CX9 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-9 2016-20")],
-    MazdaCarSpecs(mass=4217 * CV.LB_TO_KG, wheelbase=2.93, steerRatio=17.6),
+    MazdaCarSpecs(wheelbase=2.93, steerRatio=17.6),
     # This radar does not publish 0x361-0x366 tracks on bus 0.
     dbc_dict={Bus.pt: 'mazda_2017'},
     wmis={WMI.JAPAN_CROSSOVER, WMI.EXPORT_CROSSOVER}, chassis_codes={'TC'}, years={'G', 'H', 'J', 'K', 'L'},  # 2016-20
   )
   MAZDA_3 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda 3 2017-18")],
-    MazdaCarSpecs(mass=2875 * CV.LB_TO_KG, wheelbase=2.7, steerRatio=14.0),
+    MazdaCarSpecs(wheelbase=2.7, steerRatio=14.0),
     wmis={WMI.JAPAN_PASSENGER, WMI.MEXICO_PASSENGER}, chassis_codes={'BN'}, years={'H', 'J'},  # 2017-18
   )
   MAZDA_6 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda 6 2017-20")],
-    MazdaCarSpecs(mass=3443 * CV.LB_TO_KG, wheelbase=2.83, steerRatio=15.5),
+    MazdaCarSpecs(wheelbase=2.83, steerRatio=15.5),
     wmis={WMI.JAPAN_PASSENGER}, chassis_codes={'GL'}, years={'H', 'J', 'K', 'L', 'M'},  # 2017-21
   )
   MAZDA_CX9_2021 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-9 2021-23", video="https://youtu.be/dA3duO4a0O4")],
-    MazdaCarSpecs(mass=4409 * CV.LB_TO_KG, wheelbase=2.93, steerRatio=17.6),
+    MazdaCarSpecs(wheelbase=2.93, steerRatio=17.6),
     # 2021-23 in North America; export markets kept the TC through 2025 (a JM7 TC S VIN attested)
     wmis={WMI.JAPAN_CROSSOVER, WMI.EXPORT_CROSSOVER}, chassis_codes={'TC'}, years={'M', 'N', 'P', 'S'},
   )
   MAZDA_CX5_2022 = MazdaPlatformConfig(
     [MazdaCarDocs("Mazda CX-5 2022-25")],
-    MazdaCX5_2022CarSpecs(mass=3728 * CV.LB_TO_KG, wheelbase=2.698, steerRatio=18.1),  # learned; factory spec 15.5
+    MazdaCX5_2022CarSpecs(wheelbase=2.698, steerRatio=18.1),  # learned; factory spec 15.5
     wmis={WMI.JAPAN_CROSSOVER, WMI.EXPORT_CROSSOVER}, chassis_codes={'KF'}, years={'N', 'P', 'R', 'S'},  # 2022-25
   )
   MAZDA_CX8_2023 = MazdaPlatformConfig(
