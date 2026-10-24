@@ -87,8 +87,9 @@ class CarControllerParams:
   # UPSHIFT_HOLD_FRAMES after an upshift into UPSHIFT_HOLD_MIN_GEAR or above under UPSHIFT_HOLD_SPEED the
   # ceiling is UPSHIFT_HOLD_ACCEL, reached at the lift rate. Raised from 0.6 with FOURTH_GEAR_ACCEL: together with the
   # planner floor they held town pickups to 0.6 (20-28 mph 6.2 s against this driver's own 5.3 s), and a useful
-  # kickdown under a steady push is allowed. At the 4th-gear value the hold adds nothing in 4th or 5th.
-  UPSHIFT_HOLD_ACCEL = 0.75  # m/s2
+  # kickdown under a steady push is allowed. At the 4th-gear value the hold adds nothing in 4th or 5th; lowered with
+  # it to 0.65.
+  UPSHIFT_HOLD_ACCEL = 0.65  # m/s2
   UPSHIFT_HOLD_FRAMES = int(3.0 / DT_CTRL)
   UPSHIFT_HOLD_SPEED = 11.2  # m/s, 25 mph
   UPSHIFT_HOLD_MIN_GEAR = 4
@@ -97,7 +98,11 @@ class CarControllerParams:
   # mph, 1485 to 2283 rpm) and none of 7 peaking at 0.70 or less did. Under FOURTH_GEAR_SPEED in 4th the
   # ceiling is FOURTH_GEAR_ACCEL. At 0.75 (routes 00000147-00000177): 23 of 25 pushes at 0.75 or less stayed in
   # 4th; of 5 at 0.75 or more, 4 shifted, each followed by a steady pull and none shifting down twice in one pull.
-  FOURTH_GEAR_ACCEL = 0.75  # m/s2
+  # Lowered to 0.65 (routes 00000147-00000187, 140 pushes): 12 of 34 peaking at 0.70 or more kicked down, 2 of 49
+  # at 0.60-0.70 and 1 of 31 under 0.60; routes 00000184 and 00000187 hunted 4-3-4 three times at 0.56-0.76, the
+  # set-speed floor pushing while the model asked 0.03-0.33 (the 0.56 one stays possible). Replay: 0.5 mph given up
+  # per push at p90.
+  FOURTH_GEAR_ACCEL = 0.65  # m/s2
   FOURTH_GEAR_SPEED = 13.4  # m/s, 30 mph
   # In 6th the transmission drops to 5th under a small push and comes back once it eases: in routes 00000160 and
   # 00000163 every engaged 6->5 came from a push of 0.23 or more (60-100% of pushes from 0.20 up) and none of 81

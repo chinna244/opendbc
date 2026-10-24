@@ -522,17 +522,19 @@ def test_low_speed_upshift_eases_the_push_so_the_new_gear_holds(cc, cs):
 
 
 @pytest.mark.parametrize("v_ego", [9.0, 12.0])
-def test_fourth_gear_passes_a_075_push(cc, cs, v_ego):
-  """Gear study (routes 00000147-00000177): in 4th under 30 mph, right after a low-speed upshift and settled, a 0.75
-  push goes through; a 0.9 plan is still held to 0.75."""
+def test_fourth_gear_passes_a_065_push(cc, cs, v_ego):
+  """Gear study (routes 00000147-00000187): in 4th under 30 mph, right after a low-speed upshift and settled, a 0.65
+  push goes through; route 00000184's 4-3-4 hunts (0.74-0.76 sent) and a 0.9 plan are held to 0.65."""
   def run(n, gear, accel):
     for _ in range(n):
       step_long(cc, cs, accel=accel, cruise_engaged=True, v_ego=v_ego, gear_box=gear)
-  run(seconds(2.0), 3, 0.75)
-  run(seconds(0.5), 4, 0.75)
-  assert cc.accel_last == pytest.approx(0.75, abs=1e-6)
+  run(seconds(2.0), 3, 0.65)
+  run(seconds(0.5), 4, 0.65)
+  assert cc.accel_last == pytest.approx(0.65, abs=1e-6)
+  run(seconds(4.0), 4, 0.74)
+  assert cc.accel_last == pytest.approx(0.65, abs=1e-6)
   run(seconds(4.0), 4, 0.9)
-  assert cc.accel_last == pytest.approx(0.75, abs=1e-6)
+  assert cc.accel_last == pytest.approx(0.65, abs=1e-6)
 
 
 def test_upshift_hold_eases_at_the_lift_rate(cc, cs):
