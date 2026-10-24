@@ -115,7 +115,11 @@ class CarControllerParams:
   # 00000160 and 00000163: none in 16 min engaged in 6th. It sits above the set-speed floor's highway ceiling (0.5
   # from 56 mph; the floor alone can reach it below about 52 mph): this driver catches up in 6th under 0.17 at p90 and
   # almost never kicks down. With the floor at 0.8, a replay of the same 16 min still had no kick.
-  SIXTH_KICK_ACCEL = 0.55  # m/s2
+  # Raised to 0.7: routes 00000164-00000187 (16 min in 6th) asked it for a full second 5 times (4 armed, one inside
+  # the cooldown), every one the far-lead gap boost (0.39-0.50) and the floor catching up to a lead 50-80 m ahead
+  # while the model asked 0.12-0.42; 4 went 6-5-6 or 6-5-4. No plan held 0.65 for the full second, so a replay at
+  # 0.7 arms none.
+  SIXTH_KICK_ACCEL = 0.7  # m/s2
   SIXTH_KICK_RELEASE = 0.25  # m/s2
   SIXTH_KICK_FRAMES = int(1.0 / DT_CTRL)
   SIXTH_KICK_COOLDOWN_FRAMES = int(15.0 / DT_CTRL)
