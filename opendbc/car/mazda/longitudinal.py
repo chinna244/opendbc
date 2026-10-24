@@ -218,8 +218,8 @@ class AccelShaper:
         # Settled in 6th: stay under the push that drops it to 5th, unless the plan asked for a kick.
         ceiling = min(ceiling, P.SIXTH_GEAR_ACCEL)
       elif self.gear == 5:
-        # In 5th: stay under the push that drops it to 4th and back.
-        ceiling = min(ceiling, P.FIFTH_GEAR_ACCEL)
+        # In 5th: stay under the push that drops it to 4th and back, a lighter one at low rpm.
+        ceiling = min(ceiling, P.FIFTH_GEAR_LOW_ACCEL if v_ego < P.FIFTH_GEAR_LOW_SPEED else P.FIFTH_GEAR_ACCEL)
       build = float(np.interp(v_ego, P.ACCEL_BUILD_BP, P.ACCEL_BUILD_V)) * DT_CTRL
       step_cap = max(last, 0.) + build
       if climb:

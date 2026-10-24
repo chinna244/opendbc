@@ -592,7 +592,7 @@ def test_settled_4th_stays_under_the_kickdown_push(cc, cs, gear, v_ego, capped):
     step_long(cc, cs, accel=0.8, cruise_engaged=True, v_ego=v_ego, gear_box=gear)
   expected = min(0.8, ceiling, P.FOURTH_GEAR_ACCEL) if capped else min(0.8, ceiling)
   if gear == 5:
-    expected = min(expected, P.FIFTH_GEAR_ACCEL)
+    expected = min(expected, P.FIFTH_GEAR_LOW_ACCEL)  # 26 mph: 5th's low-rpm cap
   assert cc.accel_last == pytest.approx(expected, abs=1e-6)
 
 
@@ -611,14 +611,47 @@ def test_6th_stays_under_the_downshift_push(cc, cs, gear, v_ego, capped):
   assert cc.accel_last == pytest.approx(expected, abs=1e-6)
 
 
-@pytest.mark.parametrize("v_ego", [12., 17., 27.])  # 27, 38 and 60 mph
-def test_5th_stays_under_the_5_4_hunt_push(cc, cs, v_ego):
+@pytest.mark.parametrize("v_ego, low", [(12., True), (17., True), (18., False), (27., False)])  # 27, 38, 40 and 60 mph
+def test_5th_stays_under_the_5_4_hunt_push(cc, cs, v_ego, low):
   # route 00000163 t=732: 0.75 at 38 mph dropped 5th to 4th and back in 6 s
   P = CarControllerParams
   for _ in range(seconds(2.0)):
     step_long(cc, cs, accel=0.9, cruise_engaged=True, v_ego=v_ego, gear_box=5)
   ceiling = float(np.interp(v_ego, P.ACCEL_CEILING_BP, P.ACCEL_CEILING_V))
-  assert cc.accel_last == pytest.approx(min(ceiling, P.FIFTH_GEAR_ACCEL), abs=1e-6)
+  cap = P.FIFTH_GEAR_LOW_ACCEL if low else P.FIFTH_GEAR_ACCEL
+  assert cc.accel_last == pytest.approx(min(ceiling, cap), abs=1e-6)
+
+
+@pytest.mark.parametrize("v_ego", [12., 15.])  # 27 and 34 mph
+def test_5th_at_low_rpm_stays_under_the_kickdown_push(cc, cs, v_ego):
+  # route 0000017f t=366: the set-speed floor's 0.80 took 5th to 4th and 3rd at 29 mph (0.55 sent in 5th);
+  # route 00000180 t=231: the gap boost's 0.45 at 38 mph dropped 5th to 4th and back in 2 s
+  P = CarControllerParams
+  for _ in range(seconds(2.0)):
+    step_long(cc, cs, accel=0.45, cruise_engaged=True, v_ego=v_ego, gear_box=5)
+  assert cc.accel_last == pytest.approx(P.FIFTH_GEAR_LOW_ACCEL, abs=1e-6)
+  step_long(cc, cs, accel=-1.5, cruise_engaged=True, v_ego=v_ego, gear_box=5)
+  # braking is never capped or delayed: the first brake frame moves at the full wind-down rate
+  assert cc.accel_last == pytest.approx(P.FIFTH_GEAR_LOW_ACCEL + P.ACCEL_WINDDOWN_LIMIT, abs=1e-6)
+
+
+@pytest.mark.parametrize("v_ego, cap", [(17.89, "low"), (17.91, "high")])  # car state speed is float32
+def test_5th_low_rpm_cap_ends_at_its_speed(cc, cs, v_ego, cap):
+  P = CarControllerParams
+  for _ in range(seconds(2.0)):
+    step_long(cc, cs, accel=0.9, cruise_engaged=True, v_ego=v_ego, gear_box=5)
+  ceiling = float(np.interp(v_ego, P.ACCEL_CEILING_BP, P.ACCEL_CEILING_V))
+  expected = P.FIFTH_GEAR_LOW_ACCEL if cap == "low" else min(ceiling, P.FIFTH_GEAR_ACCEL)
+  assert cc.accel_last == pytest.approx(expected, abs=1e-6)
+
+
+def test_a_gas_return_in_5th_at_low_rpm_climbs_only_to_its_cap(cc, cs):
+  # 1 of 220 engaged rolling gas releases (routes 00000160-00000180) was in 5th under 40 mph pulling over 0.35
+  P = CarControllerParams
+  gas_return(cc, cs, v_ego=15., a_ego=0.5, lead_visible=False, gear_box=5)
+  for _ in range(seconds(1.0)):
+    step_long(cc, cs, accel=0.85, cruise_engaged=True, v_ego=15., a_ego=0.5, lead_visible=False, gear_box=5)
+  assert cc.accel_last == pytest.approx(P.FIFTH_GEAR_LOW_ACCEL, abs=1e-6)
 
 
 def test_an_upshift_hold_into_5th_still_keeps_5ths_cap(cc, cs):
@@ -628,7 +661,7 @@ def test_an_upshift_hold_into_5th_still_keeps_5ths_cap(cc, cs):
     for _ in range(seconds(1.0)):
       step_long(cc, cs, accel=0.9, cruise_engaged=True, v_ego=10.5, gear_box=g)
   assert cc.accel_shaper.upshift_hold_frames > 0
-  assert cc.accel_last == pytest.approx(min(P.UPSHIFT_HOLD_ACCEL, P.FIFTH_GEAR_ACCEL), abs=1e-6)
+  assert cc.accel_last == pytest.approx(min(P.UPSHIFT_HOLD_ACCEL, P.FIFTH_GEAR_LOW_ACCEL), abs=1e-6)
 
 
 def test_a_sustained_big_ask_in_6th_gets_one_kick(cc, cs):

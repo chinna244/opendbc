@@ -118,6 +118,13 @@ class CarControllerParams:
   # engaged 5-4-5 hunts (38-60 mph) came from pushes of 0.59-0.75, and pushes up to 0.58 held. In 5th the
   # ceiling is FIFTH_GEAR_ACCEL, the highway ceiling at any speed.
   FIFTH_GEAR_ACCEL = 0.55  # m/s2
+  # Under FIFTH_GEAR_LOW_SPEED (under about 1600 rpm in 5th) it kicks down to 4th at much less: routes
+  # 00000160-00000180, 14 of 69 engaged pushes there kicked down (under 0.4: 1 of 40, at 0.36; 0.4-0.5: 4 of 15;
+  # 0.5-0.6: 7 of 11), against none of the 29 at 0.6 or less over 40 mph. 13 of the 14 were the set-speed or gap
+  # boost, not the model (route 0000017f t=366: 5-4-3 at 29 mph; 00000180 t=231: 5-4-5 in 2 s at 38 mph). There the
+  # ceiling is FIFTH_GEAR_LOW_ACCEL; the model alone asked more for 4 s of 1612 s engaged in 5th under that speed.
+  FIFTH_GEAR_LOW_ACCEL = 0.35  # m/s2
+  FIFTH_GEAR_LOW_SPEED = 17.9  # m/s, 40 mph
   ACCEL_BUILD_BP = [3., 6.]   # m/s
   ACCEL_BUILD_V = [ACCEL_RELEASE_RAMP, 0.8]  # m/s3
   # A rolling gas override zeroes the command, and the plan comes back at the car's own acceleration: the build rate
