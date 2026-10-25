@@ -119,7 +119,10 @@ class CarControllerParams:
   # the cooldown), every one the far-lead gap boost (0.39-0.50) and the floor catching up to a lead 50-80 m ahead
   # while the model asked 0.12-0.42; 4 went 6-5-6 or 6-5-4. No plan held 0.65 for the full second, so a replay at
   # 0.7 arms none.
-  SIXTH_KICK_ACCEL = 0.7  # m/s2
+  # Raised to 1.2: routes 00000160-0000018f (2.1 h engaged in 6th) held 0.7 for a full second 7 times, 6 went 6-5-6
+  # or 6-5-4 and back in 1-2 s, every one the gap boost (0.5) and the floor (0.26-0.61) over a model at 0.26-0.49.
+  # The model never asked 0.5 in 6th; boosted plans peaked at 0.96. A kick is now only a real floor-it ask.
+  SIXTH_KICK_ACCEL = 1.2  # m/s2
   SIXTH_KICK_RELEASE = 0.25  # m/s2
   SIXTH_KICK_FRAMES = int(1.0 / DT_CTRL)
   SIXTH_KICK_COOLDOWN_FRAMES = int(15.0 / DT_CTRL)
