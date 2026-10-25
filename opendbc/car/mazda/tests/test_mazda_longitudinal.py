@@ -582,7 +582,9 @@ def test_upshift_hold_ends_on_a_downshift_and_never_holds_braking(cc, cs):
 @pytest.mark.parametrize("gear, v_ego, capped", [
   (4, 11.5, True),    # route 00000167: settled in 4th at 26 mph, 0.79 kicked it down to 3rd
   (4, 9.0, True),
-  (4, 13.5, False),   # over 30 mph: stock's own ceiling
+  (4, 13.5, True),    # route 0000018f: 0.69 at 30.2 mph kicked it down to 3rd and back
+  (4, 15.5, True),
+  (4, 15.7, False),   # over 35 mph: stock's own ceiling
   (3, 11.5, False),
   (5, 11.5, False),
   (0, 11.5, False),   # gear not seen

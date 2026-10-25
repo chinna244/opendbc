@@ -102,8 +102,10 @@ class CarControllerParams:
   # at 0.60-0.70 and 1 of 31 under 0.60; routes 00000184 and 00000187 hunted 4-3-4 three times at 0.56-0.76, the
   # set-speed floor pushing while the model asked 0.03-0.33 (the 0.56 one stays possible). Replay: 0.5 mph given up
   # per push at p90.
+  # Extended to 35 mph (routes 00000147-0000018f): in 4th at 30-33 mph 2 of 9 pushes of 0.65 or more kicked down to
+  # 3rd and back (route 0000018f: 0.69 at 30.2 mph, just over the old 30 mph edge), none of 41 under 0.65.
   FOURTH_GEAR_ACCEL = 0.65  # m/s2
-  FOURTH_GEAR_SPEED = 13.4  # m/s, 30 mph
+  FOURTH_GEAR_SPEED = 15.6  # m/s, 35 mph
   # In 6th the transmission drops to 5th under a small push and comes back once it eases: in routes 00000160 and
   # 00000163 every engaged 6->5 came from a push of 0.23 or more (60-100% of pushes from 0.20 up) and none of 81
   # under 0.20 did; 20 of the 24 engaged highway hunts were the set-speed or gap boost. This driver's own push in
