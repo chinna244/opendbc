@@ -1059,3 +1059,17 @@ def test_cruise_frame_wheel_follows_mads_with_cruise_on_or_off(cc, cs, mads, eng
   assert on_car is not None and on_radar is not None
   assert bool(on_car[4] & 0x20) == mads
   assert not on_radar[4] & 0x20
+
+
+@pytest.mark.parametrize("mads,available,white", [(True, True, True), (False, True, False), (True, False, False)])
+def test_cruise_frame_wheel_with_cruise_on_not_engaged(cc, cs, mads, available, white):
+  """Cruise main on but not set (before SET or after a cancel), radar still ours: the wheel rides CRZ_CTRL
+  while MADS steers. Main off leaves it to the camera frame's white state. Never on bus 2."""
+  sends = []
+  for _ in range(seconds(1.0)):
+    sends += step_long(cc, cs, long_active=False, enabled=False, available=available, mads_active=mads, v_ego=20.)
+  on_car = [d for a, d, b in sends if a == CRZ_CTRL and b == 0][-1:]
+  on_radar = [d for a, d, b in sends if a == CRZ_CTRL and b == 2][-1:]
+  assert on_car and on_radar
+  assert bool(on_car[0][4] & 0x20) == white
+  assert not on_radar[0][4] & 0x20
