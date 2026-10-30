@@ -101,13 +101,12 @@ class TestRadarSessionBounds:
     state = m.update(True, False, False, standstill=True, session_refused=False, stock_radar_gone=True)
     assert state == RadarSessionState.HANDBACK and not m.handback_completed
 
-  def test_silencing_waits_for_standstill_but_adoption_does_not(self):
-    # actively silencing disables AEB, so it only starts pre-motion like disable_ecu;
-    # adopting an already-quiet radar disables nothing and proceeds anywhere
+  def test_first_silencing_may_run_moving_and_adoption_too(self):
+    # the first takeover of a session starts rolling; adopting an already-quiet radar
+    # disables nothing and proceeds anywhere
     m = RadarSessionManager()
-    for _ in range(10):
-      assert m.update(True, True, False, standstill=False, session_refused=False, stock_radar_gone=False) == RadarSessionState.STOCK
-    assert m.update(True, True, False, standstill=True, session_refused=False, stock_radar_gone=False) == RadarSessionState.SILENCING
+    assert m.update(True, True, False, standstill=False, session_refused=False, stock_radar_gone=False) == RadarSessionState.SILENCING
+    assert m.attempt_moving
     m2 = RadarSessionManager()
     assert m2.update(True, False, False, standstill=False, session_refused=False, stock_radar_gone=True) == RadarSessionState.SILENCED
 
@@ -271,12 +270,47 @@ def _stock(m, standstill, alive=True, refused=False, gate=True, handback=False, 
   return m.update(gate, alive, handback, standstill=standstill, session_refused=refused, stock_radar_gone=not alive, **kw)
 
 
+def _close_moving(m, refused=True):
+  """A moving request the radar refuses (or never answers), undone back to stock."""
+  assert _stock(m, standstill=False) == RadarSessionState.SILENCING and m.attempt_moving
+  if refused:
+    _stock(m, standstill=False, refused=True)
+  else:
+    while m.state == RadarSessionState.SILENCING:
+      _stock(m, standstill=False)
+  assert m.state == RadarSessionState.HANDBACK and not m.moving_open and not m.silencing_failed
+  while m.state != RadarSessionState.STOCK:
+    _stock(m, standstill=False)
+
+
+class TestMovingTakeover:
+  """The first takeover of a session runs moving; a radar that refuses it moving, never answers
+  it, or comes back under our frames leaves the parked takeover open."""
+
+  def test_a_rolling_session_takes_over(self):
+    m = RadarSessionManager()
+    assert _stock(m, standstill=False) == RadarSessionState.SILENCING
+    while not m.programming_sent:
+      _stock(m, standstill=False)
+    assert _stock(m, standstill=False, alive=False) == RadarSessionState.SILENCED
+
+  @pytest.mark.parametrize("refused", [True, False])
+  def test_a_moving_failure_waits_for_the_stop(self, refused):
+    m = RadarSessionManager()
+    _close_moving(m, refused=refused)
+    for _ in range(300):
+      assert _stock(m, standstill=False) == RadarSessionState.STOCK
+    assert m.status == StockEcuState.PARK_TO_TAKE_OVER
+    assert _stock(m, standstill=True) == RadarSessionState.SILENCING and not m.attempt_moving
+
+
 class TestParkedTakeover:
-  """A fresh session started with the car rolling (forced offroad exit, process restart) waits
-  for the stop, and the status says so."""
+  """Once moving attempts are closed for the session, the takeover waits for the stop, and the
+  status says so."""
 
   def test_a_rolling_session_waits_for_the_stop(self):
     m = RadarSessionManager()
+    _close_moving(m)
     for _ in range(300):
       assert _stock(m, standstill=False) == RadarSessionState.STOCK
     assert m.status == StockEcuState.PARK_TO_TAKE_OVER
@@ -293,8 +327,16 @@ class TestParkedTakeover:
       assert _stock(m, standstill=standstill) == RadarSessionState.STOCK
     assert m.status == StockEcuState.FAILED
 
+  def test_pulling_away_keeps_the_queued_request_while_moving_is_open(self):
+    m = RadarSessionManager()
+    _stock(m, standstill=True)
+    while not m.programming_sent:
+      _stock(m, standstill=True)
+    assert _stock(m, standstill=False) == RadarSessionState.SILENCING
+
   def test_pulling_away_undoes_the_queued_request(self):
     m = RadarSessionManager()
+    _close_moving(m)
     _stock(m, standstill=True)
     while not m.programming_sent:
       _stock(m, standstill=True)
@@ -303,6 +345,7 @@ class TestParkedTakeover:
   def test_undone_request_leaves_the_next_attempt_open(self):
     # undoing our own request (motion on a parked-only radar) is not an ordered hand-back
     m = RadarSessionManager()
+    _close_moving(m)
     _stock(m, standstill=True)
     while not m.programming_sent:
       _stock(m, standstill=True)
@@ -422,15 +465,14 @@ class TestCruiseRequestTakeover:
       requested |= SESSION_PROG_DAT in uds(boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, available=True))
     assert requested
 
-  def test_press_while_moving_waits_for_the_stop(self, cc, cs):
+  def test_press_while_moving_takes_over_after_the_settle(self, cc, cs):
     boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, standstill=False, buttons=(ButtonType.resumeCruise,), available=True)
-    assert cc.radar_session.status == StockEcuState.PARK_TO_TAKE_OVER and cc.stock_ecu_state == StockEcuState.NOT_NEEDED
-    for _ in range(500):
+    assert cc.stock_ecu_state == StockEcuState.STARTING
+    for _ in range(CRUISE_REQUEST_SETTLE_FRAMES - 1):
       assert boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, standstill=False, available=True) == []
-    assert cc.radar_session.status == StockEcuState.PARK_TO_TAKE_OVER and cc.stock_ecu_state == StockEcuState.NOT_NEEDED
     requested = False
-    for _ in range(TAKEOVER_STOP_FRAMES + RADAR_UDS_STEP + 2):
-      requested |= SESSION_PROG_DAT in uds(boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, available=True))
+    for _ in range(RADAR_UDS_STEP + 2):
+      requested |= SESSION_PROG_DAT in uds(boot_step(cc, cs, stock_radar_alive=True, fsc_settled=True, standstill=False, available=True))
     assert requested
 
   def test_press_with_main_off_is_not_a_request(self, cc, cs):
@@ -518,16 +560,14 @@ class TestCruiseOffHandback:
       radar_step(cc, cs, alive=False, main=False)
     for _ in range(RADAR_RESTORE_FRAMES + 1):
       radar_step(cc, cs, alive=True, main=False)
-    # main back on: nothing until a SET/RES press, then the takeover at the stop after the settle
+    # main back on: nothing until a RES press, then the takeover after the settle, moving
     for _ in range(500):
       assert radar_step(cc, cs, alive=True) == []
     assert cc.radar_session.status == StockEcuState.PARK_TO_TAKE_OVER and cc.stock_ecu_state == StockEcuState.NOT_NEEDED
     radar_step(cc, cs, alive=True, standstill=False, buttons=(ButtonType.resumeCruise,))
-    for _ in range(500):
-      assert radar_step(cc, cs, alive=True, standstill=False) == []
     requested = False
-    for _ in range(TAKEOVER_STOP_FRAMES + RADAR_UDS_STEP + 2):
-      requested |= SESSION_PROG_DAT in uds(radar_step(cc, cs, alive=True))
+    for _ in range(CRUISE_REQUEST_SETTLE_FRAMES + RADAR_UDS_STEP + 2):
+      requested |= SESSION_PROG_DAT in uds(radar_step(cc, cs, alive=True, standstill=False))
     assert requested
 
   def test_unanswered_hand_back_fails_then_recovers_late(self, cc, cs):
@@ -696,11 +736,14 @@ class TestCruiseOffHandback:
 
 
 class TestRealStop:
-  """In creeping traffic a stop shorter than TAKEOVER_STOP_FRAMES starts no takeover: AEB stays on."""
+  """With moving attempts closed (the radar refused one), a stop shorter than TAKEOVER_STOP_FRAMES
+  in creeping traffic starts no takeover: AEB stays on."""
 
   @pytest.fixture
   def cc(self):
-    return car_controller(alpha_long=True, cruise_requested=False)
+    cc = car_controller(alpha_long=True, cruise_requested=False)
+    cc.radar_session.moving_open = False
+    return cc
 
   def test_short_stops_start_nothing(self, cc, cs):
     radar_step(cc, cs, alive=True, standstill=False, buttons=(ButtonType.resumeCruise,))
@@ -744,7 +787,16 @@ class TestAlphaLongRequest:
     assert not cc.cruise_requested and not cc.alpha_long_requested
     assert not self.long_stop_takes_over(cc, cs)
 
+  def test_res_while_moving_takes_over_without_the_next_stop_line(self, cc, cs):
+    radar_step(cc, cs, alive=True, standstill=False, buttons=(ButtonType.resumeCruise,))
+    sent = False
+    for _ in range(CRUISE_REQUEST_SETTLE_FRAMES + RADAR_UDS_STEP + 2):
+      sent |= SESSION_PROG_DAT in uds(radar_step(cc, cs, alive=True, standstill=False))
+      assert not cc.alpha_long_requested  # no stop to announce
+    assert sent
+
   def test_res_asks_and_is_flagged_until_taken(self, cc, cs):
+    cc.radar_session.moving_open = False  # the radar refused a moving takeover earlier
     radar_step(cc, cs, alive=True, standstill=False, buttons=(ButtonType.resumeCruise,))
     for _ in range(100):
       radar_step(cc, cs, alive=True, standstill=False)
@@ -765,6 +817,7 @@ class TestAlphaLongRequest:
     assert not self.long_stop_takes_over(cc, cs)
 
   def test_main_off_clears_the_memory(self, cc, cs):
+    cc.radar_session.moving_open = False  # the radar refused a moving takeover earlier
     for _ in range(50):
       radar_step(cc, cs, alive=True, standstill=False, cruise_engaged=True)
     for _ in range(10):
@@ -819,6 +872,7 @@ class TestAlphaLongRequestEnds:
       assert SESSION_PROG_DAT not in uds(radar_step(cc, cs, alive=True))
 
   def test_the_flag_needs_main(self, cc, cs):
+    cc.radar_session.moving_open = False  # the radar refused a moving takeover earlier
     radar_step(cc, cs, alive=True, standstill=False, buttons=(ButtonType.resumeCruise,))
     assert cc.alpha_long_requested
     radar_step(cc, cs, alive=True, standstill=False, main=False)
@@ -826,6 +880,7 @@ class TestAlphaLongRequestEnds:
 
   def test_the_flag_holds_through_a_takeover_cut_short(self, cc, cs):
     # one request, one announcement: a roll that aborts the takeover does not re-raise the flag
+    cc.radar_session.moving_open = False  # the radar refused a moving takeover earlier
     radar_step(cc, cs, alive=True, standstill=False, buttons=(ButtonType.resumeCruise,))
     for _ in range(CRUISE_REQUEST_SETTLE_FRAMES + TAKEOVER_STOP_FRAMES + 5):
       radar_step(cc, cs, alive=True)

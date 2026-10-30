@@ -44,8 +44,9 @@ RADAR_WARMUP_MAX_FRAMES = int(20.0 / DT_CTRL)
 # the radar's own frames follows its mode), so AEB counts as off for that long. Off when it may be
 # on is the safe error; the reverse is not.
 RADAR_RESTART_FRAMES = int(12.0 / DT_CTRL)
-# A takeover starts only at a real stop: one shorter than this (creeping traffic) would be cut short
-# by the next roll, turning AEB off and back on for nothing. Standing still since start counts.
+# The first takeover runs moving. Once the radar refused one, a takeover starts only at a real stop:
+# one shorter than this (creeping traffic) would be cut short by the next roll, turning AEB off and
+# back on for nothing. Standing still since start counts.
 TAKEOVER_STOP_FRAMES = int(2.0 / DT_CTRL)
 
 
@@ -241,10 +242,12 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
 
   @property
   def alpha_long_requested(self) -> bool:
-    """The driver asked for alpha long (RES), main is on, and the radar is not held yet: card
-    publishes it for the "alpha long at the next stop" line. It stays up through a takeover that
-    a roll cuts short, so one request is announced once."""
+    """The driver asked for alpha long (RES), main is on, and the radar is not held yet, with the
+    takeover waiting for a stop (the radar refused a moving one): card publishes it for the
+    "alpha long at the next stop" line. It stays up through a takeover that a roll cuts short,
+    so one request is announced once."""
     return self.CP.openpilotLongitudinalControl and self.cruise_requested and self.main_on and \
+           not self.radar_session.moving_open and \
            self.radar_session.state != RadarSessionState.SILENCED and not self.radar_session.silencing_failed
 
   @property
