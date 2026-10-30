@@ -81,6 +81,14 @@ class CarControllerParams:
   # and holding 0.55 gives up about 6 mph over 19 engaged minutes.
   ACCEL_CEILING_BP = [0., 4., 5.5, 7., 9., 11., 13.5, 18., 25.]  # m/s
   ACCEL_CEILING_V = [1.2, 1.2, 1.1, 1.0, 0.9, 0.8, 0.75, 0.55, 0.55]  # m/s2
+  # Straight pull-aways from a stop: this driver's own, straight with no car within 40 m, gave 1.38 / 1.37 / 1.21
+  # m/s2 at 0-5 / 5-10 / 10-15 mph (0-10 mph in 3.0 s), op's 0.97 / 1.08 / 1.09 (3.9 s) with the plan asking
+  # 1.6 under the 1.2 ceiling; under 15 mph the car gives about 0.87 of the command (31 routes, 00000184 to
+  # 00000012). From a standstill until LAUNCH_SPEED, a brake request or the wheel past LAUNCH_STEER_MAX, the ceiling
+  # is LAUNCH_CEILING_V, meeting ACCEL_CEILING_V by 9 m/s. Turning pull-aways were already harder than the driver's.
+  LAUNCH_CEILING_V = [1.5, 1.5, 1.35, 1.15, 0.9, 0.8, 0.75, 0.55, 0.55]  # m/s2
+  LAUNCH_SPEED = 9.  # m/s, 20 mph
+  LAUNCH_STEER_MAX = 30.  # deg
   # Under the plan the transmission takes 4th at 19-20 mph and about 1600 rpm (this driver's own 3rd to
   # 4th: 23-26 mph, about 2000 rpm). In routes 00000164-00000166 both 4th-to-3rd kickdowns within 3 s of
   # such an upshift came at a command of 0.80, and every upshift held at 0.53-0.61 stayed in 4th. For

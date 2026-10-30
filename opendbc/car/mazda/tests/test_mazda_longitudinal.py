@@ -499,6 +499,61 @@ def test_ceiling_follows_stock_by_speed(cc, cs):
   assert cc.accel_last == pytest.approx(0.5, abs=1e-6)
 
 
+def _pull_away(cc, cs, steer_angle=0.):
+  """Stopped, then rolling at 2 m/s with the plan asking 2.0, settled through the build rate."""
+  step_long(cc, cs, accel=-0.5, cruise_engaged=True, standstill=True, v_ego=0.)
+  for _ in range(seconds(1.5)):
+    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=2., steer_angle=steer_angle)
+
+
+def test_straight_launch_ceiling_stays_under_stock(cc, cs):
+  """A straight pull-away from a stop is capped by LAUNCH_CEILING_V, still under stock's own command."""
+  P = CarControllerParams
+  bp, v = P.ACCEL_CEILING_BP, P.LAUNCH_CEILING_V
+  stock_bp, stock_p99 = (0., 4., 9., 14., 18., 25.), (1.5, 1.75, 1.45, 1.05, 0.85, 0.65)
+  assert all(np.interp(x, bp, v) <= np.interp(x, stock_bp, stock_p99) + 1e-9 for x in sorted({*bp, *stock_bp}))
+  assert all(a >= b for a, b in zip(v, P.ACCEL_CEILING_V, strict=True))
+  assert np.interp(P.LAUNCH_SPEED, bp, v) == pytest.approx(np.interp(P.LAUNCH_SPEED, bp, P.ACCEL_CEILING_V))
+  _pull_away(cc, cs)
+  assert cc.accel_last == pytest.approx(1.5, abs=1e-6)
+
+
+@pytest.mark.parametrize("steer_angle", [45., -45.])
+def test_turning_launch_keeps_the_stock_ceiling(cc, cs, steer_angle):
+  _pull_away(cc, cs, steer_angle)
+  assert cc.accel_last == pytest.approx(1.2, abs=1e-6)
+
+
+def test_launch_ceiling_ends_at_a_brake_request_or_launch_speed(cc, cs):
+  _pull_away(cc, cs)
+  step_long(cc, cs, accel=-0.1, cruise_engaged=True, v_ego=2.)
+  for _ in range(seconds(1.5)):
+    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=2.)
+  assert cc.accel_last == pytest.approx(1.2, abs=1e-6)  # rolling pickup, not a launch
+  _pull_away(cc, cs)
+  step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=CarControllerParams.LAUNCH_SPEED)
+  cc.accel_last = 2.0
+  for _ in range(seconds(1.0)):
+    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=2.)
+  assert cc.accel_last == pytest.approx(1.2, abs=1e-6)
+
+
+def test_launch_ceiling_ends_at_a_gas_override(cc, cs):
+  """A pull-away the driver took over on the gas returns to the stock ceiling, not the launch one."""
+  step_long(cc, cs, accel=-0.5, cruise_engaged=True, standstill=True, v_ego=0.)
+  step_long(cc, cs, long_active=False, enabled=True, accel=0., gas=True, cruise_engaged=True, v_ego=2.)
+  for _ in range(seconds(1.5)):
+    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=2.)
+  assert cc.accel_last == pytest.approx(1.2, abs=1e-6)
+
+
+def test_launch_ceiling_never_raises_a_brake(cc, cs):
+  _pull_away(cc, cs)
+  for _ in range(seconds(0.5)):
+    step_long(cc, cs, accel=-1.0, cruise_engaged=True, v_ego=2.)
+  assert cc.accel_last < 0.
+
+
 def test_low_speed_upshift_eases_the_push_so_the_new_gear_holds(cc, cs):
   """After 3rd to 4th under 25 mph the push eases to UPSHIFT_HOLD_ACCEL for UPSHIFT_HOLD_FRAMES, then rebuilds to
   the settled-4th ceiling (nothing to rebuild while the two are equal)."""

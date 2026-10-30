@@ -148,6 +148,8 @@ class AccelShaper:
     self.handover_climb = False  # still climbing to the pull of that return
     self.handover_pull = 0.  # m/s2 the car was pulling at that return
     self.gas_override = False  # engaged, with the gas holding control off since it was last active
+    self.launch = False  # op pulling away from a stop, not yet at LAUNCH_SPEED, no brake request or override since
+    self.straight = True  # the wheel within LAUNCH_STEER_MAX
 
   def _update_gear(self, gear_box: int, v_ego: float) -> None:
     if self.upshift_hold_frames > 0:
@@ -206,7 +208,8 @@ class AccelShaper:
     accel = rate_limit(accel, last, P.ACCEL_WINDDOWN_LIMIT, P.ACCEL_WINDUP_LIMIT)
     if accel > 0.:
       # Shape positive commands to stock MRCC's ceiling and build rate at this speed.
-      ceiling = float(np.interp(v_ego, P.ACCEL_CEILING_BP, P.ACCEL_CEILING_V))
+      ceiling_v = P.LAUNCH_CEILING_V if self.launch and self.straight else P.ACCEL_CEILING_V
+      ceiling = float(np.interp(v_ego, P.ACCEL_CEILING_BP, ceiling_v))
       if self.upshift_hold_frames > 0:
         # Just upshifted at low speed: ask for what the new gear can give without kicking back down.
         ceiling = min(ceiling, P.UPSHIFT_HOLD_ACCEL)
@@ -247,8 +250,16 @@ class AccelShaper:
 
   def update(self, long_active: bool, plan_accel: float, accel_last: float, sm: StandstillHold,
              standstill: bool, body_hold: bool, v_ego: float, gear_box: int = 0, a_ego: float = 0.,
-             lead_visible: bool = True, gas_pressed: bool = False, long_engaged: bool = False) -> float:
+             lead_visible: bool = True, gas_pressed: bool = False, long_engaged: bool = False,
+             steer_angle: float = 0.) -> float:
     self._update_gear(gear_box, v_ego)
+    if not long_active:
+      self.launch = False  # the driver's own pull-away, or one they took over
+    elif standstill:
+      self.launch = True
+    elif v_ego >= CarControllerParams.LAUNCH_SPEED or plan_accel < 0.:
+      self.launch = False
+    self.straight = abs(steer_angle) <= CarControllerParams.LAUNCH_STEER_MAX
     self._update_kick(plan_accel if long_active else 0.)
     climb = self._update_handover(long_engaged, long_active, standstill, v_ego, a_ego, lead_visible, gas_pressed, plan_accel)
     if sm.just_released:
