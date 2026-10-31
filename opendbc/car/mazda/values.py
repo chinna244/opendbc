@@ -24,6 +24,10 @@ class CarControllerParams:
   STEER_DRIVER_ALLOWANCE = 15     # allowed driver torque before start limiting
   STEER_DRIVER_MULTIPLIER = 15    # weight driver torque, tuned for the 2022 EPS
   STEER_DRIVER_FACTOR = 1         # from dbc
+  # The share of the command given up to a driver pushing against it, the same at every speed.
+  # The headroom above is on the 1200 rail, so it never reached the 620 highway ceiling.
+  STEER_OVERRIDE_BP = [STEER_DRIVER_ALLOWANCE, 50]  # opposing driver torque, counts
+  STEER_OVERRIDE_V = [1., 0.]                       # fraction of the command kept
   STEER_STEP = 1  # 100 Hz
   # Upstream's STEER_MAX, the scale params.toml's tunes, NNLC models and the manual torque override
   # use: latAccelFactor x TUNE_SCALE, friction / TUNE_SCALE.
@@ -39,9 +43,10 @@ class CarControllerParams:
   LONG_STEP = 2        # CRZ_INFO/CRZ_CTRL at 50 Hz, matching stock
   RADAR_STEP = 10      # radar static + track frames at 10 Hz
 
-  FSC_SETTLE_T = 7.0           # the camera's cold-boot radar check settled before the teardown may start
+  FSC_SETTLE_T = 1.0           # two CAM_LANEINFO frames past the camera's boot marker before the teardown may start
   STOCK_RADAR_ALIVE_T = 0.05   # a normal CRZ_INFO gap; it does not establish ownership
   STOCK_RADAR_GUARD_T = 1.27   # silence before ownership is trusted, ~12x the longest stock gap
+  STOCK_RADAR_ACK_GUARD_T = 0.25  # the same once the radar acknowledged our programming request
   CAM_LANEINFO_FRESH_T = 1.5   # longer than one ~2 Hz CAM_LANEINFO period
 
   # The car's lane keep back on, the EPS holds LKAS_BLOCK for ~3 s whatever it is sent.
@@ -147,8 +152,8 @@ class CarControllerParams:
   # ceiling is FIFTH_GEAR_LOW_ACCEL; the model alone asked more for 4 s of 1612 s engaged in 5th under that speed.
   FIFTH_GEAR_LOW_ACCEL = 0.35  # m/s2
   FIFTH_GEAR_LOW_SPEED = 17.9  # m/s, 40 mph
-  ACCEL_BUILD_BP = [3., 6.]   # m/s
-  ACCEL_BUILD_V = [ACCEL_RELEASE_RAMP, 0.8]  # m/s3
+  ACCEL_BUILD_BP = [3., 6., 12., 20.]   # m/s
+  ACCEL_BUILD_V = [ACCEL_RELEASE_RAMP, 0.8, 0.8, 0.6]  # m/s3, stock's own 0.6 at highway speed
   # A rolling gas override zeroes the command, and the plan comes back at the car's own acceleration: the build rate
   # alone took 0.6-1.0 s to catch up, the car sagging from +0.63 to +0.11 m/s2 (median of 29 rolling returns, routes
   # 0000016d-00000175). With no lead shown and the car still pulling, the command climbs at HANDOVER_BUILD up to that

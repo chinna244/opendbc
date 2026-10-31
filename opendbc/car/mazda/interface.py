@@ -81,8 +81,8 @@ class CarInterface(CarInterfaceBase):
     if 0x477 in fingerprint[0]:
       ret.flags |= MazdaFlags.HAS_BSM.value
 
-    # lagd starts from this plus 0.2 s; CX-5 drives learn 0.23-0.26 s request-to-yaw.
-    ret.steerActuatorDelay = 0.05
+    # lagd starts from this plus 0.2 s; CX-5 drives learn 0.30-0.34 s.
+    ret.steerActuatorDelay = 0.14
     ret.steerLimitTimer = 0.8
 
     CarInterface.configure_torque_tune(candidate, ret.lateralTuning)

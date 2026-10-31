@@ -119,12 +119,12 @@ class TestSteerRailSchedule:
 
 class TestSteerSlewSchedule:
   def test_mazda_steer_to_zero_slew(self):
-    # 12 counts/frame both ways over the flat 1200
-    assert get_steer_slew_schedule(cx5_2022_cp()) == ([0.0], [12.0 / 1200.0], [12.0 / 1200.0])
+    # 10 counts/frame both ways over the flat 1200
+    assert get_steer_slew_schedule(cx5_2022_cp()) == ([0.0], [10.0 / 1200.0], [10.0 / 1200.0])
 
   def test_legacy_mazda_slew(self):
-    # legacy firmware on the same EPS hardware: the same 12 counts/frame over the flat 1200
-    assert get_steer_slew_schedule(legacy_fw_cp()) == ([0.0], [12.0 / 1200.0], [12.0 / 1200.0])
+    # legacy firmware on the same EPS hardware: the same 10 counts/frame over the flat 1200
+    assert get_steer_slew_schedule(legacy_fw_cp()) == ([0.0], [10.0 / 1200.0], [10.0 / 1200.0])
 
   @pytest.mark.parametrize("brand", ["tesla", "notabrand"])  # angle steering has no STEER_DELTA_UP/DOWN
   def test_brand_without_rate_limits_returns_none(self, brand):

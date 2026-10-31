@@ -159,7 +159,8 @@ class RadarSessionManager:
           self._transition(RadarSessionState.SILENCED, "requested radar silence")
         elif self.state_frames >= RADAR_SESSION_LIMIT_FRAMES:
           self._silencing_gave_up("timed out")
-        elif self.frame % RADAR_UDS_STEP == 0:
+        elif self.state_frames % RADAR_UDS_STEP == 0:
+          # the first request goes out on entry, retries at the UDS cadence after it
           self.diagnostic_message = create_radar_session_msg(uds.SESSION_TYPE.PROGRAMMING)
           self.programming_sent = True
 

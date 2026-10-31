@@ -47,6 +47,19 @@ class TestRadarSessionBounds:
     for _ in range(10):
       assert m.update(True, True, False, standstill=True, session_refused=False, stock_radar_gone=False) == RadarSessionState.STOCK
 
+  def test_the_first_request_goes_out_on_entry(self):
+    # whatever the controller frame, the takeover does not wait for the UDS cadence
+    m = RadarSessionManager()
+    m.n = 7
+    m.update(True, True, False, standstill=True, session_refused=False, stock_radar_gone=False)
+    assert m.state == RadarSessionState.SILENCING and m.diagnostic_message is not None
+    sent = [m.n]
+    for _ in range(2 * RADAR_UDS_STEP):
+      m.update(True, True, False, standstill=True, session_refused=False, stock_radar_gone=False)
+      if m.diagnostic_message is not None:
+        sent.append(m.n)
+    assert [b - a for a, b in zip(sent[:-1], sent[1:], strict=True)] == [RADAR_UDS_STEP, RADAR_UDS_STEP]
+
   def test_negative_response_gives_up_immediately(self):
     # route 000000fe t+15.0 shows the radar answers a session request within 10 ms, so a
     # negative response is definitive: no reason to burn the silence budget

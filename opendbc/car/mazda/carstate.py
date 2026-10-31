@@ -13,6 +13,7 @@ ButtonType = structs.CarState.ButtonEvent.Type
 FSC_SETTLE_FRAMES = int(CarControllerParams.FSC_SETTLE_T / DT_CTRL)
 STOCK_RADAR_ALIVE_FRAMES = int(CarControllerParams.STOCK_RADAR_ALIVE_T / DT_CTRL)
 STOCK_RADAR_GUARD_FRAMES = round(CarControllerParams.STOCK_RADAR_GUARD_T / DT_CTRL)
+STOCK_RADAR_ACK_GUARD_FRAMES = round(CarControllerParams.STOCK_RADAR_ACK_GUARD_T / DT_CTRL)
 CAM_LANEINFO_FRESH_FRAMES = int(CarControllerParams.CAM_LANEINFO_FRESH_T / DT_CTRL)
 LKAS_REARM_FRAMES = round(CarControllerParams.LKAS_REARM_T / DT_CTRL)
 LKAS_REARM_FAULT_FRAMES = round(CarControllerParams.LKAS_REARM_FAULT_T / DT_CTRL)
@@ -103,6 +104,8 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
     self.cam_laneinfo_stale_frames = CAM_LANEINFO_FRESH_FRAMES
     self.cam_empty_seen = False
     self.radar_session_refused = False
+    # The radar acknowledged this episode's programming request: it is in its bootloader.
+    self.radar_programming_acked = False
     self.fsc_settled_frames = 0
     # The body ECU owns the standstill brake hold.
     self.body_hold = False
@@ -121,8 +124,10 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
 
   @property
   def stock_radar_gone(self) -> bool:
-    # This silence duration establishes radar ownership rather than a dropped frame.
-    return self.radar_bus_healthy and self.stock_radar_silent_frames >= STOCK_RADAR_GUARD_FRAMES
+    # This silence duration establishes radar ownership rather than a dropped frame. A radar
+    # that acknowledged our programming request has left its application, so a shorter one does.
+    guard = STOCK_RADAR_ACK_GUARD_FRAMES if self.radar_programming_acked else STOCK_RADAR_GUARD_FRAMES
+    return self.radar_bus_healthy and self.stock_radar_silent_frames >= guard
 
   def update_lkas_arming(self, lkas_setting_invalid: bool) -> None:
     # Armed on the setting's return (self.lkas_setting_invalid is still last frame's) until the EPS
@@ -277,6 +282,8 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
         self.stock_radar_seen = True
         self.stock_set_allowed = cp.vl_all["CRZ_INFO"]["ACC_SET_ALLOWED"][-1] == 1
         self.stock_radar_silent_frames = 0
+        # stock traffic after an acknowledgement voids it; the full guard applies again
+        self.radar_programming_acked = False
       elif self.radar_bus_healthy:
         self.stock_radar_silent_frames += 1
       else:
@@ -291,6 +298,10 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
       for pci, sid, sub, nrc in zip(resp["PCI"], resp["SID"], resp["SUB"], resp["NRC"], strict=True):
         if pci == 3 and sid == 0x7F and sub == uds.SERVICE_TYPE.DIAGNOSTIC_SESSION_CONTROL and nrc != 0x78:
           self.radar_session_refused = True
+        elif pci == 6 and sid == uds.SERVICE_TYPE.DIAGNOSTIC_SESSION_CONTROL + 0x40 and sub == uds.SESSION_TYPE.PROGRAMMING:
+          self.radar_programming_acked = True
+      # an acknowledgement counts only for the request this episode sent
+      self.radar_programming_acked &= self.radar_session.programming_sent
       # Ownership is established by the silence guard and then held on the controller's claim:
       # the radar stays in its diagnostic session through a bus blip, so recovery does not
       # re-run the guard. Stock traffic ends the claim on the alive window either way.

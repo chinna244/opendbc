@@ -420,6 +420,29 @@ class TestDriverTorqueHeadroom:
       assert full_retreats > 0
 
 
+class TestDriverOverride:
+  """A push against the command keeps the same share of it at every speed."""
+
+  @staticmethod
+  def settle(v_ego, driver_torque):
+    cc = car_controller(alpha_long=False)
+    cs = mazda_car_state(cc.CP, cc.CP_SP)
+    for _ in range(200):
+      actuators, _ = step(cc, cs, long_active=False, enabled=True, lat_active=True, torque=0.3,
+                          v_ego=v_ego, driver_torque=driver_torque, steering_pressed=driver_torque != 0)
+    return actuators.torqueOutputCan
+
+  @pytest.mark.parametrize("v_ego", [3., 15., 30.])
+  def test_the_same_push_keeps_the_same_share_at_every_speed(self, v_ego):
+    full = self.settle(v_ego, 0)
+    assert self.settle(v_ego, -15) == full
+    assert self.settle(v_ego, -32.5) == pytest.approx(full * 0.5, abs=1)
+    assert self.settle(v_ego, -50) == 0
+
+  def test_a_push_with_the_command_keeps_all_of_it(self):
+    assert self.settle(30., 40) == self.settle(30., 0)
+
+
 def test_carstate_first_engage_hold_zeroes_the_steer_command(stock_cc, stock_cs):
   # carstate derives the hold (first engagement of the cycle, standby, crawl); the controller only obeys it
   lat = dict(long_active=False, enabled=True, lat_active=True, torque=-1.0, v_ego=0.3)

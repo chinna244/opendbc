@@ -170,6 +170,11 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
                                           self.params.EPS_CEILING_LOOKUP[1])))
       new_torque = int(np.clip(new_torque, -eps_ceiling, eps_ceiling))
 
+      # Yield a share of the command to a driver pushing against it.
+      driver_opposing = -np.sign(new_torque) * CS.out.steeringTorque
+      new_torque = int(round(new_torque * float(np.interp(driver_opposing, self.params.STEER_OVERRIDE_BP,
+                                                          self.params.STEER_OVERRIDE_V))))
+
       # Use the worst sample plus margin to stay inside panda's fresher driver-torque envelope.
       if new_torque >= 0:
         driver_torque = min(self.driver_torque_samples) - self.params.STEER_DRIVER_MARGIN

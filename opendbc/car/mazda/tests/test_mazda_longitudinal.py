@@ -454,11 +454,12 @@ def test_command_slew_is_rate_limited(cc, cs):
 
 def test_build_rate_follows_stock_by_speed(cc, cs):
   """Stock pulls away from a stop at its 1.22 m/s3 release ramp (+25 raw per 50 Hz frame) and builds
-  accel at 0.59 m/s3 once rolling (+12 raw per frame, 99.3% of rising stock frames across 158 routes); rolling is
-  deliberately a third quicker here. The build rate governs the positive region only; brake
-  release below zero keeps the windup limit."""
+  accel at 0.59 m/s3 once rolling (+12 raw per frame, 99.3% of rising stock frames across 158 routes); in
+  town it is deliberately a third quicker here, at highway speed stock's own. The build rate
+  governs the positive region only; brake release below zero keeps the windup limit."""
   ramp = CarControllerParams.ACCEL_RELEASE_RAMP
-  for v_ego, jerk in ((0., ramp), (3., ramp), (4.5, (ramp + 0.8) / 2), (6., 0.8), (20., 0.8)):
+  for v_ego, jerk in ((0., ramp), (3., ramp), (4.5, (ramp + 0.8) / 2), (6., 0.8), (12., 0.8), (16., 0.7), (20., 0.6),
+                      (30., 0.6)):
     cc.accel_last = 0.
     step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego)
     assert cc.accel_last == pytest.approx(jerk * DT_CTRL, abs=1e-6), f"v_ego={v_ego}"
