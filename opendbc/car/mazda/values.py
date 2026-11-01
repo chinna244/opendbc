@@ -91,8 +91,12 @@ class CarControllerParams:
   # 1.6 under the 1.2 ceiling; under 15 mph the car gives about 0.87 of the command (31 routes, 00000184 to
   # 00000012). From a standstill until LAUNCH_SPEED, a brake request or the wheel past LAUNCH_STEER_MAX, the ceiling
   # is LAUNCH_CEILING_V, meeting ACCEL_CEILING_V by 9 m/s. Turning pull-aways were already harder than the driver's.
+  # A straight pickup rolling under LAUNCH_ROLL_SPEED starts one too: under 10 mph the plan asked a median 1.40 above
+  # the 1.2 ceiling for 12% of the engaged pickup time, nearly all straight with no car ahead (34 routes, 00000184 to
+  # 00000014); the wire met the plan 68% of the time there, about 78% with this.
   LAUNCH_CEILING_V = [1.5, 1.5, 1.35, 1.15, 0.9, 0.8, 0.75, 0.55, 0.55]  # m/s2
   LAUNCH_SPEED = 9.  # m/s, 20 mph
+  LAUNCH_ROLL_SPEED = 4.47  # m/s, 10 mph
   LAUNCH_STEER_MAX = 30.  # deg
   # Under the plan the transmission takes 4th at 19-20 mph and about 1600 rpm (this driver's own 3rd to
   # 4th: 23-26 mph, about 2000 rpm). In routes 00000164-00000166 both 4th-to-3rd kickdowns within 3 s of

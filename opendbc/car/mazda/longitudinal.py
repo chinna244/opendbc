@@ -148,7 +148,7 @@ class AccelShaper:
     self.handover_climb = False  # still climbing to the pull of that return
     self.handover_pull = 0.  # m/s2 the car was pulling at that return
     self.gas_override = False  # engaged, with the gas holding control off since it was last active
-    self.launch = False  # op pulling away from a stop, not yet at LAUNCH_SPEED, no brake request or override since
+    self.launch = False  # op pulling away from a stop or a straight crawl, not yet at LAUNCH_SPEED, no brake request since
     self.straight = True  # the wheel within LAUNCH_STEER_MAX
 
   def _update_gear(self, gear_box: int, v_ego: float) -> None:
@@ -255,7 +255,8 @@ class AccelShaper:
     self._update_gear(gear_box, v_ego)
     if not long_active:
       self.launch = False  # the driver's own pull-away, or one they took over
-    elif standstill:
+    elif standstill or (v_ego < CarControllerParams.LAUNCH_ROLL_SPEED and plan_accel >= 0. and
+                        abs(steer_angle) <= CarControllerParams.LAUNCH_STEER_MAX):
       self.launch = True
     elif v_ego >= CarControllerParams.LAUNCH_SPEED or plan_accel < 0.:
       self.launch = False

@@ -490,8 +490,9 @@ def test_ceiling_follows_stock_by_speed(cc, cs):
   assert all(np.interp(x, bp, v) <= np.interp(x, stock_bp, stock_p99) + 1e-9 for x in sorted({*bp, *stock_bp}))
   for v_ego, ceiling in ((4., 1.2), (9., 0.9), (13.5, 0.75), (18., 0.55), (35., 0.55)):
     cc.accel_last = 2.0
-    for _ in range(seconds(1.0)):  # settles through the lift limit
-      step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego)
+    for _ in range(seconds(1.0)):  # settles through the lift limit; a crawl turns, so it is no launch
+      step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego,
+                steer_angle=45. if v_ego < CarControllerParams.LAUNCH_ROLL_SPEED else 0.)
     assert cc.accel_last == pytest.approx(ceiling, abs=1e-6), f"v_ego={v_ego}"
   # the ceiling shapes the plan; a plan under it passes through
   cc.accel_last = 0.5
@@ -524,27 +525,74 @@ def test_turning_launch_keeps_the_stock_ceiling(cc, cs, steer_angle):
   assert cc.accel_last == pytest.approx(1.2, abs=1e-6)
 
 
+def _stock_ceiling(v_ego):
+  return float(np.interp(v_ego, CarControllerParams.ACCEL_CEILING_BP, CarControllerParams.ACCEL_CEILING_V))
+
+
 def test_launch_ceiling_ends_at_a_brake_request_or_launch_speed(cc, cs):
+  v_ego = CarControllerParams.LAUNCH_ROLL_SPEED + 0.5  # rolling too fast to start one again
   _pull_away(cc, cs)
-  step_long(cc, cs, accel=-0.1, cruise_engaged=True, v_ego=2.)
+  step_long(cc, cs, accel=-0.1, cruise_engaged=True, v_ego=v_ego)
   for _ in range(seconds(1.5)):
-    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=2.)
-  assert cc.accel_last == pytest.approx(1.2, abs=1e-6)  # rolling pickup, not a launch
+    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego)
+  assert cc.accel_last == pytest.approx(_stock_ceiling(v_ego), abs=1e-6)  # rolling pickup, not a launch
   _pull_away(cc, cs)
   step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=CarControllerParams.LAUNCH_SPEED)
   cc.accel_last = 2.0
   for _ in range(seconds(1.0)):
-    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=2.)
-  assert cc.accel_last == pytest.approx(1.2, abs=1e-6)
+    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego)
+  assert cc.accel_last == pytest.approx(_stock_ceiling(v_ego), abs=1e-6)
 
 
 def test_launch_ceiling_ends_at_a_gas_override(cc, cs):
-  """A pull-away the driver took over on the gas returns to the stock ceiling, not the launch one."""
+  """A pull-away the driver took over on the gas returns to the stock ceiling past LAUNCH_ROLL_SPEED (under it, a
+  straight pickup starts one again)."""
   step_long(cc, cs, accel=-0.5, cruise_engaged=True, standstill=True, v_ego=0.)
-  step_long(cc, cs, long_active=False, enabled=True, accel=0., gas=True, cruise_engaged=True, v_ego=2.)
+  v_ego = CarControllerParams.LAUNCH_ROLL_SPEED + 0.5
+  step_long(cc, cs, long_active=False, enabled=True, accel=0., gas=True, cruise_engaged=True, v_ego=v_ego)
   for _ in range(seconds(1.5)):
-    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=2.)
-  assert cc.accel_last == pytest.approx(1.2, abs=1e-6)
+    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego)
+  assert cc.accel_last == pytest.approx(_stock_ceiling(v_ego), abs=1e-6)
+
+
+def test_straight_crawl_pickup_takes_the_launch_ceiling(cc, cs):
+  """A straight pickup rolling under LAUNCH_ROLL_SPEED, never stopped, gets the launch ceiling through LAUNCH_SPEED."""
+  P = CarControllerParams
+  for _ in range(seconds(1.5)):
+    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=3.)
+  assert cc.accel_last == pytest.approx(1.5, abs=1e-6)
+  cc.accel_last = 2.0
+  for _ in range(seconds(1.0)):
+    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=7.)
+  assert cc.accel_last == pytest.approx(np.interp(7., P.ACCEL_CEILING_BP, P.LAUNCH_CEILING_V), abs=1e-6)
+  assert np.interp(7., P.ACCEL_CEILING_BP, P.LAUNCH_CEILING_V) > _stock_ceiling(7.)
+
+
+@pytest.mark.parametrize("steer_angle, v_ego", [(45., 3.), (0., CarControllerParams.LAUNCH_ROLL_SPEED + 0.5)])
+def test_turning_or_faster_pickup_keeps_the_stock_ceiling(cc, cs, steer_angle, v_ego):
+  for _ in range(seconds(1.5)):
+    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego, steer_angle=steer_angle)
+  assert cc.accel_last == pytest.approx(_stock_ceiling(v_ego), abs=1e-6)
+
+
+@pytest.mark.parametrize("accel, steer_angle", [(-0.5, 0.), (2.0, 45.)])
+def test_braking_or_turning_crawl_starts_no_launch(cc, cs, accel, steer_angle):
+  """Only a straight pickup under LAUNCH_ROLL_SPEED starts one: a crawl braking or turning, picking up past it, does not."""
+  for _ in range(seconds(0.5)):
+    step_long(cc, cs, accel=accel, cruise_engaged=True, v_ego=3., steer_angle=steer_angle)
+  v_ego = CarControllerParams.LAUNCH_ROLL_SPEED + 1.5
+  cc.accel_last = 2.0
+  for _ in range(seconds(1.5)):
+    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego)
+  assert cc.accel_last == pytest.approx(_stock_ceiling(v_ego), abs=1e-6)
+
+
+def test_crawl_launch_ceiling_never_raises_a_brake(cc, cs):
+  for _ in range(seconds(1.5)):
+    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=3.)
+  for _ in range(seconds(0.5)):
+    step_long(cc, cs, accel=-1.0, cruise_engaged=True, v_ego=3.)
+  assert cc.accel_last < 0.
 
 
 def test_launch_ceiling_never_raises_a_brake(cc, cs):
