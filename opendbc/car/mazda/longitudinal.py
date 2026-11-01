@@ -139,9 +139,10 @@ class AccelShaper:
     self.breakaway_frames = 0
     self.gear = 0  # last forward gear seen
     self.upshift_hold_frames = 0
-    self.kick_frames = 0  # frames in 6th the plan has asked for a kick
-    self.kick = False  # 6th's cap lifted for one deliberate downshift
-    self.kick_cooldown = 0
+    self.kick_frames = 0  # frames this gear's cap has held back a catch-up ask
+    self.kick_from = 0  # the gear whose cap is lifted for one deliberate downshift, 0 for none
+    self.kick_cooldown = 0  # frames left after an upshift into 4th or above before any kick
+    self.shifting = False  # mid-shift: the gear read is the one it is leaving
     self.long_active_last = False
     self.handover_frames = 0  # frames left of a rolling return from a gas override
     self.baseline = 0.  # the command the shaper would have sent without the handover climb
@@ -156,14 +157,18 @@ class AccelShaper:
       self.upshift_hold_frames -= 1
     if self.kick_cooldown > 0:
       self.kick_cooldown -= 1
+    self.shifting = gear_box == 15
     if not 1 <= gear_box <= 6:
       if gear_box != 15:  # mid-shift keeps the gear it left
-        self.gear = 0
+        self.gear, self.kick_from = 0, 0
       return
     if gear_box != self.gear:
-      self.kick_frames, self.kick = 0, False
-      if gear_box == 6 and self.gear:
-        self.kick_cooldown = CarControllerParams.SIXTH_KICK_COOLDOWN_FRAMES
+      self.kick_frames = 0
+      if self.gear and gear_box > self.gear:
+        if gear_box >= self.kick_from:
+          self.kick_from = 0  # back up in the gear it kicked from
+        if gear_box >= 4:
+          self.kick_cooldown = CarControllerParams.KICK_COOLDOWN_FRAMES
     if self.gear and gear_box > self.gear and gear_box >= CarControllerParams.UPSHIFT_HOLD_MIN_GEAR and \
        v_ego < CarControllerParams.UPSHIFT_HOLD_SPEED:
       self.upshift_hold_frames = CarControllerParams.UPSHIFT_HOLD_FRAMES
@@ -171,16 +176,47 @@ class AccelShaper:
       self.upshift_hold_frames = 0
     self.gear = gear_box
 
-  def _update_kick(self, plan_accel: float) -> None:
+  def _gear_cap(self, gear: int, v_ego: float) -> float | None:
+    """The push this gear takes without kicking down, None where stock's ceiling is the only limit."""
     P = CarControllerParams
-    if self.gear != 6 or self.kick_cooldown > 0 or plan_accel < P.SIXTH_KICK_RELEASE:
-      self.kick_frames, self.kick = 0, False
-    elif plan_accel >= P.SIXTH_KICK_ACCEL:
-      self.kick_frames += 1
-      self.kick = self.kick or self.kick_frames >= P.SIXTH_KICK_FRAMES
-    elif not self.kick:
-      # an armed kick holds down to the release; a partial count does not wait out a softer stretch
+    if gear == 4:
+      # In 4th: stay under the push that kicks it down to 3rd, a lighter one over city speed.
+      return P.FOURTH_GEAR_ACCEL if v_ego < P.FOURTH_GEAR_SPEED else P.FOURTH_GEAR_HIGH_ACCEL
+    if gear == 5:
+      # In 5th: stay under the push that drops it to 4th and back, a lighter one at low rpm.
+      return P.FIFTH_GEAR_LOW_ACCEL if v_ego < P.FIFTH_GEAR_LOW_SPEED else P.FIFTH_GEAR_ACCEL
+    if gear == 6:
+      # Settled in 6th: stay under the push that drops it to 5th.
+      return P.SIXTH_GEAR_ACCEL
+    if gear == 0 and v_ego >= P.FOURTH_GEAR_SPEED:
+      # Gear unknown at speed: the push no gear here kicks down at.
+      return P.FIFTH_GEAR_ACCEL
+    return None
+
+  @staticmethod
+  def _kick_push(gear: int, v_ego: float) -> float:
+    """The push while kicked from this gear: stock's ceiling, under the kick's own limit."""
+    P = CarControllerParams
+    return min(float(np.interp(v_ego, P.ACCEL_CEILING_BP, P.ACCEL_CEILING_V)), P.KICK_ACCEL.get(gear, P.ACCEL_MAX))
+
+  def _update_kick(self, long_active: bool, plan_accel: float, v_ego: float, v_set: float) -> None:
+    P = CarControllerParams
+    easing_before_the_shift = self.gear == self.kick_from and not self.shifting and plan_accel < P.KICK_RELEASE
+    if not long_active or plan_accel < 0. or easing_before_the_shift:
+      # a brake request or losing control ends a kick, and an ask that eases before the downshift starts does
+      self.kick_from = 0
+    cap = self._gear_cap(self.gear, v_ego)
+    # only where dropping a gear gives a real push over this gear's cap
+    holding = cap is not None and self.gear >= 4 and self._kick_push(self.gear, v_ego) >= cap + P.KICK_MARGIN
+    catching_up = 0. < v_set < P.KICK_SET_SPEED_MAX and v_set - v_ego >= P.KICK_DEFICIT
+    if self.kick_from or not long_active or not holding or self.kick_cooldown > 0 or not catching_up or \
+       plan_accel < cap + P.KICK_MARGIN:
+      # a partial count does not wait out a softer stretch
       self.kick_frames = 0
+    else:
+      self.kick_frames += 1
+      if self.kick_frames >= P.KICK_FRAMES:
+        self.kick_from, self.kick_frames = self.gear, 0
 
   def _update_handover(self, long_engaged: bool, long_active: bool, standstill: bool, v_ego: float, a_ego: float,
                        lead_visible: bool, gas_pressed: bool, plan_accel: float) -> bool:
@@ -213,16 +249,13 @@ class AccelShaper:
       if self.upshift_hold_frames > 0:
         # Just upshifted at low speed: ask for what the new gear can give without kicking back down.
         ceiling = min(ceiling, P.UPSHIFT_HOLD_ACCEL)
-      # The gear's own cap applies with or without the hold: the lower one wins.
-      if self.gear == 4 and v_ego < P.FOURTH_GEAR_SPEED:
-        # In 4th at city speed: stay under the push that kicks it down to 3rd.
-        ceiling = min(ceiling, P.FOURTH_GEAR_ACCEL)
-      elif self.gear == 6 and not self.kick:
-        # Settled in 6th: stay under the push that drops it to 5th, unless the plan asked for a kick.
-        ceiling = min(ceiling, P.SIXTH_GEAR_ACCEL)
-      elif self.gear == 5:
-        # In 5th: stay under the push that drops it to 4th and back, a lighter one at low rpm.
-        ceiling = min(ceiling, P.FIFTH_GEAR_LOW_ACCEL if v_ego < P.FIFTH_GEAR_LOW_SPEED else P.FIFTH_GEAR_ACCEL)
+      # The gear's own cap applies with or without the hold: the lower one wins. A kick lifts the cap of the gear it
+      # kicked from to a push the gear below holds; the lower gears keep their own caps.
+      cap = None if self.kick_from and self.gear == self.kick_from else self._gear_cap(self.gear, v_ego)
+      if cap is not None:
+        ceiling = min(ceiling, cap)
+      if self.kick_from in P.KICK_ACCEL:
+        ceiling = min(ceiling, P.KICK_ACCEL[self.kick_from])
       build = float(np.interp(v_ego, P.ACCEL_BUILD_BP, P.ACCEL_BUILD_V)) * DT_CTRL
       step_cap = max(last, 0.) + build
       if climb:
@@ -251,7 +284,7 @@ class AccelShaper:
   def update(self, long_active: bool, plan_accel: float, accel_last: float, sm: StandstillHold,
              standstill: bool, body_hold: bool, v_ego: float, gear_box: int = 0, a_ego: float = 0.,
              lead_visible: bool = True, gas_pressed: bool = False, long_engaged: bool = False,
-             steer_angle: float = 0.) -> float:
+             steer_angle: float = 0., v_set: float = 0.) -> float:
     self._update_gear(gear_box, v_ego)
     if not long_active:
       self.launch = False  # the driver's own pull-away, or one they took over
@@ -261,7 +294,7 @@ class AccelShaper:
     elif v_ego >= CarControllerParams.LAUNCH_SPEED or plan_accel < 0.:
       self.launch = False
     self.straight = abs(steer_angle) <= CarControllerParams.LAUNCH_STEER_MAX
-    self._update_kick(plan_accel if long_active else 0.)
+    self._update_kick(long_active, plan_accel, v_ego, v_set)
     climb = self._update_handover(long_engaged, long_active, standstill, v_ego, a_ego, lead_visible, gas_pressed, plan_accel)
     if sm.just_released:
       # Never-latched stops relax in one frame; latched holds ramp from the relaxed command.

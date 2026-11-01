@@ -133,7 +133,7 @@ def car_state(standstill=False, gas=False, brake_pressed=False, v_ego=0., a_ego=
 
 def car_control(enabled=None, long_active=True, lat_active=False, accel=0.5, torque=0.,
                 long_state=LongCtrlState.pid, cancel=False, resume=False, lead_visible=True, gap=2,
-                visual_alert=VisualAlert.none):
+                visual_alert=VisualAlert.none, set_speed=0.):
   """structs.CarControl reader, as card hands it to the controller. openpilot is enabled
   whenever it is longitudinally active; a gas override is the case where it stays enabled
   with longActive low."""
@@ -149,6 +149,7 @@ def car_control(enabled=None, long_active=True, lat_active=False, accel=0.5, tor
   cc.hudControl.leadVisible = lead_visible
   cc.hudControl.leadDistanceBars = gap
   cc.hudControl.visualAlert = visual_alert
+  cc.hudControl.setSpeed = set_speed
   return cc.as_reader()
 
 

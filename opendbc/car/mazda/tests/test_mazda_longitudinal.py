@@ -488,10 +488,10 @@ def test_ceiling_follows_stock_by_speed(cc, cs):
   bp, v = CarControllerParams.ACCEL_CEILING_BP, CarControllerParams.ACCEL_CEILING_V
   stock_bp, stock_p99 = (0., 4., 9., 14., 18., 25.), (1.5, 1.75, 1.45, 1.05, 0.85, 0.65)
   assert all(np.interp(x, bp, v) <= np.interp(x, stock_bp, stock_p99) + 1e-9 for x in sorted({*bp, *stock_bp}))
-  for v_ego, ceiling in ((4., 1.2), (9., 0.9), (13.5, 0.75), (18., 0.55), (35., 0.55)):
+  for v_ego, ceiling in ((4., 1.2), (9., 0.95), (13.5, 0.85), (18., 0.75), (22., 0.6), (35., 0.55)):
     cc.accel_last = 2.0
     for _ in range(seconds(1.0)):  # settles through the lift limit; a crawl turns, so it is no launch
-      step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego,
+      step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego, gear_box=3,  # 3rd: no gear cap
                 steer_angle=45. if v_ego < CarControllerParams.LAUNCH_ROLL_SPEED else 0.)
     assert cc.accel_last == pytest.approx(ceiling, abs=1e-6), f"v_ego={v_ego}"
   # the ceiling shapes the plan; a plan under it passes through
@@ -687,7 +687,7 @@ def test_upshift_hold_ends_on_a_downshift_and_never_holds_braking(cc, cs):
   (4, 9.0, True),
   (4, 13.5, True),    # route 0000018f: 0.69 at 30.2 mph kicked it down to 3rd and back
   (4, 15.5, True),
-  (4, 15.7, False),   # over 35 mph: stock's own ceiling
+  (4, 15.7, True),    # over 35 mph: the lighter high cap
   (3, 11.5, False),
   (5, 11.5, False),
   (0, 11.5, False),   # gear not seen
@@ -697,7 +697,8 @@ def test_settled_4th_stays_under_the_kickdown_push(cc, cs, gear, v_ego, capped):
   ceiling = float(np.interp(v_ego, P.ACCEL_CEILING_BP, P.ACCEL_CEILING_V))
   for _ in range(seconds(2.0)):
     step_long(cc, cs, accel=0.8, cruise_engaged=True, v_ego=v_ego, gear_box=gear)
-  expected = min(0.8, ceiling, P.FOURTH_GEAR_ACCEL) if capped else min(0.8, ceiling)
+  cap = P.FOURTH_GEAR_ACCEL if v_ego < P.FOURTH_GEAR_SPEED else P.FOURTH_GEAR_HIGH_ACCEL
+  expected = min(0.8, ceiling, cap) if capped else min(0.8, ceiling)
   if gear == 5:
     expected = min(expected, P.FIFTH_GEAR_LOW_ACCEL)  # 26 mph: 5th's low-rpm cap
   assert cc.accel_last == pytest.approx(expected, abs=1e-6)
@@ -771,67 +772,228 @@ def test_an_upshift_hold_into_5th_still_keeps_5ths_cap(cc, cs):
   assert cc.accel_last == pytest.approx(min(P.UPSHIFT_HOLD_ACCEL, P.FIFTH_GEAR_LOW_ACCEL), abs=1e-6)
 
 
-def test_a_sustained_big_ask_in_6th_gets_one_kick(cc, cs):
+def drive(cc, cs, n, accel, gear, v_ego, set_speed, **kwargs):
+  for _ in range(n):
+    step_long(cc, cs, accel=accel, cruise_engaged=True, v_ego=v_ego, gear_box=gear, set_speed=set_speed, **kwargs)
+
+
+def test_a_catch_up_in_6th_kicks_down_one_gear_and_pulls_there(cc, cs):
+  # routes 00000021 t=787 and 00000022 t=1247: the plan asked 0.47-0.49 at 58-62 mph with the set speed 67-81, and
+  # 6th's cap held it to 0.2 (62->76 mph in 26 s)
   P = CarControllerParams
-  ceiling = float(np.interp(30., P.ACCEL_CEILING_BP, P.ACCEL_CEILING_V))
-
-  def run(n, accel, gear=6):
-    for _ in range(n):
-      step_long(cc, cs, accel=accel, cruise_engaged=True, v_ego=30., gear_box=gear)
-  run(seconds(2.0), 0.3)
-  assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)  # a modest ask stays capped
-  run(P.SIXTH_KICK_FRAMES - 1, 1.3)
-  assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)  # not before a full second
-  run(seconds(1.0), 1.3)
-  assert cc.accel_last == pytest.approx(min(1.3, ceiling), abs=1e-6)  # the kick: the cap is lifted
-  run(seconds(1.0), 0.3)
-  assert cc.accel_last == pytest.approx(min(0.3, ceiling), abs=1e-6)  # lasts while the plan still asks
-  run(seconds(1.0), 0.2)
-  assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)  # released under SIXTH_KICK_RELEASE
-
-
-def test_two_short_big_asks_in_6th_do_not_add_up_to_a_kick(cc, cs):
-  # review: 0.5 s at 0.6, 30 s at 0.3, 0.5 s at 0.6 kicked on the second half-second (asks now over the 1.2 threshold)
-  P = CarControllerParams
-
-  def run(n, accel):
-    for _ in range(n):
-      step_long(cc, cs, accel=accel, cruise_engaged=True, v_ego=30., gear_box=6)
-  run(seconds(1.0), 0.3)
-  run(seconds(0.5), 1.3)
-  run(seconds(30.0), 0.3)
-  run(seconds(0.5), 1.3)
-  assert not cc.accel_shaper.kick
+  v, v_set = 27., 31.
+  drive(cc, cs, seconds(2.0), 0.5, 6, v, v_set)
+  assert cc.accel_shaper.kick_from == 6  # a full second over the cap
+  drive(cc, cs, P.KICK_FRAMES - 1, 0.5, 6, v, v_set)
+  assert cc.accel_last == pytest.approx(P.KICK_ACCEL[6], abs=1e-6)  # the push 5th holds, not the plan's 0.5
+  drive(cc, cs, seconds(5.0), 0.5, 5, v, v_set)
+  assert cc.accel_last == pytest.approx(P.KICK_ACCEL[6], abs=1e-6)  # in 5th: under 5th's own 0.55, no drop to 4th
+  assert cc.accel_shaper.kick_from == 6
+  drive(cc, cs, seconds(1.0), 0.5, 6, v, v_set)
+  assert cc.accel_shaper.kick_from == 0  # back up in 6th: the kick is over
+  assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)
+  drive(cc, cs, P.KICK_COOLDOWN_FRAMES - seconds(2.0), 0.5, 6, v, v_set)
+  assert cc.accel_shaper.kick_from == 0  # no second kick inside the cooldown
   assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)
 
 
-def test_back_in_6th_the_cap_holds_through_the_cooldown(cc, cs):
+def test_the_kick_waits_a_full_second_of_asking(cc, cs):
   P = CarControllerParams
-
-  def run(n, accel, gear):
-    for _ in range(n):
-      step_long(cc, cs, accel=accel, cruise_engaged=True, v_ego=30., gear_box=gear)
-  run(seconds(1.0), 1.3, 5)
-  run(P.SIXTH_KICK_COOLDOWN_FRAMES - P.SIXTH_KICK_FRAMES, 1.3, 6)  # still asking, but just upshifted
+  drive(cc, cs, seconds(2.0), 0.3, 6, 27., 31.)
+  drive(cc, cs, P.KICK_FRAMES - 1, 0.5, 6, 27., 31.)
+  assert cc.accel_shaper.kick_from == 0
   assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)
-  run(P.SIXTH_KICK_FRAMES + seconds(2.0), 1.3, 6)  # the cooldown ends, then a full second of asking
-  assert cc.accel_last > P.SIXTH_GEAR_ACCEL + 0.1
+  drive(cc, cs, 1, 0.5, 6, 27., 31.)
+  assert cc.accel_shaper.kick_from == 6
 
-def test_a_far_lead_catch_up_in_6th_does_not_kick(cc, cs):
-  # routes 00000184 and 00000186: the gap boost and floor asked 0.55-0.65 for over a second (peaks to 0.78) with the
-  # model at 0.12-0.42, and the kick took 6th to 5th and 4th; a catch-up ask just under the threshold stays capped
+
+def test_short_asks_do_not_add_up_to_a_kick(cc, cs):
   P = CarControllerParams
-
-  def run(n, accel):
-    for _ in range(n):
-      step_long(cc, cs, accel=accel, cruise_engaged=True, v_ego=27., gear_box=6)
-  run(seconds(1.0), 0.3)
-  run(seconds(5.0), 0.69)
-  assert not cc.accel_shaper.kick
-  # routes 0000018b and 0000018f: the boosts peaked at 0.96 and held 0.74-0.81 for over a second, and kicked at 0.7
-  run(seconds(5.0), 1.19)
-  assert not cc.accel_shaper.kick
+  for _ in range(10):
+    drive(cc, cs, P.KICK_FRAMES // 2, 0.6, 6, 27., 31.)
+    drive(cc, cs, seconds(0.5), 0.3, 6, 27., 31.)
+  assert cc.accel_shaper.kick_from == 0
   assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)
+
+
+@pytest.mark.parametrize("v_set", [
+  0.,                    # no set speed
+  255. / 3.6,            # unset: 255 km/h on the cluster
+  27. + 2.1,             # under 5 mph to the set speed: the plan's ask is about to end
+])
+def test_no_kick_without_a_real_catch_up(cc, cs, v_set):
+  P = CarControllerParams
+  drive(cc, cs, seconds(5.0), 1.3, 6, 27., v_set)
+  assert cc.accel_shaper.kick_from == 0
+  assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)
+
+
+def test_no_kick_for_an_ask_just_over_the_cap(cc, cs):
+  P = CarControllerParams
+  drive(cc, cs, seconds(5.0), P.SIXTH_GEAR_ACCEL + P.KICK_MARGIN - 0.01, 6, 27., 31.)
+  assert cc.accel_shaper.kick_from == 0
+
+
+def test_a_kick_never_passes_the_plan(cc, cs):
+  drive(cc, cs, seconds(2.0), 0.5, 6, 27., 31.)
+  drive(cc, cs, seconds(2.0), 0.3, 5, 27., 31.)
+  assert cc.accel_shaper.kick_from == 6
+  assert cc.accel_last == pytest.approx(0.3, abs=1e-6)
+
+
+def test_an_ask_easing_before_the_downshift_ends_the_kick(cc, cs):
+  P = CarControllerParams
+  drive(cc, cs, seconds(2.0), 0.5, 6, 27., 31.)
+  drive(cc, cs, 1, P.KICK_RELEASE - 0.01, 6, 27., 31.)
+  assert cc.accel_shaper.kick_from == 0
+  drive(cc, cs, seconds(1.0), 0.3, 6, 27., 31.)  # under the margin again: back under 6th's cap
+  assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)
+
+
+def test_after_the_downshift_an_easing_ask_keeps_the_kick(cc, cs):
+  # in 5th the kick only ever lowers the push, so it lasts until the car is back up in 6th
+  P = CarControllerParams
+  drive(cc, cs, seconds(2.0), 0.5, 6, 27., 31.)
+  drive(cc, cs, seconds(2.0), 0.1, 5, 27., 31.)
+  assert cc.accel_shaper.kick_from == 6
+  drive(cc, cs, seconds(2.0), 0.9, 5, 27., 31.)
+  assert cc.accel_last == pytest.approx(P.KICK_ACCEL[6], abs=1e-6)
+
+
+@pytest.mark.parametrize("end", ["brake", "gas", "disengage"])
+def test_a_brake_request_or_losing_control_ends_the_kick(cc, cs, end):
+  drive(cc, cs, seconds(2.0), 0.5, 6, 27., 31.)
+  assert cc.accel_shaper.kick_from == 6
+  if end == "brake":
+    drive(cc, cs, 1, -0.1, 5, 27., 31.)
+  else:
+    drive(cc, cs, 1, 0.5, 5, 27., 31., long_active=False, enabled=(end == "gas"))
+  assert cc.accel_shaper.kick_from == 0
+  assert cc.accel_shaper.kick_frames == 0
+
+
+def test_a_double_drop_keeps_the_kick_push_until_back_in_6th(cc, cs):
+  P = CarControllerParams
+  drive(cc, cs, seconds(2.0), 0.6, 6, 27., 31.)
+  for gear in (5, 4, 5):
+    drive(cc, cs, seconds(2.0), 0.6, gear, 27., 31.)
+    assert cc.accel_shaper.kick_from == 6
+    assert cc.accel_last == pytest.approx(P.KICK_ACCEL[6], abs=1e-6)
+  drive(cc, cs, seconds(1.0), 0.6, 6, 27., 31.)
+  assert cc.accel_shaper.kick_from == 0
+
+
+def test_after_an_upshift_into_6th_no_kick_through_the_cooldown(cc, cs):
+  P = CarControllerParams
+  drive(cc, cs, seconds(1.0), 0.6, 5, 25., 31.)
+  drive(cc, cs, P.KICK_COOLDOWN_FRAMES - 1, 0.6, 6, 25., 31.)
+  assert cc.accel_shaper.kick_from == 0
+  assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)
+  drive(cc, cs, P.KICK_FRAMES + 1, 0.6, 6, 25., 31.)  # the cooldown ends, then a full second of asking
+  assert cc.accel_shaper.kick_from == 6
+
+
+def test_a_catch_up_in_5th_at_low_rpm_kicks_down_to_4th(cc, cs):
+  # route 00000020 t=27: the plan asked 0.72 at 29-40 mph in 5th and got 5th's low-rpm 0.35 for 14 s
+  P = CarControllerParams
+  v, v_set = 13., 23.  # 29 mph, set 52
+  ceiling = float(np.interp(v, P.ACCEL_CEILING_BP, P.ACCEL_CEILING_V))
+  drive(cc, cs, P.KICK_FRAMES - 1, 0.8, 5, v, v_set)
+  assert cc.accel_last == pytest.approx(P.FIFTH_GEAR_LOW_ACCEL, abs=1e-6)
+  drive(cc, cs, seconds(2.0), 0.8, 5, v, v_set)
+  assert cc.accel_shaper.kick_from == 5
+  assert cc.accel_last == pytest.approx(min(ceiling, P.KICK_ACCEL[5]), abs=1e-6)
+  drive(cc, cs, seconds(2.0), 0.8, 4, v, v_set)
+  assert cc.accel_last == pytest.approx(min(ceiling, P.FOURTH_GEAR_ACCEL), abs=1e-6)  # 4th's own cap
+  drive(cc, cs, seconds(1.0), 0.8, 5, v, v_set)
+  assert cc.accel_shaper.kick_from == 0
+  assert cc.accel_last == pytest.approx(P.FIFTH_GEAR_LOW_ACCEL, abs=1e-6)
+
+
+def test_a_catch_up_in_4th_kicks_down_to_3rd_under_stocks_ceiling(cc, cs):
+  P = CarControllerParams
+  v, v_set = 11.5, 16.
+  ceiling = float(np.interp(v, P.ACCEL_CEILING_BP, P.ACCEL_CEILING_V))
+  drive(cc, cs, seconds(3.0), 1.0, 4, v, v_set)
+  assert cc.accel_shaper.kick_from == 4
+  assert cc.accel_last == pytest.approx(ceiling, abs=1e-6)
+  drive(cc, cs, seconds(2.0), 1.0, 3, v, v_set)
+  assert cc.accel_last == pytest.approx(ceiling, abs=1e-6)
+
+
+@pytest.mark.parametrize("gear, v_ego", [
+  (5, 20.),   # 45 mph: 4th holds no more than 5th
+  (4, 23.),   # 51 mph: stock's ceiling is barely over 4th's high cap
+  (3, 11.5),  # 3rd has no cap
+])
+def test_no_kick_where_no_gear_cap_holds_the_plan(cc, cs, gear, v_ego):
+  drive(cc, cs, seconds(3.0), 1.0, gear, v_ego, v_ego + 8.)
+  assert cc.accel_shaper.kick_from == 0
+
+
+@pytest.mark.parametrize("v_ego, capped", [(15.5, False), (16., True), (20., True)])
+def test_an_unknown_gear_at_speed_keeps_the_old_highway_ceiling(cc, cs, v_ego, capped):
+  # review: the old ceiling's 0.55 from 40 mph covered a gear read that is not a forward gear
+  P = CarControllerParams
+  ceiling = float(np.interp(v_ego, P.ACCEL_CEILING_BP, P.ACCEL_CEILING_V))
+  drive(cc, cs, seconds(2.5), 1.0, 0, v_ego, v_ego + 8.)
+  assert cc.accel_shaper.kick_from == 0 and cc.accel_shaper.kick_frames == 0
+  assert cc.accel_last == pytest.approx(min(ceiling, P.FIFTH_GEAR_ACCEL) if capped else ceiling, abs=1e-6)
+
+
+def test_a_catch_up_in_4th_over_35_mph_kicks_down_to_3rd(cc, cs):
+  P = CarControllerParams
+  v, v_set = 17., 23.  # 38 mph, set 52
+  ceiling = float(np.interp(v, P.ACCEL_CEILING_BP, P.ACCEL_CEILING_V))
+  drive(cc, cs, P.KICK_FRAMES - 1, 0.9, 4, v, v_set)
+  assert cc.accel_last == pytest.approx(P.FOURTH_GEAR_HIGH_ACCEL, abs=1e-6)
+  drive(cc, cs, seconds(2.0), 0.9, 4, v, v_set)
+  assert cc.accel_shaper.kick_from == 4
+  assert cc.accel_last == pytest.approx(ceiling, abs=1e-6)
+
+
+@pytest.mark.parametrize("v_ego", [18.0, 20.])  # 40 mph, where stock's ceiling is 0.75, and 45 mph
+def test_no_kick_from_5th_over_40_mph_where_4th_gives_no_more(cc, cs, v_ego):
+  P = CarControllerParams
+  drive(cc, cs, seconds(3.0), 0.9, 5, v_ego, v_ego + 8.)
+  assert cc.accel_shaper.kick_from == 0
+  assert cc.accel_last == pytest.approx(P.FIFTH_GEAR_ACCEL, abs=1e-6)
+
+
+def test_an_easing_ask_mid_shift_keeps_the_kick(cc, cs):
+  # review: the transmission has already left 6th, so 5th must still get the kick's push, not its own 0.55
+  P = CarControllerParams
+  drive(cc, cs, seconds(2.0), 0.5, 6, 27., 31.)
+  drive(cc, cs, 2, P.KICK_RELEASE - 0.01, 15, 27., 31.)
+  assert cc.accel_shaper.kick_from == 6
+  drive(cc, cs, seconds(2.0), 0.6, 5, 27., 31.)
+  assert cc.accel_last == pytest.approx(P.KICK_ACCEL[6], abs=1e-6)
+
+
+def test_a_gear_read_that_is_not_a_forward_gear_ends_the_kick(cc, cs):
+  # review: after gear 0 the next gear is not seen as an upshift, so the kick could outlive its gear
+  drive(cc, cs, seconds(2.0), 0.5, 6, 27., 31.)
+  drive(cc, cs, 1, 0.5, 0, 27., 31.)
+  assert cc.accel_shaper.kick_from == 0
+
+
+def test_after_a_6th_kick_5th_under_40_mph_keeps_its_own_lower_cap(cc, cs):
+  P = CarControllerParams
+  drive(cc, cs, seconds(2.0), 0.5, 6, 17., 23.)
+  assert cc.accel_shaper.kick_from == 6
+  drive(cc, cs, seconds(2.0), 0.5, 5, 17., 23.)
+  assert cc.accel_last == pytest.approx(P.FIFTH_GEAR_LOW_ACCEL, abs=1e-6)
+
+
+def test_braking_from_a_kick_moves_at_the_full_wind_down_rate(cc, cs):
+  P = CarControllerParams
+  drive(cc, cs, seconds(2.0), 0.5, 6, 27., 31.)  # 6th: arms, pushes 0.4
+  drive(cc, cs, seconds(1.0), 0.5, 5, 27., 31.)
+  assert cc.accel_last == pytest.approx(P.KICK_ACCEL[6], abs=1e-6)
+  drive(cc, cs, 1, -1.5, 5, 27., 31.)
+  assert cc.accel_last == pytest.approx(P.KICK_ACCEL[6] + P.ACCEL_WINDDOWN_LIMIT, abs=1e-6)
+  drive(cc, cs, seconds(1.0), -1.5, 5, 27., 31.)
+  assert cc.accel_last == pytest.approx(-1.5, abs=1e-6)
 
 
 def test_6th_cap_eases_at_the_lift_rate_and_never_holds_braking(cc, cs):
