@@ -152,8 +152,8 @@ class CarControllerParams:
   # ceiling is FIFTH_GEAR_LOW_ACCEL; the model alone asked more for 4 s of 1612 s engaged in 5th under that speed.
   FIFTH_GEAR_LOW_ACCEL = 0.35  # m/s2
   FIFTH_GEAR_LOW_SPEED = 17.9  # m/s, 40 mph
-  ACCEL_BUILD_BP = [3., 6., 12., 20.]   # m/s
-  ACCEL_BUILD_V = [ACCEL_RELEASE_RAMP, 0.8, 0.8, 0.6]  # m/s3, stock's own 0.6 at highway speed
+  ACCEL_BUILD_BP = [3., 6.]   # m/s
+  ACCEL_BUILD_V = [ACCEL_RELEASE_RAMP, 0.8]  # m/s3
   # A rolling gas override zeroes the command, and the plan comes back at the car's own acceleration: the build rate
   # alone took 0.6-1.0 s to catch up, the car sagging from +0.63 to +0.11 m/s2 (median of 29 rolling returns, routes
   # 0000016d-00000175). With no lead shown and the car still pulling, the command climbs at HANDOVER_BUILD up to that
