@@ -187,6 +187,15 @@ class CarControllerParams:
   HANDOVER_MAX = 0.6  # m/s2
   HANDOVER_MIN_SPEED = 3.0  # m/s
   HANDOVER_FRAMES = int(1.0 / DT_CTRL)
+  # Back from a rolling gas override, the plan's brake came back at the winddown limit: 5.9 m/s3 median, up to 11.7,
+  # the IMU overshooting the request (8 lift-offs behind a lead, 18-56 mph, gap >= 1.0 s, TTC >= 14.7 s, routes
+  # 00000160-00000199). For LIFTOFF_FRAMES the brake deepens at most at LIFTOFF_BRAKE_RATE: replayed on 15.7 h (335
+  # returns changed, 181 behind a lead, TTC down to 5.2 s) it costs at most 0.21 m and 0.29 mph, and the deepest command
+  # is unchanged. A plan at LIFTOFF_FAST_BRAKE or below (close, closing fast or a braking lead) skips it.
+  LIFTOFF_BRAKE_RATE = -3.0  # m/s3
+  LIFTOFF_FAST_BRAKE = -1.0  # m/s2
+  LIFTOFF_FRAMES = int(1.0 / DT_CTRL)
+  LIFTOFF_GAS_FRAMES = int(0.5 / DT_CTRL)  # a return this soon after the gas is released is a lift-off
   # Stock's throttle lift rate, while the plan is still >= 0; a brake request skips it.
   ACCEL_LIFT_LIMIT = -2.0  # m/s3
   # Limit upward plan-command slew in the brake region without delaying braking response.

@@ -326,6 +326,71 @@ def test_a_lead_appearing_with_mild_slowing_is_never_later(plan):
   assert np.argmax(new[k0:] <= 0.) <= np.argmax(ref[k0:] <= 0.)
 
 
+def liftoff_steps(cc, cs, frames, **kwargs):
+  """Per-frame command steps for frames of plan accel, straight after a rolling gas return behind a lead."""
+  gas_return(cc, cs, v_ego=15., a_ego=0.3, lead_visible=True, **kwargs)
+  cmds = [0.]
+  for accel in frames:
+    step_long(cc, cs, accel=accel, cruise_engaged=True, v_ego=15., a_ego=0.3, lead_visible=True, **kwargs)
+    cmds.append(cc.accel_last)
+  return np.diff(cmds), np.array(cmds[1:])
+
+
+@pytest.mark.parametrize("plan", [-0.3, -0.5, -0.99])
+def test_mild_brake_after_a_gas_return_builds_gently(cc, cs, plan):
+  """Back from the gas behind a lead, a mild brake deepens at LIFTOFF_BRAKE_RATE, not the winddown limit."""
+  P = CarControllerParams
+  steps, cmds = liftoff_steps(cc, cs, [plan] * seconds(0.5))
+  assert steps[0] == pytest.approx(P.LIFTOFF_BRAKE_RATE * DT_CTRL, abs=1e-6)
+  assert steps.min() >= P.LIFTOFF_BRAKE_RATE * DT_CTRL - 1e-6
+  assert cmds[-1] == pytest.approx(plan, abs=1e-6), "reaches the plan"
+
+
+@pytest.mark.parametrize("plan", [-1.0, -2.0])
+def test_firm_brake_after_a_gas_return_keeps_the_winddown_limit(cc, cs, plan):
+  steps, _ = liftoff_steps(cc, cs, [plan] * seconds(0.05))
+  assert steps[0] == pytest.approx(CarControllerParams.ACCEL_WINDDOWN_LIMIT, abs=1e-6)
+
+
+def test_a_brake_firming_up_mid_liftoff_catches_up_at_the_winddown_limit(cc, cs):
+  P = CarControllerParams
+  steps, _ = liftoff_steps(cc, cs, [-0.6] * seconds(0.1) + [-1.5] * seconds(0.1))
+  assert steps[seconds(0.1) - 1] == pytest.approx(P.LIFTOFF_BRAKE_RATE * DT_CTRL, abs=1e-6)
+  assert steps[seconds(0.1)] == pytest.approx(P.ACCEL_WINDDOWN_LIMIT, abs=1e-6)
+
+
+def test_the_gentle_brake_ends_with_the_liftoff_window(cc, cs):
+  P = CarControllerParams
+  steps, _ = liftoff_steps(cc, cs, [0.] * P.LIFTOFF_FRAMES + [-0.5] * seconds(0.05))
+  assert steps[P.LIFTOFF_FRAMES] == pytest.approx(P.ACCEL_WINDDOWN_LIMIT, abs=1e-6)
+
+
+@pytest.mark.parametrize("v_ego", [2.0, 15.])
+def test_brake_after_reengage_without_the_gas_or_slow_keeps_the_winddown_limit(cc, cs, v_ego):
+  """Only a rolling return from the gas builds gently; RES while rolling, or a return under HANDOVER_MIN_SPEED,
+  brakes as before."""
+  gas = v_ego < CarControllerParams.HANDOVER_MIN_SPEED
+  for _ in range(seconds(0.5)):
+    step_long(cc, cs, long_active=False, enabled=gas, long_state=OFF, accel=0., gas=gas, cruise_engaged=True,
+              v_ego=v_ego, lead_visible=True)
+  step_long(cc, cs, accel=-0.5, cruise_engaged=True, v_ego=v_ego, lead_visible=True)
+  assert cc.accel_last == pytest.approx(CarControllerParams.ACCEL_WINDDOWN_LIMIT, abs=1e-6)
+
+
+@pytest.mark.parametrize("inactive_s,gentle", [(0.3, True), (0.6, False), (10., False)])
+def test_only_a_return_straight_off_the_gas_builds_gently(cc, cs, inactive_s, gentle):
+  """Gas, then engaged but inactive without it (a control dropout): only a return within LIFTOFF_GAS_FRAMES of the
+  release is a lift-off."""
+  P = CarControllerParams
+  gas_return(cc, cs, v_ego=15., a_ego=0.3, lead_visible=True)
+  for _ in range(seconds(inactive_s)):
+    step_long(cc, cs, long_active=False, enabled=True, long_state=OFF, accel=0., cruise_engaged=True, v_ego=15.,
+              lead_visible=True)
+  step_long(cc, cs, accel=-0.5, cruise_engaged=True, v_ego=15., lead_visible=True)
+  limit = P.LIFTOFF_BRAKE_RATE * DT_CTRL if gentle else P.ACCEL_WINDDOWN_LIMIT
+  assert cc.accel_last == pytest.approx(limit, abs=1e-6)
+
+
 @pytest.mark.parametrize("disabled_s", [0.1, 10.])
 def test_gas_while_disengaged_does_not_arm_a_later_engagement(cc, cs, disabled_s):
   """Codex review P2: gas pressed while openpilot is disabled, then an ordinary rolling engagement: stock build."""

@@ -148,6 +148,8 @@ class AccelShaper:
     self.baseline = 0.  # the command the shaper would have sent without the handover climb
     self.handover_climb = False  # still climbing to the pull of that return
     self.handover_pull = 0.  # m/s2 the car was pulling at that return
+    self.liftoff_frames = 0  # frames left of a rolling return from a gas override with the brake built gently
+    self.gas_off_frames = 0  # frames since the gas was last pressed
     self.gas_override = False  # engaged, with the gas holding control off since it was last active
     self.launch = False  # op pulling away from a stop or a straight crawl, not yet at LAUNCH_SPEED, no brake request since
     self.straight = True  # the wheel within LAUNCH_STEER_MAX
@@ -228,6 +230,13 @@ class AccelShaper:
     from_gas = self.gas_override
     # Only an override while engaged counts, and disengaging forgets it.
     self.gas_override = long_engaged and not long_active and (self.gas_override or gas_pressed)
+    self.gas_off_frames = 0 if gas_pressed else min(self.gas_off_frames + 1, P.LIFTOFF_GAS_FRAMES + 1)
+    # Only a return straight off the gas is a lift-off, not one after a later control dropout.
+    if returning and from_gas and self.gas_off_frames <= P.LIFTOFF_GAS_FRAMES and not standstill and \
+       v_ego >= P.HANDOVER_MIN_SPEED:
+      self.liftoff_frames = P.LIFTOFF_FRAMES
+    elif self.liftoff_frames > 0:
+      self.liftoff_frames = self.liftoff_frames - 1 if long_active and not standstill else 0
     if returning and from_gas and not standstill and not lead_visible and v_ego >= P.HANDOVER_MIN_SPEED and a_ego > 0.:
       self.handover_frames, self.handover_climb = P.HANDOVER_FRAMES, True
       self.handover_pull = min(a_ego, P.HANDOVER_MAX)
@@ -239,9 +248,12 @@ class AccelShaper:
 
   def _shape(self, accel: float, last: float, plan_accel: float, v_ego: float, climb: bool) -> float:
     """The plan slew-limited from last, its positive part under stock's ceiling and build rate (and a handover's
-    climb), lifting at stock's rate."""
+    climb), lifting at stock's rate, and just back from the gas, a mild brake built gently."""
     P = CarControllerParams
     accel = rate_limit(accel, last, P.ACCEL_WINDDOWN_LIMIT, P.ACCEL_WINDUP_LIMIT)
+    if self.liftoff_frames > 0 and plan_accel > P.LIFTOFF_FAST_BRAKE:
+      # Just back from the gas: the brake deepens gently; a firm brake request bypasses this.
+      accel = max(accel, min(last, 0.) + P.LIFTOFF_BRAKE_RATE * DT_CTRL)
     if accel > 0.:
       # Shape positive commands to stock MRCC's ceiling and build rate at this speed.
       ceiling_v = P.LAUNCH_CEILING_V if self.launch and self.straight else P.ACCEL_CEILING_V
