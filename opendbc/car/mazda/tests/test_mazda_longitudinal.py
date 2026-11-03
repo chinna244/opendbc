@@ -197,6 +197,19 @@ def test_rolling_gas_return_climbs_to_the_pull_the_car_had(cc, cs):
     "past the car's pull it builds at the stock rate"
 
 
+@pytest.mark.parametrize("v_ego", [1.2, 2.5])
+def test_a_stop_sign_push_climbs_to_the_pull_the_car_had(cc, cs, v_ego):
+  """Gas off a crawl let go at 3-6 mph with no lead: the climb, not the low-speed stock build from zero."""
+  P = CarControllerParams
+  gas_return(cc, cs, v_ego=v_ego, a_ego=1.0, lead_visible=False)
+  cmds = []
+  for _ in range(seconds(0.3)):
+    step_long(cc, cs, accel=1.5, cruise_engaged=True, v_ego=v_ego, a_ego=1.0, lead_visible=False)
+    cmds.append(cc.accel_last)
+  assert cmds[0] == pytest.approx(P.HANDOVER_BUILD * DT_CTRL, abs=1e-6)
+  assert cmds[seconds(P.HANDOVER_MAX / P.HANDOVER_BUILD) + 1] >= P.HANDOVER_MAX - 1e-6
+
+
 def test_gas_return_behind_a_lead_keeps_the_stock_build(cc, cs):
   """With a lead shown the MPC owns the gap, so the return is unchanged."""
   gas_return(cc, cs, lead_visible=True)
@@ -204,7 +217,7 @@ def test_gas_return_behind_a_lead_keeps_the_stock_build(cc, cs):
   assert cc.accel_last == pytest.approx(0.8 * DT_CTRL, abs=1e-6)
 
 
-@pytest.mark.parametrize("v_ego,a_ego", [(2.0, 0.7), (8., 0.), (8., -0.3)])
+@pytest.mark.parametrize("v_ego,a_ego", [(0.5, 0.7), (8., 0.), (8., -0.3)])
 def test_gas_return_slow_or_not_pulling_keeps_the_stock_build(cc, cs, v_ego, a_ego):
   gas_return(cc, cs, v_ego=v_ego, a_ego=a_ego, lead_visible=False)
   step_long(cc, cs, accel=0.85, cruise_engaged=True, v_ego=v_ego, a_ego=a_ego, lead_visible=False)
@@ -221,17 +234,18 @@ def test_rolling_reengage_without_the_gas_keeps_the_stock_build(cc, cs):
   assert cc.accel_last == pytest.approx(0.8 * DT_CTRL, abs=1e-6)
 
 
-def handover_vs_reference(frames, **kwargs):
+def handover_vs_reference(frames, v_ego=8., **kwargs):
   """Commands after a rolling gas return for frames of (accel, lead_visible, a_ego): with the handover, and from a
   reference controller where it never arms (a lead shown throughout, which changes nothing else in the command)."""
   out = []
   for reference in (False, True):
     c = car_controller(alpha_long=True)
     s = mazda_car_state(c.CP, c.CP_SP)
-    gas_return(c, s, lead_visible=reference, **kwargs)
+    gas_return(c, s, v_ego=v_ego, lead_visible=reference, **kwargs)
     cmds = []
     for accel, lead, a_ego in frames:
-      step_long(c, s, accel=accel, cruise_engaged=True, v_ego=8., a_ego=a_ego, lead_visible=lead or reference, **kwargs)
+      step_long(c, s, accel=accel, cruise_engaged=True, v_ego=v_ego, a_ego=a_ego, lead_visible=lead or reference,
+                **kwargs)
       cmds.append(c.accel_last)
     out.append(np.array(cmds))
   return out
@@ -326,6 +340,36 @@ def test_a_lead_appearing_with_mild_slowing_is_never_later(plan):
   assert np.argmax(new[k0:] <= 0.) <= np.argmax(ref[k0:] <= 0.)
 
 
+@pytest.mark.parametrize("plan", [-1.0, -0.2])
+def test_a_lead_appearing_mid_stop_sign_push_is_never_later(plan):
+  """Gas off a stop-sign crawl let go at 2 m/s, 0.2 s of climb, then cross traffic shows as a lead: braking or slowing
+  is answered no later than without the climb."""
+  frames = [(0.85, False, 0.7)] * seconds(0.2) + [(plan, True, 0.6)] * seconds(0.3)
+  new, ref = handover_vs_reference(frames, v_ego=2.0)
+  k0 = seconds(0.2)
+  assert new[k0 - 1] > ref[k0 - 1], "the climb was running"
+  assert np.all(new[k0:] <= ref[k0:] + 1e-9)
+  assert np.argmax(new[k0:] <= 0.) <= np.argmax(ref[k0:] <= 0.)
+
+
+def test_stopping_mid_stop_sign_push_ends_the_climb(cc, cs):
+  """Gas off a crawl let go at 1.5 m/s, then the car comes to a stop inside the climb window: the stop hold owns the
+  command and no positive command is sent while stopped."""
+  gas_return(cc, cs, v_ego=1.5, a_ego=0.7, lead_visible=False)
+  for _ in range(seconds(0.1)):
+    step_long(cc, cs, accel=0.85, cruise_engaged=True, v_ego=1.5, a_ego=0.7, lead_visible=False)
+  assert cc.accel_last > 0.
+  for _ in range(seconds(0.3)):
+    step_long(cc, cs, long_state=STOPPING, accel=-1.0, cruise_engaged=True, v_ego=0.5, a_ego=-1.0, lead_visible=False)
+  cmds = []
+  for _ in range(seconds(0.5)):
+    step_long(cc, cs, long_state=STOPPING, accel=-1.0, standstill=True, cruise_engaged=True, v_ego=0., a_ego=0.,
+              lead_visible=False)
+    cmds.append(cc.accel_last)
+  assert cc.accel_shaper.handover_frames == 0 and not cc.accel_shaper.handover_climb
+  assert max(cmds) <= 0.
+
+
 def liftoff_steps(cc, cs, frames, **kwargs):
   """Per-frame command steps for frames of plan accel, straight after a rolling gas return behind a lead."""
   gas_return(cc, cs, v_ego=15., a_ego=0.3, lead_visible=True, **kwargs)
@@ -367,9 +411,9 @@ def test_the_gentle_brake_ends_with_the_liftoff_window(cc, cs):
 
 @pytest.mark.parametrize("v_ego", [2.0, 15.])
 def test_brake_after_reengage_without_the_gas_or_slow_keeps_the_winddown_limit(cc, cs, v_ego):
-  """Only a rolling return from the gas builds gently; RES while rolling, or a return under HANDOVER_MIN_SPEED,
+  """Only a rolling return from the gas builds gently; RES while rolling, or a return under LIFTOFF_MIN_SPEED,
   brakes as before."""
-  gas = v_ego < CarControllerParams.HANDOVER_MIN_SPEED
+  gas = v_ego < CarControllerParams.LIFTOFF_MIN_SPEED
   for _ in range(seconds(0.5)):
     step_long(cc, cs, long_active=False, enabled=gas, long_state=OFF, accel=0., gas=gas, cruise_engaged=True,
               v_ego=v_ego, lead_visible=True)

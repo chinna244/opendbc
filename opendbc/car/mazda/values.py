@@ -185,7 +185,9 @@ class CarControllerParams:
   HANDOVER_BUILD = 4.0  # m/s3
   HANDOVER_BRAKE = -0.3  # m/s2
   HANDOVER_MAX = 0.6  # m/s2
-  HANDOVER_MIN_SPEED = 3.0  # m/s
+  # Down to HANDOVER_MIN_SPEED: a push off a stop-sign crawl let go at 3-6 mph rebuilt from zero too (route 0000002b,
+  # 238.6 s: the car sagged to 0.0-0.5 m/s2 for ~1 s against a 1.65 plan). The lift-off brake keeps LIFTOFF_MIN_SPEED.
+  HANDOVER_MIN_SPEED = 1.0  # m/s
   HANDOVER_FRAMES = int(1.0 / DT_CTRL)
   # Back from a rolling gas override, the plan's brake came back at the winddown limit: 5.9 m/s3 median, up to 11.7,
   # the IMU overshooting the request (8 lift-offs behind a lead, 18-56 mph, gap >= 1.0 s, TTC >= 14.7 s, routes
@@ -195,6 +197,7 @@ class CarControllerParams:
   LIFTOFF_BRAKE_RATE = -3.0  # m/s3
   LIFTOFF_FAST_BRAKE = -1.0  # m/s2
   LIFTOFF_FRAMES = int(1.0 / DT_CTRL)
+  LIFTOFF_MIN_SPEED = 3.0  # m/s
   LIFTOFF_GAS_FRAMES = int(0.5 / DT_CTRL)  # a return this soon after the gas is released is a lift-off
   # Stock's throttle lift rate, while the plan is still >= 0; a brake request skips it.
   ACCEL_LIFT_LIMIT = -2.0  # m/s3

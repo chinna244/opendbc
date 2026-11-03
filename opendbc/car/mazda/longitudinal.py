@@ -233,7 +233,7 @@ class AccelShaper:
     self.gas_off_frames = 0 if gas_pressed else min(self.gas_off_frames + 1, P.LIFTOFF_GAS_FRAMES + 1)
     # Only a return straight off the gas is a lift-off, not one after a later control dropout.
     if returning and from_gas and self.gas_off_frames <= P.LIFTOFF_GAS_FRAMES and not standstill and \
-       v_ego >= P.HANDOVER_MIN_SPEED:
+       v_ego >= P.LIFTOFF_MIN_SPEED:
       self.liftoff_frames = P.LIFTOFF_FRAMES
     elif self.liftoff_frames > 0:
       self.liftoff_frames = self.liftoff_frames - 1 if long_active and not standstill else 0
