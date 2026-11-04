@@ -114,13 +114,12 @@ class TestRadarSessionBounds:
     state = m.update(True, False, False, standstill=True, session_refused=False, stock_radar_gone=True)
     assert state == RadarSessionState.HANDBACK and not m.handback_completed
 
-  def test_silencing_waits_for_standstill_but_adoption_does_not(self):
-    # actively silencing disables AEB, so it only starts pre-motion like disable_ecu;
-    # adopting an already-quiet radar disables nothing and proceeds anywhere
+  def test_first_silencing_may_run_moving_and_adoption_too(self):
+    # the first takeover of a session starts rolling; adopting an already-quiet radar
+    # disables nothing and proceeds anywhere
     m = RadarSessionManager()
-    for _ in range(10):
-      assert m.update(True, True, False, standstill=False, session_refused=False, stock_radar_gone=False) == RadarSessionState.STOCK
-    assert m.update(True, True, False, standstill=True, session_refused=False, stock_radar_gone=False) == RadarSessionState.SILENCING
+    assert m.update(True, True, False, standstill=False, session_refused=False, stock_radar_gone=False) == RadarSessionState.SILENCING
+    assert m.attempt_moving
     m2 = RadarSessionManager()
     assert m2.update(True, False, False, standstill=False, session_refused=False, stock_radar_gone=True) == RadarSessionState.SILENCED
 
@@ -284,12 +283,61 @@ def _stock(m, standstill, alive=True, refused=False, gate=True, handback=False, 
   return m.update(gate, alive, handback, standstill=standstill, session_refused=refused, stock_radar_gone=not alive, **kw)
 
 
+def _close_moving(m, refused=True):
+  """A moving request the radar refuses (or never answers), undone back to stock."""
+  assert _stock(m, standstill=False) == RadarSessionState.SILENCING and m.attempt_moving
+  if refused:
+    _stock(m, standstill=False, refused=True)
+  else:
+    while m.state == RadarSessionState.SILENCING:
+      _stock(m, standstill=False)
+  assert m.state == RadarSessionState.HANDBACK and not m.moving_open and not m.silencing_failed
+  while m.state != RadarSessionState.STOCK:
+    _stock(m, standstill=False)
+
+
+class TestMovingTakeover:
+  """The first takeover of a session runs moving; a radar that refuses it moving, never answers
+  it, or comes back under our frames leaves the parked takeover open."""
+
+  def test_a_rolling_session_takes_over(self):
+    m = RadarSessionManager()
+    assert _stock(m, standstill=False) == RadarSessionState.SILENCING
+    while not m.programming_sent:
+      _stock(m, standstill=False)
+    assert _stock(m, standstill=False, alive=False) == RadarSessionState.SILENCED
+
+  @pytest.mark.parametrize("refused", [True, False])
+  def test_a_moving_failure_waits_for_the_stop(self, refused):
+    m = RadarSessionManager()
+    _close_moving(m, refused=refused)
+    for _ in range(300):
+      assert _stock(m, standstill=False) == RadarSessionState.STOCK
+    assert m.status == StockEcuState.PARK_TO_TAKE_OVER
+    assert _stock(m, standstill=True) == RadarSessionState.SILENCING and not m.attempt_moving
+
+
+  def test_a_stop_takeover_that_rolls_is_refused_as_a_moving_one(self):
+    # review 2026-11-03: started at a stop, rolling when refused: that closed alpha long for the drive
+    m = RadarSessionManager()
+    assert _stock(m, standstill=True) == RadarSessionState.SILENCING and not m.attempt_moving
+    _stock(m, standstill=False, refused=True)
+    assert m.state == RadarSessionState.HANDBACK and not m.silencing_failed and not m.moving_open
+
+  def test_a_stop_takeover_refused_at_the_stop_is_definitive(self):
+    m = RadarSessionManager()
+    _stock(m, standstill=True)
+    _stock(m, standstill=True, refused=True)
+    assert m.state == RadarSessionState.HANDBACK and m.silencing_failed
+
+
 class TestParkedTakeover:
-  """A fresh session started with the car rolling (forced offroad exit, process restart) waits
-  for the stop, and the status says so."""
+  """Once moving attempts are closed for the session, the takeover waits for the stop, and the
+  status says so."""
 
   def test_a_rolling_session_waits_for_the_stop(self):
     m = RadarSessionManager()
+    _close_moving(m)
     for _ in range(300):
       assert _stock(m, standstill=False) == RadarSessionState.STOCK
     assert m.status == StockEcuState.PARK_TO_TAKE_OVER
@@ -306,8 +354,16 @@ class TestParkedTakeover:
       assert _stock(m, standstill=standstill) == RadarSessionState.STOCK
     assert m.status == StockEcuState.FAILED
 
+  def test_pulling_away_keeps_the_queued_request_while_moving_is_open(self):
+    m = RadarSessionManager()
+    _stock(m, standstill=True)
+    while not m.programming_sent:
+      _stock(m, standstill=True)
+    assert _stock(m, standstill=False) == RadarSessionState.SILENCING
+
   def test_pulling_away_undoes_the_queued_request(self):
     m = RadarSessionManager()
+    _close_moving(m)
     _stock(m, standstill=True)
     while not m.programming_sent:
       _stock(m, standstill=True)
@@ -316,6 +372,7 @@ class TestParkedTakeover:
   def test_undone_request_leaves_the_next_attempt_open(self):
     # undoing our own request (motion on a parked-only radar) is not an ordered hand-back
     m = RadarSessionManager()
+    _close_moving(m)
     _stock(m, standstill=True)
     while not m.programming_sent:
       _stock(m, standstill=True)

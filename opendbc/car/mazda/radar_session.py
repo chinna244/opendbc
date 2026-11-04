@@ -33,8 +33,10 @@ class RadarSessionManager:
   uses the short traffic window; adoption without a request uses the longer guard.
   A restoration timeout is a failure, never proof that stock control recovered.
 
-  The takeover is requested parked, the path every configuration has on record. A refusal
-  ends the episode for the drive.
+  The first takeover of a session may run while moving. A moving request the radar refuses
+  or never answers, or a radar heard again under our frames (its own S3 recovery), closes
+  moving attempts for the session and leaves the parked attempt open, the path every
+  configuration has on record. A refusal at a stop ends the episode for the drive.
 
   An ordered hand-back (the lifecycle's request) keeps the radar stock for as long as the
   request stands; a withdrawn request is a fresh start under the normal takeover gate.
@@ -45,6 +47,8 @@ class RadarSessionManager:
   """
 
   def __init__(self):
+    self.moving_open = True  # a moving request may still be made this session
+    self.attempt_moving = False
     self.state = RadarSessionState.STOCK
     self.state_frames = 0
     self.silencing_failed = False
@@ -73,14 +77,24 @@ class RadarSessionManager:
         self.default_sent = False
         self.stock_frames = 0
 
+  def _close_moving(self, reason: str) -> None:
+    if self.moving_open:
+      carlog.warning({"event": "mazdaRadarMovingTakeoverClosed", "reason": reason})
+    self.moving_open = False
+
   def _silencing_gave_up(self, reason: str) -> None:
-    self.silencing_failed = True
+    # A moving attempt that the radar refused or never answered says nothing about the parked
+    # path, which every configuration has on record: keep that open. Parked, it is definitive.
+    if self.attempt_moving:
+      self._close_moving(reason)
+    else:
+      self.silencing_failed = True
     self._transition(RadarSessionState.HANDBACK, f"programming {reason}")
 
   def update(self, gate_passed: bool, stock_radar_alive: bool, handback: bool,
              standstill: bool, session_refused: bool, stock_radar_gone: bool, *,
              bus_healthy: bool = True, frame: int = 0,
-             stock_engaged: bool = False, owned: bool = False) -> RadarSessionState:
+             stock_engaged: bool = False, owned: bool = False, cruise_requested: bool = True) -> RadarSessionState:
     # the controller's frame is the one clock for every cadence, the UDS schedule included
     self.frame = frame
     self.diagnostic_message = None
@@ -123,18 +137,23 @@ class RadarSessionManager:
         self.default_sent = True
     elif not handback:
       if self.state == RadarSessionState.SILENCED and stock_radar_alive:
+        self._close_moving("stock radar returned")
         self._transition(RadarSessionState.STOCK, "stock radar returned")
+      takeover_allowed = standstill or self.moving_open
 
       if self.state == RadarSessionState.STOCK and gate_open and bus_healthy and not self.silencing_failed:
         if stock_radar_gone:
           self._transition(RadarSessionState.SILENCED, "adopt quiet radar on live bus")
-        elif standstill and stock_radar_alive:
-          self._transition(RadarSessionState.SILENCING, "parked takeover")
+        elif takeover_allowed and stock_radar_alive:
+          self.attempt_moving = not standstill
+          self._transition(RadarSessionState.SILENCING, "moving takeover" if self.attempt_moving else "parked takeover")
 
       if self.state == RadarSessionState.SILENCING:
+        # rolling before the radar answered: a refusal now is a moving one, not the parked path's
+        self.attempt_moving = self.attempt_moving or not standstill
         if session_refused:
           self._silencing_gave_up("refused")
-        elif not bus_healthy or not gate_open or not standstill:
+        elif not bus_healthy or not gate_open or not takeover_allowed:
           # A request may already have been queued: undo it instead of abandoning it.
           self._transition(RadarSessionState.HANDBACK if self.programming_sent else RadarSessionState.STOCK,
                            "takeover prerequisites lost")
@@ -179,8 +198,8 @@ class RadarSessionManager:
       self.status = StockEcuState.RESTORED
     elif self.silencing_failed:
       self.status = StockEcuState.FAILED
-    elif self.state == RadarSessionState.STOCK and gate_passed:
+    elif self.state == RadarSessionState.STOCK and (gate_passed or not cruise_requested or not takeover_allowed):
       self.status = StockEcuState.STOCK_CRUISE_ON if stock_engaged else \
-                    StockEcuState.PARK_TO_TAKE_OVER if not standstill else StockEcuState.STARTING
+                    StockEcuState.PARK_TO_TAKE_OVER if not cruise_requested or not takeover_allowed else StockEcuState.STARTING
     else:
       self.status = StockEcuState.STARTING
