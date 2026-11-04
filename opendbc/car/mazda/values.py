@@ -75,20 +75,25 @@ class CarControllerParams:
   ACCEL_BREAKAWAY_OVERSHOOT = 0.75  # m/s2 above the plan the still-stopped ramp may climb
 
   # Shape positive commands like stock MRCC: its accelerating command's ceiling by speed, and its
-  # build rate (taken a third quicker once rolling: the plan sees a lead pull away before the radar
+  # build rate (taken quicker once rolling: the plan sees a lead pull away before the radar
   # would). Positive commands only, so braking is never held longer than the plan asks.
   # The ceiling is held under stock's p99 ([1.5, 1.75, 1.45, 1.05, 0.85, 0.65] at [0, 4, 9, 14, 18, 25]
-  # m/s). Up to 1.2 m/s2 from a stop, easing from there: the engaged pull-aways of routes 00000160 and
+  # m/s). It was up to 1.2 m/s2 from a stop, easing from there: the engaged pull-aways of routes 00000160 and
   # 00000163 took 6 to 7.5 s from 6 to 25 mph at 1.1 to 1.4 m/s2 mean, this driver's own took 8 to 23 s
-  # (median 11); this table takes about 9 to 10 s.
+  # (median 11); that table took about 9 to 10 s.
   # From 20 to 56 mph it follows this driver's own pickups (p90, no car within 40 m, all logs to route 00000022):
   # 0.93 / 0.86 / 0.82 / 0.76 / 0.71 / 0.56 at 20-25 / 25-30 / 30-35 / 35-40 / 40-49 / 49-56 mph, where the old
   # 0.85 / 0.78 / 0.70 / 0.60 / 0.55 / 0.55 held the plan back (routes 00000020-00000022: 3rd at 25-45 mph sent 0.62
   # for a plan of 0.76). Under 20 mph and over 56 mph it was already at or over the driver's. It was held at 0.55
   # from 40 mph for the transmission (two-gear downshifts at 0.61 or more); the gears' own caps below hold that now,
   # and 3rd never kicks down (0 of about 200 engaged pushes up to 1.0).
+  # Under 25 mph raised 0.15 (0.1 at 11 m/s) with the 1.2 m/s3 build below: replaying 1082 engaged segments (routes
+  # 00000008-0000019c), the wire sat more than 0.1 under the plan 20% of the pickup time under 27 mph, 12-17% with
+  # this under 20 mph; a hard ask from a stop reaches 35 mph about 0.9 s sooner (simulated). At 20-25 mph that is
+  # 1.1-1.0, over this driver's 0.93: 3rd has no cap there, and over 15 mph none of its engaged pushes of 1.0-1.3 (40)
+  # nor this driver's own of 1.0 or more (193) dropped to 2nd.
   ACCEL_CEILING_BP = [0., 4., 5.5, 7., 9., 11., 13.5, 15.6, 18., 22., 25.]  # m/s
-  ACCEL_CEILING_V = [1.2, 1.2, 1.1, 1.0, 0.95, 0.9, 0.85, 0.8, 0.75, 0.6, 0.55]  # m/s2
+  ACCEL_CEILING_V = [1.35, 1.35, 1.25, 1.15, 1.1, 1.0, 0.85, 0.8, 0.75, 0.6, 0.55]  # m/s2
   # Straight pull-aways from a stop: this driver's own, straight with no car within 40 m, gave 1.38 / 1.37 / 1.21
   # m/s2 at 0-5 / 5-10 / 10-15 mph (0-10 mph in 3.0 s), op's 0.97 / 1.08 / 1.09 (3.9 s) with the plan asking
   # 1.6 under the 1.2 ceiling; under 15 mph the car gives about 0.87 of the command (31 routes, 00000184 to
@@ -97,7 +102,8 @@ class CarControllerParams:
   # A straight pickup rolling under LAUNCH_ROLL_SPEED starts one too: under 10 mph the plan asked a median 1.40 above
   # the 1.2 ceiling for 12% of the engaged pickup time, nearly all straight with no car ahead (34 routes, 00000184 to
   # 00000014); the wire met the plan 68% of the time there, about 78% with this.
-  LAUNCH_CEILING_V = [1.5, 1.5, 1.35, 1.15, 0.95, 0.9, 0.85, 0.8, 0.75, 0.6, 0.55]  # m/s2
+  # Raised 0.15 with ACCEL_CEILING_V, except at a standstill, where stock's own command tops out at 1.5.
+  LAUNCH_CEILING_V = [1.5, 1.65, 1.5, 1.3, 1.1, 1.0, 0.85, 0.8, 0.75, 0.6, 0.55]  # m/s2
   LAUNCH_SPEED = 9.  # m/s, 20 mph
   LAUNCH_ROLL_SPEED = 4.47  # m/s, 10 mph
   LAUNCH_STEER_MAX = 30.  # deg
@@ -173,8 +179,9 @@ class CarControllerParams:
   KICK_RELEASE = 0.25  # m/s2
   KICK_FRAMES = int(1.0 / DT_CTRL)
   KICK_COOLDOWN_FRAMES = int(15.0 / DT_CTRL)
-  ACCEL_BUILD_BP = [3., 6.]   # m/s
-  ACCEL_BUILD_V = [ACCEL_RELEASE_RAMP, 0.8]  # m/s3
+  # 1.2 m/s3 in town with the raised ceiling, our 0.8 from 36 mph.
+  ACCEL_BUILD_BP = [3., 6., 12., 16.]   # m/s
+  ACCEL_BUILD_V = [ACCEL_RELEASE_RAMP, 1.2, 1.2, 0.8]  # m/s3
   # A rolling gas override zeroes the command, and the plan comes back at the car's own acceleration: the build rate
   # alone took 0.6-1.0 s to catch up, the car sagging from +0.63 to +0.11 m/s2 (median of 29 rolling returns, routes
   # 0000016d-00000175). With no lead shown and the car still pulling, the command climbs at HANDOVER_BUILD up to that

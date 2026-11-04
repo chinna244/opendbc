@@ -193,7 +193,7 @@ def test_rolling_gas_return_climbs_to_the_pull_the_car_had(cc, cs):
   assert max(steps) <= P.HANDOVER_BUILD * DT_CTRL + 1e-6, "never steps faster than the handover climb"
   at_pull = next(i for i, c in enumerate(cmds) if c >= P.HANDOVER_MAX - 1e-6)
   assert at_pull <= seconds(P.HANDOVER_MAX / P.HANDOVER_BUILD) + 1
-  assert all(s == pytest.approx(0.8 * DT_CTRL, abs=1e-6) for s in steps[at_pull + 1:] if cmds[-1] < 0.85), \
+  assert all(s == pytest.approx(_build(8.) * DT_CTRL, abs=1e-6) for s in steps[at_pull + 1:] if cmds[-1] < 0.85), \
     "past the car's pull it builds at the stock rate"
 
 
@@ -214,7 +214,7 @@ def test_gas_return_behind_a_lead_keeps_the_stock_build(cc, cs):
   """With a lead shown the MPC owns the gap, so the return is unchanged."""
   gas_return(cc, cs, lead_visible=True)
   step_long(cc, cs, accel=0.85, cruise_engaged=True, v_ego=8., a_ego=0.7, lead_visible=True)
-  assert cc.accel_last == pytest.approx(0.8 * DT_CTRL, abs=1e-6)
+  assert cc.accel_last == pytest.approx(_build(8.) * DT_CTRL, abs=1e-6)
 
 
 @pytest.mark.parametrize("v_ego,a_ego", [(0.5, 0.7), (8., 0.), (8., -0.3)])
@@ -231,7 +231,7 @@ def test_rolling_reengage_without_the_gas_keeps_the_stock_build(cc, cs):
     step_long(cc, cs, long_active=False, enabled=False, long_state=OFF, accel=0., cruise_engaged=True, v_ego=8., a_ego=0.7,
               lead_visible=False)
   step_long(cc, cs, accel=0.85, cruise_engaged=True, v_ego=8., a_ego=0.7, lead_visible=False)
-  assert cc.accel_last == pytest.approx(0.8 * DT_CTRL, abs=1e-6)
+  assert cc.accel_last == pytest.approx(_build(8.) * DT_CTRL, abs=1e-6)
 
 
 def handover_vs_reference(frames, v_ego=8., **kwargs):
@@ -259,7 +259,7 @@ def assert_braking_never_later(frames, new, ref):
   assert np.argmax(new[k0:] <= 0.) <= np.argmax(ref[k0:] <= 0.), "non-positive later than the reference"
 
 
-@pytest.mark.parametrize("after", [seconds(0.05), seconds(0.1), seconds(0.2), seconds(0.4), seconds(0.9)])
+@pytest.mark.parametrize("after", [seconds(0.05), seconds(0.1), seconds(0.2), seconds(0.3), seconds(0.4)])
 def test_brake_during_a_gas_return_is_never_later(after):
   """A brake request mid-climb is answered with no more than the shaper without the climb would send."""
   frames = [(0.85, False, 0.7)] * after + [(-1.0, False, 0.7)] * seconds(0.3)
@@ -307,7 +307,7 @@ def test_a_lead_appearing_mid_return_ends_the_climb(cc, cs):
     step_long(cc, cs, accel=0.85, cruise_engaged=True, v_ego=8., a_ego=0.7, lead_visible=False)
   prev = cc.accel_last
   step_long(cc, cs, accel=0.85, cruise_engaged=True, v_ego=8., a_ego=0.7, lead_visible=True)
-  assert cc.accel_last - prev == pytest.approx(0.8 * DT_CTRL, abs=1e-6)
+  assert cc.accel_last - prev == pytest.approx(_build(8.) * DT_CTRL, abs=1e-6)
 
 
 def test_a_second_gas_press_rearms_the_return(cc, cs):
@@ -445,7 +445,7 @@ def test_gas_while_disengaged_does_not_arm_a_later_engagement(cc, cs, disabled_s
     step_long(cc, cs, long_active=False, enabled=False, long_state=OFF, accel=0., cruise_engaged=True, v_ego=8., a_ego=0.7,
               lead_visible=False)
   step_long(cc, cs, accel=0.85, cruise_engaged=True, v_ego=8., a_ego=0.7, lead_visible=False)
-  assert cc.accel_last == pytest.approx(0.8 * DT_CTRL, abs=1e-6)
+  assert cc.accel_last == pytest.approx(_build(8.) * DT_CTRL, abs=1e-6)
 
 
 def test_gas_override_then_cancel_then_reengage_keeps_the_stock_build(cc, cs):
@@ -457,7 +457,7 @@ def test_gas_override_then_cancel_then_reengage_keeps_the_stock_build(cc, cs):
     step_long(cc, cs, long_active=False, enabled=False, long_state=OFF, accel=0., cruise_engaged=True, v_ego=8., a_ego=0.7,
               **gas_return_kw)
   step_long(cc, cs, accel=0.85, cruise_engaged=True, v_ego=8., a_ego=0.7, **gas_return_kw)
-  assert cc.accel_last == pytest.approx(0.8 * DT_CTRL, abs=1e-6)
+  assert cc.accel_last == pytest.approx(_build(8.) * DT_CTRL, abs=1e-6)
 
 
 def test_braking_during_a_return_ends_the_climb(cc, cs):
@@ -476,7 +476,7 @@ def test_braking_during_a_return_ends_the_climb(cc, cs):
     if prev >= 0.:
       rises.append(cc.accel_last - prev)
     prev = cc.accel_last
-  assert rises and all(r == pytest.approx(0.8 * DT_CTRL, abs=1e-6) for r in rises)
+  assert rises and all(r == pytest.approx(_build(8.) * DT_CTRL, abs=1e-6) for r in rises)
 
 
 def test_hold_ownership_clearing_without_a_handover_matches_the_original():
@@ -548,7 +548,7 @@ def test_command_slew_is_rate_limited(cc, cs):
   prev = cc.accel_last
   for _ in range(5):
     step_long(cc, cs, accel=1.0, cruise_engaged=True, v_ego=10.)
-    assert cc.accel_last - prev == pytest.approx(0.8 * DT_CTRL, abs=1e-6)
+    assert cc.accel_last - prev == pytest.approx(_build(10.) * DT_CTRL, abs=1e-6)
     prev = cc.accel_last
 
   # and the other way, at the looser winddown limit
@@ -564,10 +564,10 @@ def test_command_slew_is_rate_limited(cc, cs):
 def test_build_rate_follows_stock_by_speed(cc, cs):
   """Stock pulls away from a stop at its 1.22 m/s3 release ramp (+25 raw per 50 Hz frame) and builds
   accel at 0.59 m/s3 once rolling (+12 raw per frame, 99.3% of rising stock frames across 158 routes); rolling is
-  deliberately a third quicker here. The build rate governs the positive region only; brake
+  deliberately quicker here: 1.2 in town, 0.8 from 16 m/s. The build rate governs the positive region only; brake
   release below zero keeps the windup limit."""
   ramp = CarControllerParams.ACCEL_RELEASE_RAMP
-  for v_ego, jerk in ((0., ramp), (3., ramp), (4.5, (ramp + 0.8) / 2), (6., 0.8), (20., 0.8)):
+  for v_ego, jerk in ((0., ramp), (3., ramp), (4.5, (ramp + 1.2) / 2), (6., 1.2), (12., 1.2), (14., 1.0), (20., 0.8)):
     cc.accel_last = 0.
     step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego)
     assert cc.accel_last == pytest.approx(jerk * DT_CTRL, abs=1e-6), f"v_ego={v_ego}"
@@ -597,7 +597,7 @@ def test_ceiling_follows_stock_by_speed(cc, cs):
   bp, v = CarControllerParams.ACCEL_CEILING_BP, CarControllerParams.ACCEL_CEILING_V
   stock_bp, stock_p99 = (0., 4., 9., 14., 18., 25.), (1.5, 1.75, 1.45, 1.05, 0.85, 0.65)
   assert all(np.interp(x, bp, v) <= np.interp(x, stock_bp, stock_p99) + 1e-9 for x in sorted({*bp, *stock_bp}))
-  for v_ego, ceiling in ((4., 1.2), (9., 0.95), (13.5, 0.85), (18., 0.75), (22., 0.6), (35., 0.55)):
+  for v_ego, ceiling in ((4., 1.35), (9., 1.1), (13.5, 0.85), (18., 0.75), (22., 0.6), (35., 0.55)):
     cc.accel_last = 2.0
     for _ in range(seconds(1.0)):  # settles through the lift limit; a crawl turns, so it is no launch
       step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego, gear_box=3,  # 3rd: no gear cap
@@ -625,13 +625,13 @@ def test_straight_launch_ceiling_stays_under_stock(cc, cs):
   assert all(a >= b for a, b in zip(v, P.ACCEL_CEILING_V, strict=True))
   assert np.interp(P.LAUNCH_SPEED, bp, v) == pytest.approx(np.interp(P.LAUNCH_SPEED, bp, P.ACCEL_CEILING_V))
   _pull_away(cc, cs)
-  assert cc.accel_last == pytest.approx(1.5, abs=1e-6)
+  assert cc.accel_last == pytest.approx(np.interp(2., bp, v), abs=1e-6)
 
 
 @pytest.mark.parametrize("steer_angle", [45., -45.])
 def test_turning_launch_keeps_the_stock_ceiling(cc, cs, steer_angle):
   _pull_away(cc, cs, steer_angle)
-  assert cc.accel_last == pytest.approx(1.2, abs=1e-6)
+  assert cc.accel_last == pytest.approx(_stock_ceiling(2.), abs=1e-6)
 
 
 def test_a_turning_pull_away_that_straightens_past_the_roll_speed_keeps_the_stock_ceiling(cc, cs):
@@ -642,6 +642,10 @@ def test_a_turning_pull_away_that_straightens_past_the_roll_speed_keeps_the_stoc
   for _ in range(seconds(1.5)):
     step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego, steer_angle=20.)
   assert cc.accel_last == pytest.approx(_stock_ceiling(v_ego), abs=1e-6)
+
+
+def _build(v_ego):
+  return float(np.interp(v_ego, CarControllerParams.ACCEL_BUILD_BP, CarControllerParams.ACCEL_BUILD_V))
 
 
 def _stock_ceiling(v_ego):
@@ -679,7 +683,7 @@ def test_straight_crawl_pickup_takes_the_launch_ceiling(cc, cs):
   P = CarControllerParams
   for _ in range(seconds(1.5)):
     step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=3.)
-  assert cc.accel_last == pytest.approx(1.5, abs=1e-6)
+  assert cc.accel_last == pytest.approx(np.interp(3., P.ACCEL_CEILING_BP, P.LAUNCH_CEILING_V), abs=1e-6)
   cc.accel_last = 2.0
   for _ in range(seconds(1.0)):
     step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=7.)
