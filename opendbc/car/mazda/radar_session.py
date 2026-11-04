@@ -59,6 +59,8 @@ class RadarSessionManager:
     # our replacement traffic is the radar, and the ordered hand-back is under way or done
     self.control_active = False
     self.handback_active = False
+    # the controller's: the hand-back in flight is the driver's main-off one, its failure no cruise fault
+    self.handback_by_driver = False
 
   def _transition(self, state: RadarSessionState, reason: str) -> None:
     if state != self.state:
@@ -151,7 +153,7 @@ class RadarSessionManager:
     self._update_replacement(stock_radar_alive, bus_healthy, stock_radar_gone)
     self.control_active = self.replacement_active and self.state == RadarSessionState.SILENCED
     self.handback_active = self.state == RadarSessionState.HANDBACK or self.handback_completed
-    self._update_status(gate_passed, stock_engaged, standstill, owned)
+    self._update_status(gate_passed, stock_engaged, standstill, owned, cruise_requested)
     return self.state
 
   def _update_replacement(self, stock_radar_alive: bool, bus_healthy: bool, stock_radar_gone: bool) -> None:
@@ -163,8 +165,12 @@ class RadarSessionManager:
          (self.state == RadarSessionState.HANDBACK and bus_healthy and (self.programming_sent or stock_radar_gone)):
       self.replacement_active = True
 
-  def _update_status(self, gate_passed: bool, stock_engaged: bool, standstill: bool, owned: bool) -> None:
-    """The driver's view. `owned` is carstate's silence guard on the owned radar."""
+  def _update_status(self, gate_passed: bool, stock_engaged: bool, standstill: bool, owned: bool,
+                     cruise_requested: bool) -> None:
+    """The driver's view. `owned` is carstate's silence guard on the owned radar. Until the
+    driver asks for cruise (`cruise_requested`) the takeover waits for the stop after that press:
+    no "remain parked" banner at every stop of a drive without cruise."""
+    takeover_allowed = standstill or self.moving_open
     if self.state == RadarSessionState.HANDBACK:
       self.status = StockEcuState.FAILED if self.handback_failed else StockEcuState.RESTORING
     elif self.state == RadarSessionState.SILENCED:

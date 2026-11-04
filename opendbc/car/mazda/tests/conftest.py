@@ -15,7 +15,7 @@ import pytest
 
 from opendbc.can import CANPacker, CANParser
 from opendbc.car import Bus, gen_empty_fingerprint, structs
-from opendbc.car.mazda.carcontroller import CarController
+from opendbc.car.mazda.carcontroller import CRUISE_REQUEST_SETTLE_FRAMES, CarController
 from opendbc.car.mazda.carstate import CarState, CAM_LANEINFO_FRESH_FRAMES, FSC_SETTLE_FRAMES, STOCK_RADAR_ALIVE_FRAMES, STOCK_RADAR_GUARD_FRAMES
 from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.values import CAR, CarControllerParams
@@ -95,17 +95,24 @@ def car_interface(alpha_long=True, candidate=CAR.MAZDA_CX5_2022, car_fw=None) ->
   return CarInterface(CP, CP_SP)
 
 
-def car_controller(alpha_long=True, candidate=CAR.MAZDA_CX5_2022) -> CarController:
+def car_controller(alpha_long=True, candidate=CAR.MAZDA_CX5_2022, cruise_requested=True) -> CarController:
+  """`cruise_requested`: a driver who has already pressed SET/RES this drive, past the settle,
+  so the radar takeover gate is the camera's alone."""
   CP = car_params(candidate, alpha_long=alpha_long)
   CP_SP = car_params_sp(CP, candidate, alpha_long=alpha_long)
   assert CP.openpilotLongitudinalControl == alpha_long
-  return CarController({Bus.pt: DBC_NAME}, CP, CP_SP)
+  cc = CarController({Bus.pt: DBC_NAME}, CP, CP_SP)
+  if cruise_requested:
+    cc.cruise_requested = True
+    cc.cruise_request_frames = CRUISE_REQUEST_SETTLE_FRAMES + 1
+  return cc
 
 
 # capnp messages
 
-def car_state(standstill=False, gas=False, brake_pressed=False, v_ego=0., driver_torque=0.,
-              steering_pressed=False, available=True, cruise_engaged=False, can_valid=True) -> structs.CarState:
+def car_state(standstill=False, gas=False, brake_pressed=False, v_ego=0., a_ego=0., driver_torque=0.,
+              steering_pressed=False, available=True, cruise_engaged=False, can_valid=True, buttons=(),
+              steer_angle=0.) -> structs.CarState:
   """structs.CarState with the fields the controller reads off CS.out."""
   ret = structs.CarState()
   ret.canValid = can_valid
@@ -163,7 +170,7 @@ def set_car_state(cs: CarState, out=None, *, body_hold=False, stock_radar_alive=
                   cancel_button=0, accel_button=0, decel_button=0,
                   tja_button=0, mrcc_button=0,
                   mrcc_armed_raw=False, cruise_available=None, cruise_enabled=None,
-                  cam_laneinfo_raw=None, cam_laneinfo_live=False,
+                  cam_laneinfo_raw=None, cam_laneinfo_live=False, stock_set_allowed=True,
                   **out_kwargs) -> CarState:
   """Put the controller-facing state of a real CarState where a test wants it.
 
@@ -205,6 +212,7 @@ def set_car_state(cs: CarState, out=None, *, body_hold=False, stock_radar_alive=
   cs.tja_button = tja_button
   cs.mrcc_button = mrcc_button
   cs.mrcc_armed_raw = mrcc_armed_raw
+  cs.stock_set_allowed = stock_set_allowed
   cs.cam_laneinfo_raw = cam_laneinfo_raw
   cs.cam_laneinfo_stale_frames = 0 if cam_laneinfo_live else CAM_LANEINFO_FRESH_FRAMES
   return cs

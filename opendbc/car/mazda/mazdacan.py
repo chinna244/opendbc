@@ -50,7 +50,7 @@ def create_acc_command(packer, bus, counter, accel, *, long_active, acc_availabl
 
 
 def create_crz_ctrl(packer, bus, long_active, acc_available, gap_setting, acc_active_2, *, lead_distance=0,
-                    hbc_request=False):
+                    hbc_request=False, lkas_white=False):
   # CRZ_CTRL replaces radar cruise state and mirrors the driver's gap selection. The cluster draws
   # the lead from RADAR_HAS_LEAD; RADAR_LEAD_RELATIVE_DISTANCE is stock's 1 to 5 closeness bucket.
   # NEW_SIGNAL_3 (bit 13) relays the camera's high-beam request (0x440 BIT2) as the stock radar
@@ -67,7 +67,10 @@ def create_crz_ctrl(packer, bus, long_active, acc_available, gap_setting, acc_ac
     "ACC_ACTIVE_2": int(acc_active_2),
     "NEW_SIGNAL_3": int(hbc_request),
   }
-  return packer.make_can_msg("CRZ_CTRL", bus, values)
+  addr, dat, bus = packer.make_can_msg("CRZ_CTRL", bus, values)
+  if lkas_white:
+    dat = dat[:4] + bytes([dat[4] | 0x20]) + dat[5:]
+  return addr, dat, bus
 
 
 def create_radar_frames(bus, counter, g46l=False):

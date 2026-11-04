@@ -96,6 +96,8 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
     self.radar_session = RadarSessionManager()
     self.radar_owned = False  # the silence guard passed on an owned radar: the engagement gate below
     self.radar_was_silenced = False
+    self.stock_set_allowed = False  # the stock radar's CRZ_INFO.ACC_SET_ALLOWED, from its own frames
+    self.aeb_setting_off = False  # the driver's Smart Brake Support setting is off
     self.main_off_samples = 0
     # The camera's last CAM_LANEINFO payload and its staleness, latched by the interface.
     self.cam_laneinfo_raw: bytes | None = None
@@ -276,6 +278,7 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
         self.radar_bus_healthy &= silent < fresh
       if len(cp.vl_all["CRZ_INFO"]["CTR"]) > 0:
         self.stock_radar_seen = True
+        self.stock_set_allowed = cp.vl_all["CRZ_INFO"]["ACC_SET_ALLOWED"][-1] == 1
         self.stock_radar_silent_frames = 0
         # stock traffic after an acknowledgement voids it; the full guard applies again
         self.radar_programming_acked = False
@@ -302,7 +305,7 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
       # re-run the guard. Stock traffic ends the claim on the alive window either way.
       session = self.radar_session
       silenced = session.control_active and not self.stock_radar_alive and (self.stock_radar_gone or self.radar_was_silenced)
-      ret.accFaulted = session.handback_failed or (self.radar_was_silenced and self.stock_radar_alive and not session.handback_active)
+      ret.accFaulted = (session.handback_failed and not session.handback_by_driver) or (self.radar_was_silenced and self.stock_radar_alive and not session.handback_active)
       self.radar_was_silenced |= silenced
       self.radar_owned = silenced
 
@@ -343,6 +346,11 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
     # with its error bits set; that is the camera fault (steerFaultPermanent), not the switch.
     if len(cp_cam.vl_all["CAM_SETTINGS"]["LKAS_INERVENTION_ON1"]) > 0:
       self.lkas_setting_on = any(cp_cam.vl["CAM_SETTINGS"][s] for s in ("LKAS_INERVENTION_ON1", "ILKAS_NTERVENTION_ON2"))
+    # CAM_SETTINGS SBS_SCBC: the driver's Smart Brake Support setting as the camera reports it, 2 on
+    # and 1 off (route 0000012f: four toggles, each with the dash's amber SBS OFF lamp; unchanged
+    # through a radar takeover, so the setting alone, not the radar's mode). Absent reads on.
+    if len(cp_cam.vl_all["CAM_SETTINGS"]["SBS_SCBC"]) > 0:
+      self.aeb_setting_off = cp_cam.vl["CAM_SETTINGS"]["SBS_SCBC"] == 1
     camera_faulted = cp_cam.vl["CAM_LANEINFO"]["ERR_BIT"] == 1 or cp_cam.vl["CAM_LKAS"]["ERR_BIT_1"] == 1
     las_off = cam_laneinfo_fresh and cp_cam.vl["CAM_LANEINFO"]["LANE_LINES"] == 0 and not camera_faulted
     ret.invalidLkasSetting = las_off or not self.lkas_setting_on
