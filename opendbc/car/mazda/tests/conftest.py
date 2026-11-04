@@ -121,16 +121,19 @@ def car_state(standstill=False, gas=False, brake_pressed=False, v_ego=0., a_ego=
   ret.brakePressed = brake_pressed
   ret.vEgoRaw = v_ego
   ret.vEgo = v_ego
+  ret.aEgo = a_ego
   ret.steeringTorque = driver_torque
   ret.steeringPressed = steering_pressed
+  ret.steeringAngleDeg = steer_angle
   ret.cruiseState.available = available
   ret.cruiseState.enabled = cruise_engaged
+  ret.buttonEvents = [structs.CarState.ButtonEvent(pressed=True, type=b) for b in buttons]
   return ret
 
 
 def car_control(enabled=None, long_active=True, lat_active=False, accel=0.5, torque=0.,
                 long_state=LongCtrlState.pid, cancel=False, resume=False, lead_visible=True, gap=2,
-                visual_alert=VisualAlert.none):
+                visual_alert=VisualAlert.none, set_speed=0.):
   """structs.CarControl reader, as card hands it to the controller. openpilot is enabled
   whenever it is longitudinally active; a gas override is the case where it stays enabled
   with longActive low."""
@@ -146,6 +149,7 @@ def car_control(enabled=None, long_active=True, lat_active=False, accel=0.5, tor
   cc.hudControl.leadVisible = lead_visible
   cc.hudControl.leadDistanceBars = gap
   cc.hudControl.visualAlert = visual_alert
+  cc.hudControl.setSpeed = set_speed
   return cc.as_reader()
 
 
@@ -162,7 +166,7 @@ def car_control_sp(handback=False, lead_d_rel=12.0, lead_v_rel=0.0, send_button=
 
 # CarState seeded without a bus
 
-def set_car_state(cs: CarState, out=None, *, body_hold=False, stock_radar_alive=False, stock_radar_gone=None,
+def set_car_state(cs: CarState, out=None, *, body_hold=False, gear_box=0, stock_radar_alive=False, stock_radar_gone=None,
                   fsc_settled=True, radar_was_silenced=False, radar_session_refused=False,
                   radar_bus_healthy=True, steer_undelivered=False,
                   lkas_blocked=False, lkas_effective=0, steer_first_engage_hold=False, lkas_allowed_speed=True, lkas_rejected=0,
@@ -183,6 +187,7 @@ def set_car_state(cs: CarState, out=None, *, body_hold=False, stock_radar_alive=
   """
   cs.out = out if out is not None else car_state(**out_kwargs)
   cs.body_hold = body_hold
+  cs.gear_box = gear_box
   cs.cruise_enabled = cs.out.cruiseState.enabled if cruise_enabled is None else cruise_enabled
   cs.cruise_available = cs.out.cruiseState.available if cruise_available is None else cruise_available
   cs.stock_radar_seen = True

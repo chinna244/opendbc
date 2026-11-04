@@ -400,7 +400,9 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
               gas_pressed=CS.out.gasPressed)
 
     accel = self.accel_shaper.update(long_active, CC.actuators.accel, self.accel_last, sm, CS.out.standstill,
-                                     CS.body_hold, CS.out.vEgoRaw)
+                                     CS.body_hold, CS.out.vEgoRaw, CS.gear_box, CS.out.aEgo,
+                                     CC.hudControl.leadVisible, CS.out.gasPressed, long_engaged,
+                                     CS.out.steeringAngleDeg, CC.hudControl.setSpeed)
     self.accel_last = accel
     lead_shown = self.lead_icon.update(CC.hudControl.leadVisible)
 
