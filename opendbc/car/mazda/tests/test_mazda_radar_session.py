@@ -317,6 +317,20 @@ class TestMovingTakeover:
     assert _stock(m, standstill=True) == RadarSessionState.SILENCING and not m.attempt_moving
 
 
+  def test_a_stop_takeover_that_rolls_is_refused_as_a_moving_one(self):
+    # review 2026-11-03: started at a stop, rolling when refused: that closed alpha long for the drive
+    m = RadarSessionManager()
+    assert _stock(m, standstill=True) == RadarSessionState.SILENCING and not m.attempt_moving
+    _stock(m, standstill=False, refused=True)
+    assert m.state == RadarSessionState.HANDBACK and not m.silencing_failed and not m.moving_open
+
+  def test_a_stop_takeover_refused_at_the_stop_is_definitive(self):
+    m = RadarSessionManager()
+    _stock(m, standstill=True)
+    _stock(m, standstill=True, refused=True)
+    assert m.state == RadarSessionState.HANDBACK and m.silencing_failed
+
+
 class TestParkedTakeover:
   """Once moving attempts are closed for the session, the takeover waits for the stop, and the
   status says so."""

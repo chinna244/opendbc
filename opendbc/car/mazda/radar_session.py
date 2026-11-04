@@ -149,6 +149,8 @@ class RadarSessionManager:
           self._transition(RadarSessionState.SILENCING, "moving takeover" if self.attempt_moving else "parked takeover")
 
       if self.state == RadarSessionState.SILENCING:
+        # rolling before the radar answered: a refusal now is a moving one, not the parked path's
+        self.attempt_moving = self.attempt_moving or not standstill
         if session_refused:
           self._silencing_gave_up("refused")
         elif not bus_healthy or not gate_open or not takeover_allowed:
