@@ -303,8 +303,8 @@ class AccelShaper:
     elif standstill or (v_ego < CarControllerParams.LAUNCH_ROLL_SPEED and plan_accel >= 0. and
                         abs(steer_angle) <= CarControllerParams.LAUNCH_STEER_MAX):
       self.launch = True
-    elif v_ego >= CarControllerParams.LAUNCH_SPEED or plan_accel < 0.:
-      self.launch = False
+    elif v_ego >= CarControllerParams.LAUNCH_SPEED or plan_accel < 0. or abs(steer_angle) > CarControllerParams.LAUNCH_STEER_MAX:
+      self.launch = False  # a turn ends it: straightening out past LAUNCH_ROLL_SPEED is no pull-away
     self.straight = abs(steer_angle) <= CarControllerParams.LAUNCH_STEER_MAX
     self._update_kick(long_active, plan_accel, v_ego, v_set)
     climb = self._update_handover(long_engaged, long_active, standstill, v_ego, a_ego, lead_visible, gas_pressed, plan_accel)

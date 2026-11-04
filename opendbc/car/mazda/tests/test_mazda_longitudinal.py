@@ -634,6 +634,16 @@ def test_turning_launch_keeps_the_stock_ceiling(cc, cs, steer_angle):
   assert cc.accel_last == pytest.approx(1.2, abs=1e-6)
 
 
+def test_a_turning_pull_away_that_straightens_past_the_roll_speed_keeps_the_stock_ceiling(cc, cs):
+  """Review: a launch out of a turn that straightened at 5 m/s got the launch ceiling (1.28 vs 1.07 at 6 m/s)."""
+  _pull_away(cc, cs, 90.)
+  v_ego = CarControllerParams.LAUNCH_ROLL_SPEED + 0.5
+  step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego, steer_angle=90.)
+  for _ in range(seconds(1.5)):
+    step_long(cc, cs, accel=2.0, cruise_engaged=True, v_ego=v_ego, steer_angle=20.)
+  assert cc.accel_last == pytest.approx(_stock_ceiling(v_ego), abs=1e-6)
+
+
 def _stock_ceiling(v_ego):
   return float(np.interp(v_ego, CarControllerParams.ACCEL_CEILING_BP, CarControllerParams.ACCEL_CEILING_V))
 
