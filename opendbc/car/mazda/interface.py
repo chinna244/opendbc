@@ -3,6 +3,7 @@ from opendbc.car import Bus, get_safety_config, structs
 from opendbc.car.carlog import carlog
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarInterfaceBase
+from opendbc.car.mazda.can_filter import FACTORY_CRUISE, FACTORY_CRUISE_ADDRS, FILTER_BUS, FILTER_STATE_ADDR
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.carstate import CarState
 from opendbc.car.mazda.radar_interface import RadarInterface
@@ -21,6 +22,7 @@ class CarInterface(CarInterfaceBase):
     CarInterfaceBase.__init__(self, CP, CP_SP)
     # The controller runs the radar session; carstate reads its outcome on the next update.
     self.CS.radar_session = self.CC.radar_session
+    self.CS.can_filter = self.CC.can_filter
 
   @staticmethod
   def configure_torque_tune(candidate, tune, steering_angle_deadzone_deg=0.0):
@@ -113,15 +115,27 @@ class CarInterface(CarInterfaceBase):
     return ret
 
   def update(self, can_packets):
-    """Latch the camera's last CAM_LANEINFO payload and staleness: carstate's freshness and the white-wheel HUD gate."""
+    """Latch the camera's last CAM_LANEINFO payload and staleness: carstate's freshness and the white-wheel HUD gate.
+    Likewise the Smart CAN Filter's status byte and its age; the read's filter events go to its session in order,
+    every status byte and every radar cruise frame the board let through to the car side."""
     # card sends [(t, frames), ...]; the model tests send one bare (t, frames) tuple. CANParser.update takes both.
     if can_packets and not isinstance(can_packets[0], (list, tuple)):
       can_packets = [can_packets]
     raw, received = self.CS.cam_laneinfo_raw, False
+    filter_state, filter_received, filter_events = self.CS.can_filter_state, False, []
     for _t, frames in can_packets:
       for addr, dat, src in frames:
         if addr == 0x440 and src == 2 and len(dat) == 8:
           raw, received = bytes(dat), True
+        elif addr == FILTER_STATE_ADDR and src == FILTER_BUS and len(dat) == 8:
+          filter_state, filter_received = dat[7], True
+          filter_events.append(filter_state)
+        elif addr in FACTORY_CRUISE_ADDRS and src == FILTER_BUS:
+          filter_events.append(FACTORY_CRUISE)
     self.CS.cam_laneinfo_raw = raw
     self.CS.cam_laneinfo_stale_frames = 0 if received else self.CS.cam_laneinfo_stale_frames + 1
+    self.CS.can_filter_state = filter_state
+    self.CS.can_filter_age = 0 if filter_received else self.CS.can_filter_age + 1
+    if self.CC.can_filter is not None:
+      self.CC.can_filter.receive(filter_events, self.CS.can_filter_age)
     return super().update(can_packets)

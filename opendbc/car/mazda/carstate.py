@@ -2,6 +2,7 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, DT_CTRL, create_button_events, structs, uds
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.interfaces import CarStateBase
+from opendbc.car.mazda.can_filter import STATUS_FRESH_FRAMES as CAN_FILTER_FRESH_FRAMES
 from opendbc.car.mazda.radar_session import RadarSessionManager
 from opendbc.car.mazda.values import DBC, LKAS_LIMITS, CarControllerParams, MazdaFlags
 from opendbc.sunnypilot.car.mazda.carstate_ext import CarStateExt
@@ -94,6 +95,11 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
     self.radar_bus_healthy = False
     # The controller's radar session, shared by CarInterface: read where the last control frame left it.
     self.radar_session = RadarSessionManager()
+    # The controller's Smart CAN Filter session (None without the filter), and the board's last status
+    # byte with its age in frames, latched by CarInterface.update.
+    self.can_filter = None
+    self.can_filter_state: int | None = None
+    self.can_filter_age = CAN_FILTER_FRESH_FRAMES
     self.radar_owned = False  # the silence guard passed on an owned radar: the engagement gate below
     self.radar_was_silenced = False
     self.stock_set_allowed = False  # the stock radar's CRZ_INFO.ACC_SET_ALLOWED, from its own frames
@@ -308,6 +314,11 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
       session = self.radar_session
       silenced = session.control_active and not self.stock_radar_alive and (self.stock_radar_gone or self.radar_was_silenced)
       ret.accFaulted = (session.handback_failed and not session.handback_by_driver) or (self.radar_was_silenced and self.stock_radar_alive and not session.handback_active)
+      if self.can_filter is not None:
+        # The radar stays online behind the filter: ownership is the board's confirmed mode alone. A dropout
+        # disengages through the guard below, not a fault that would take MADS lateral with it.
+        silenced = self.can_filter.control_active
+        ret.accFaulted = False
       self.radar_was_silenced |= silenced
       self.radar_owned = silenced
 

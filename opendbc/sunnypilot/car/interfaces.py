@@ -17,7 +17,7 @@ from opendbc.car.ford.values import FordFlags
 from opendbc.car.gm.values import GMFlags
 from opendbc.car.honda.values import HondaFlags
 from opendbc.car.hyundai.values import HyundaiFlags
-from opendbc.car.mazda.values import MazdaFlags
+from opendbc.car.mazda.values import CAR as MAZDA_CAR, MazdaFlags
 from opendbc.car.subaru.values import SubaruFlags
 from opendbc.car.toyota.values import ToyotaFlags
 from opendbc.car.volkswagen.values import VolkswagenFlags
@@ -218,3 +218,8 @@ def _initialize_mazda(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_
     if int(params_dict.get("MazdaTjaButton", 0)) == 1:
       CP_SP.flags |= MazdaFlagsSP.TJA_BUTTON.value
       CP_SP.safetyParam |= MazdaSafetyFlagsSP.TJA_BUTTON
+    # The Smart CAN Filter is bench-tested on the CX-5 2022 only, and only alpha long uses it.
+    if int(params_dict.get("MazdaCanFilter", 0)) == 1 and CP.carFingerprint == MAZDA_CAR.MAZDA_CX5_2022 and \
+       CP.openpilotLongitudinalControl:
+      CP_SP.flags |= MazdaFlagsSP.CAN_FILTER.value
+      CP_SP.safetyParam |= MazdaSafetyFlagsSP.CAN_FILTER

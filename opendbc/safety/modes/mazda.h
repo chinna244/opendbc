@@ -14,6 +14,8 @@
 #define MAZDA_MODE_Y_BIT 13U
 // sunnypilot safety param: the TJA button is the MADS lateral switch
 #define MAZDA_PARAM_SP_TJA_BUTTON 1U
+// sunnypilot safety param: a Smart CAN Filter keeps the radar online under alpha long
+#define MAZDA_PARAM_SP_CAN_FILTER 2U
 #define MAZDA_RADAR_STATIC  0x499U
 #define MAZDA_RADAR_TRACK_1 0x361U
 #define MAZDA_RADAR_TRACK_2 0x362U
@@ -25,6 +27,8 @@
 #define MAZDA_STEER_TORQUE  0x240U
 #define MAZDA_ENGINE_DATA   0x202U
 #define MAZDA_PEDALS        0x165U
+// Smart CAN Filter control: magic, subcommand 0x2e (FILTER_CTRL)
+#define MAZDA_CAN_FILTER_CTRL 0x2A0U
 
 // CAN bus numbers
 #define MAZDA_MAIN 0
@@ -302,6 +306,17 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     }
   }
 
+  if (main_bus && (msg->addr == MAZDA_CAN_FILTER_CTRL)) {
+    // FILTER_CTRL only: MODE/FILTER bits, reserved bytes zero. The board's bootloader, softloader,
+    // reset (0x1e) and feature-save (0x1f) subcommands never pass.
+    bool filter_ctrl = (msg->data[0] == 0xceU) && (msg->data[1] == 0xfaU) && (msg->data[2] == 0xadU) &&
+                       (msg->data[3] == 0xdeU) && (msg->data[4] == 0x2eU) && ((msg->data[5] & 0xfcU) == 0U) &&
+                       (msg->data[6] == 0U) && (msg->data[7] == 0U);
+    if (!filter_ctrl) {
+      tx = false;
+    }
+  }
+
   if (main_bus && (msg->addr == MAZDA_CRZ_BTNS)) {
     // Permit resume only while controlling and cancel only while not controlling.
     bool cancel_cmd = (msg->data[0] == 0x1U);
@@ -386,6 +401,19 @@ static safety_config mazda_init(uint16_t param) {
     {MAZDA_RADAR_TRACK_6, MAZDA_CAM, 8, .check_relay = false},
   };
 
+// The Smart CAN Filter keeps the radar online: no UDS takeover and no synthetic radar frames, and
+// its FILTER_CTRL is the one extra message.
+  static const CanMsg MAZDA_LONG_FILTER_TX_MSGS[] = {
+    {MAZDA_LKAS, 0, 8, .check_relay = true, .disable_static_blocking = true},
+    {MAZDA_CRZ_BTNS, 0, 8, .check_relay = false},
+    {MAZDA_LKAS_HUD, 0, 8, .check_relay = true, .disable_static_blocking = true},
+    {MAZDA_CRZ_INFO, 0, 8, .check_relay = false},
+    {MAZDA_CRZ_CTRL, 0, 8, .check_relay = false},
+    {MAZDA_CAN_FILTER_CTRL, 0, 8, .check_relay = false},
+    {MAZDA_CRZ_INFO, MAZDA_CAM, 8, .check_relay = false},
+    {MAZDA_CRZ_CTRL, MAZDA_CAM, 8, .check_relay = false},
+  };
+
   static const RxCheck mazda_rx_checks[] = {
     {.msg = {{MAZDA_CRZ_CTRL,     0, 8, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
     {.msg = {{MAZDA_CRZ_BTNS,     0, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
@@ -405,10 +433,19 @@ static safety_config mazda_init(uint16_t param) {
   mazda_longitudinal = GET_FLAG(param, MAZDA_PARAM_LONGITUDINAL);
   mazda_eps_hw = GET_FLAG(param, MAZDA_PARAM_EPS_HW);
   mazda_tja_button = GET_FLAG(current_safety_param_sp, MAZDA_PARAM_SP_TJA_BUTTON);
+  // Alpha long through the Smart CAN Filter instead of the radar's UDS takeover.
+  bool can_filter = mazda_longitudinal && GET_FLAG(current_safety_param_sp, MAZDA_PARAM_SP_CAN_FILTER);
   acc_main_on = false;
 
-  return mazda_longitudinal ? BUILD_SAFETY_CFG(mazda_long_rx_checks, MAZDA_LONG_TX_MSGS) :
-                              BUILD_SAFETY_CFG(mazda_rx_checks, MAZDA_TX_MSGS);
+  safety_config ret;
+  if (can_filter) {
+    ret = BUILD_SAFETY_CFG(mazda_long_rx_checks, MAZDA_LONG_FILTER_TX_MSGS);
+  } else if (mazda_longitudinal) {
+    ret = BUILD_SAFETY_CFG(mazda_long_rx_checks, MAZDA_LONG_TX_MSGS);
+  } else {
+    ret = BUILD_SAFETY_CFG(mazda_rx_checks, MAZDA_TX_MSGS);
+  }
+  return ret;
 }
 
 const safety_hooks mazda_hooks = {

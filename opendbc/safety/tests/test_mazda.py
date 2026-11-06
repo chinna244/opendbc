@@ -467,6 +467,81 @@ class TestMazdaLongitudinalSafety(TestMazdaEpsSafety, common.LongitudinalAccelSa
         self.assertTrue(self._tx(msg))
 
 
+FILTER_MAGIC = bytes([0xce, 0xfa, 0xad, 0xde])
+
+
+class TestMazdaCanFilterSafety(TestMazdaLongitudinalSafety):
+  """Alpha long through the Smart CAN Filter: every longitudinal check above still holds, the UDS
+  takeover and the synthetic radar frames are gone, and FILTER_CTRL is the one extra message."""
+
+  TX_MSGS = [[0x243, 0], [0x09d, 0], [0x440, 0], [0x21b, 0], [0x21c, 0], [0x2a0, 0], [0x21b, 2], [0x21c, 2]]
+
+  def setUp(self):
+    self.safety = libsafety_py.libsafety
+    self.safety.set_current_safety_param_sp(MazdaSafetyFlagsSP.CAN_FILTER)
+    super().setUp()
+
+  def tearDown(self):
+    self.safety.set_current_safety_param_sp(0)
+
+  def test_filter_ctrl_mode_and_filter_bits_only(self):
+    for ctrl in range(4):
+      self.assertTrue(self._tx(make_msg(0, 0x2a0, 8, FILTER_MAGIC + bytes([0x2e, ctrl, 0, 0]))))
+    for ctrl in (0x04, 0x80, 0xff):
+      self.assertFalse(self._tx(make_msg(0, 0x2a0, 8, FILTER_MAGIC + bytes([0x2e, ctrl, 0, 0]))))
+    # reserved bytes must be zero, the magic exact, and only the main bus
+    self.assertFalse(self._tx(make_msg(0, 0x2a0, 8, FILTER_MAGIC + bytes([0x2e, 1, 1, 0]))))
+    self.assertFalse(self._tx(make_msg(0, 0x2a0, 8, FILTER_MAGIC + bytes([0x2e, 1, 0, 1]))))
+    self.assertFalse(self._tx(make_msg(0, 0x2a0, 8, bytes([0xce, 0xfa, 0xad, 0xdf, 0x2e, 1, 0, 0]))))
+    self.assertFalse(self._tx(make_msg(2, 0x2a0, 8, FILTER_MAGIC + bytes([0x2e, 1, 0, 0]))))
+
+  def test_board_reset_flash_and_feature_commands_blocked(self):
+    for cmd in ("1e0bb002", "1e0bb00a", "1e0bb001", "1f010001", "1f000000"):
+      self.assertFalse(self._tx(make_msg(0, 0x2a0, 8, FILTER_MAGIC + bytes.fromhex(cmd))), cmd)
+    for addr in (0x2a1, 0x2a8, 0x2a9):
+      self.assertFalse(self._tx(make_msg(0, addr, 8, FILTER_MAGIC + bytes([0x2e, 1, 0, 0]))), hex(addr))
+
+  def test_filter_ctrl_independent_of_controls(self):
+    msg = FILTER_MAGIC + bytes([0x2e, 3, 0, 0])
+    for allowed in (False, True):
+      self.safety.set_controls_allowed(allowed)
+      self.assertTrue(self._tx(make_msg(0, 0x2a0, 8, msg)))
+
+  # the UDS takeover and its synthetic radar frames are blocked outright
+  def test_empty_radar_tracks_allowed(self):
+    for bus in (0, 2):
+      self.assertFalse(self._tx(make_msg(bus, 0x499, 8, bytes.fromhex("0008c00000000000"))))
+      self.assertFalse(self._tx(make_msg(bus, 0x361, 8, bytes.fromhex("fff7fefe1fc00080"))))
+
+  def test_g46l_radar_static_allowed(self):
+    for bus in (0, 2):
+      self.assertFalse(self._tx(make_msg(bus, 0x499, 8, bytes.fromhex("0098400000000000"))))
+
+  def test_radar_uds_allowlist(self):
+    for dat in ("023e800000000000", "0210020000000000", "0210010000000000"):
+      self.assertFalse(self._tx(make_msg(0, 0x764, 8, bytes.fromhex(dat))))
+
+
+class TestMazdaCanFilterNeedsLongitudinal(TestMazdaEpsSafety):
+  """The filter bit alone, without alpha long, changes nothing: FILTER_CTRL stays blocked."""
+
+  def setUp(self):
+    self.safety = libsafety_py.libsafety
+    self.safety.set_current_safety_param_sp(MazdaSafetyFlagsSP.CAN_FILTER)
+    super().setUp()
+
+  def tearDown(self):
+    self.safety.set_current_safety_param_sp(0)
+
+  def test_filter_ctrl_blocked(self):
+    self.assertFalse(self._tx(make_msg(0, 0x2a0, 8, FILTER_MAGIC + bytes([0x2e, 3, 0, 0]))))
+
+
+class TestMazdaLongitudinalBlocksFilterCtrl(TestMazdaLongitudinalSafety):
+  def test_filter_ctrl_blocked_without_the_filter(self):
+    self.assertFalse(self._tx(make_msg(0, 0x2a0, 8, FILTER_MAGIC + bytes([0x2e, 3, 0, 0]))))
+
+
 class MazdaTjaButtonBase(unittest.TestCase):
   """MADS on, the TJA button declared (or not) through the sunnypilot safety param."""
 
