@@ -187,6 +187,7 @@
 |Hyundai|Sonata 2018-19|Smart Cruise Control (SCC)|[Upstream](#upstream)|
 |Hyundai|Sonata 2020-23|All|[Upstream](#upstream)|
 |Hyundai|Sonata Hybrid 2020-23|All|[Upstream](#upstream)|
+|Hyundai|Sonata Hybrid (without HDA II) 2024-26|Smart Cruise Control (SCC)|[Upstream](#upstream)|
 |Hyundai|Staria 2023|All|[Upstream](#upstream)|
 |Hyundai|Tucson 2021|Smart Cruise Control (SCC)|[Upstream](#upstream)|
 |Hyundai|Tucson 2022|Smart Cruise Control (SCC)|[Upstream](#upstream)|
@@ -388,8 +389,7 @@
 |Toyota|RAV4 Prime 2024-25|All|[Not compatible](#can-bus-security)|
 |Toyota|Sequoia 2023-25|All|[Not compatible](#can-bus-security)|
 |Toyota|Sienna 2018-20|All|[Upstream](#upstream)|
-|Toyota|Sienna 2021-23|All|[Custom](#secoc-cars-with-recoverable-keys)|
-|Toyota|Sienna 2024-25|All|[Not compatible](#can-bus-security)|
+|Toyota|Sienna 2021-26|All|[Custom](#secoc-cars-with-recoverable-keys)|
 |Toyota|Tundra 2022-25|All|[Not compatible](#can-bus-security)|
 |Toyota|Venza 2021-25|All|[Not compatible](#can-bus-security)|
 |Toyota|Yaris (Non-US only) 2020, 2023|All|[Custom](#secoc-cars-with-recoverable-keys)|
