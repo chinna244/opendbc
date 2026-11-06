@@ -537,7 +537,7 @@ def test_command_slew_is_rate_limited(cc, cs):
   assert cc.accel_last == pytest.approx(-2.0, rel=1e-6, abs=1e-12)
 
   # plan jumps straight to +1.0: the command must ramp, not step; brake release at the windup
-  # limit, then the positive part at stock's rolling build rate
+  # limit, then the positive part at the town build rate
   prev = cc.accel_last
   for _ in range(5):
     step_long(cc, cs, accel=1.0, cruise_engaged=True, v_ego=10.)
