@@ -1008,12 +1008,35 @@ def test_a_double_drop_keeps_the_kick_push_until_back_in_6th(cc, cs):
 
 def test_after_an_upshift_into_6th_no_kick_through_the_cooldown(cc, cs):
   P = CarControllerParams
-  drive(cc, cs, seconds(1.0), 0.6, 5, 25., 31.)
-  drive(cc, cs, P.KICK_COOLDOWN_FRAMES - 1, 0.6, 6, 25., 31.)
+  drive(cc, cs, seconds(1.0), 0.5, 5, 25., 31.)
+  drive(cc, cs, P.KICK_COOLDOWN_FRAMES - 1, 0.5, 6, 25., 31.)  # 0.5: over the kick margin, under the bypass
   assert cc.accel_shaper.kick_from == 0
   assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)
-  drive(cc, cs, P.KICK_FRAMES + 1, 0.6, 6, 25., 31.)  # the cooldown ends, then a full second of asking
+  drive(cc, cs, P.KICK_FRAMES + 1, 0.5, 6, 25., 31.)  # the cooldown ends, then a full second of asking
   assert cc.accel_shaper.kick_from == 6
+
+
+def test_a_strong_ask_after_an_upshift_kicks_through_the_cooldown(cc, cs):
+  # route 00000048 t=564: an on-ramp asked ~1.0 in 5th at 28-33 mph right after the 4-5 upshift, 0.35 for 9 s
+  P = CarControllerParams
+  v, v_set = 12.5, 36.  # 28 mph, set 81
+  drive(cc, cs, seconds(1.0), 1.0, 4, v, v_set)
+  drive(cc, cs, P.KICK_FRAMES - 1, 1.0, 5, v, v_set)
+  assert cc.accel_shaper.kick_cooldown > 0 and cc.accel_shaper.kick_from == 0
+  assert cc.accel_last == pytest.approx(P.FIFTH_GEAR_LOW_ACCEL, abs=1e-6)
+  drive(cc, cs, seconds(1.0), 1.0, 5, v, v_set)
+  assert cc.accel_shaper.kick_from == 5
+  assert cc.accel_last == pytest.approx(P.KICK_ACCEL[5], abs=1e-6)  # 4th's own cap, not the plan's 1.0
+
+
+def test_a_mild_ask_after_an_upshift_still_waits_the_cooldown(cc, cs):
+  P = CarControllerParams
+  v, v_set = 12.5, 36.
+  ask = P.FIFTH_GEAR_LOW_ACCEL + P.KICK_COOLDOWN_BYPASS - 0.05  # over the kick margin, under the bypass
+  drive(cc, cs, seconds(1.0), ask, 4, v, v_set)
+  drive(cc, cs, seconds(5.0), ask, 5, v, v_set)
+  assert cc.accel_shaper.kick_from == 0
+  assert cc.accel_last == pytest.approx(P.FIFTH_GEAR_LOW_ACCEL, abs=1e-6)
 
 
 def test_a_catch_up_in_5th_at_low_rpm_kicks_down_to_4th(cc, cs):

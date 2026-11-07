@@ -153,6 +153,8 @@ class AccelShaper:
     self.kick_frames = 0  # frames this gear's cap has held back a catch-up ask
     self.kick_from = 0  # the gear whose cap is lifted for one deliberate downshift, 0 for none
     self.kick_cooldown = 0  # frames left after an upshift into 4th or above before any kick
+    self.kick_dropped = False  # the current kick has dropped a gear
+    self.kick_cooldown_firm = False  # the cooldown began at the upshift ending a kick that dropped a gear: no bypass
     self.shifting = False  # mid-shift: the gear read is the one it is leaving
     self.long_active_last = False
     self.handover_frames = 0  # frames left of a rolling return from a gas override
@@ -178,10 +180,14 @@ class AccelShaper:
     if gear_box != self.gear:
       self.kick_frames = 0
       if self.gear and gear_box > self.gear:
+        ends_a_dropped_kick = bool(self.kick_from) and self.kick_dropped and gear_box >= self.kick_from
         if gear_box >= self.kick_from:
           self.kick_from = 0  # back up in the gear it kicked from
         if gear_box >= 4:
           self.kick_cooldown = CarControllerParams.KICK_COOLDOWN_FRAMES
+          self.kick_cooldown_firm = ends_a_dropped_kick
+      elif self.kick_from and gear_box < self.gear:
+        self.kick_dropped = True
     if self.gear and gear_box > self.gear and gear_box >= CarControllerParams.UPSHIFT_HOLD_MIN_GEAR and \
        v_ego < CarControllerParams.UPSHIFT_HOLD_SPEED:
       self.upshift_hold_frames = CarControllerParams.UPSHIFT_HOLD_FRAMES
@@ -222,14 +228,17 @@ class AccelShaper:
     # only where dropping a gear gives a real push over this gear's cap
     holding = cap is not None and self.gear >= 4 and self._kick_push(self.gear, v_ego) >= cap + P.KICK_MARGIN
     catching_up = 0. < v_set < P.KICK_SET_SPEED_MAX and v_set - v_ego >= P.KICK_DEFICIT
-    if self.kick_from or not long_active or not holding or self.kick_cooldown > 0 or not catching_up or \
+    # after an upshift only an ask far over the cap kicks: an on-ramp, not a hunt; never right after a kick's own
+    # drop and return, which would loop it
+    cooling = self.kick_cooldown > 0 and (self.kick_cooldown_firm or cap is None or plan_accel < cap + P.KICK_COOLDOWN_BYPASS)
+    if self.kick_from or not long_active or not holding or cooling or not catching_up or \
        plan_accel < cap + P.KICK_MARGIN:
       # a partial count does not wait out a softer stretch
       self.kick_frames = 0
     else:
       self.kick_frames += 1
       if self.kick_frames >= P.KICK_FRAMES:
-        self.kick_from, self.kick_frames = self.gear, 0
+        self.kick_from, self.kick_frames, self.kick_dropped = self.gear, 0, False
 
   def _update_handover(self, long_engaged: bool, long_active: bool, standstill: bool, v_ego: float, a_ego: float,
                        lead_visible: bool, gas_pressed: bool, plan_accel: float) -> bool:

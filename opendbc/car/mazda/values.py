@@ -179,6 +179,10 @@ class CarControllerParams:
   KICK_RELEASE = 0.25  # m/s2
   KICK_FRAMES = int(1.0 / DT_CTRL)
   KICK_COOLDOWN_FRAMES = int(15.0 / DT_CTRL)
+  # An ask this far over the gear's cap kicks through the cooldown: route 00000048 t=564 an on-ramp asked ~1.0 in 5th
+  # at 28-33 mph right after the 4-5 upshift and got 0.35 for 9 s until the driver pressed (and took it 5-4-3). Replay
+  # of 128 routes (9.2 h): 8 more kicks, all asking 0.8-1.2, 1 easing within 3 s (30% of all kicks do).
+  KICK_COOLDOWN_BYPASS = 0.4  # m/s2 over the gear's cap
   # 1.2 m/s3 in town with the raised ceiling, our 0.8 from 36 mph.
   ACCEL_BUILD_BP = [3., 6., 12., 16.]   # m/s
   ACCEL_BUILD_V = [ACCEL_RELEASE_RAMP, 1.2, 1.2, 0.8]  # m/s3
