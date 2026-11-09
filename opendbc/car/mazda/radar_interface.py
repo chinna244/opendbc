@@ -66,8 +66,10 @@ class RadarInterface(RadarInterfaceBase):
     return rr
 
   def _lost(self):
-    """No tracks this burst: radard falls back to the camera's leads and selfdrived warns."""
+    """No tracks this burst: radard falls back to the camera's leads and selfdrived warns. A burst
+    left incomplete by the dropout is discarded, so none of its frames reach the next one."""
     self.pts.clear()
+    self.updated_messages.clear()
     ret = structs.RadarData()
     ret.errors.radarUnavailableTemporary = True
     return ret
@@ -81,6 +83,12 @@ class RadarInterface(RadarInterfaceBase):
       ret.errors.canError = True
 
     for addr in RADAR_TRACK_ADDRS:
+      # Behind the filter a slot counts only from a frame of this burst: the parser keeps every
+      # address's last values, so a frame missing from a burst would republish a stale track.
+      if self.camera_fallback and addr not in updated_messages:
+        self.pts.pop(addr, None)
+        continue
+
       msg = self.rcp.vl[addr]
 
       dist = msg['DIST_OBJ']
