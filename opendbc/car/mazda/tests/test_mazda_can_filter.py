@@ -15,7 +15,7 @@ from opendbc.car.mazda.interface import CarInterface
 from opendbc.car.mazda.tests.conftest import CRZ_CTRL, CRZ_INFO, DBC_NAME, RADAR_STATIC, RADAR_UDS, SESSION_PROG_DAT, \
   car_params, car_params_sp, frames, mazda_car_state, packer, step_long
 from opendbc.car.mazda.tests.test_mazda_carstate import feed
-from opendbc.car.mazda.values import CAR
+from opendbc.car.mazda.values import CAR, MazdaFlags
 from opendbc.sunnypilot.car.interfaces import _initialize_mazda
 from opendbc.sunnypilot.car.mazda.values import MazdaFlagsSP, MazdaSafetyFlagsSP
 from opendbc.sunnypilot.car.stock_ecu import StockEcuState
@@ -82,6 +82,15 @@ class TestOptIn:
     CP, CP_SP = filter_params()
     assert CP_SP.flags & MazdaFlagsSP.CAN_FILTER
     assert CP_SP.safetyParam & MazdaSafetyFlagsSP.CAN_FILTER
+    assert not CP.radarUnavailable
+
+  def test_g46l_radar_stays_vision_only(self):
+    CP = car_params(CAR.MAZDA_CX5_2022, alpha_long=True)
+    CP.flags |= MazdaFlags.G46L_RADAR.value
+    CP_SP = car_params_sp(CP, CAR.MAZDA_CX5_2022, alpha_long=True)
+    _initialize_mazda(CP, CP_SP, {"MazdaCanFilter": "1"})
+    assert CP_SP.flags & MazdaFlagsSP.CAN_FILTER
+    assert CP.radarUnavailable
 
   @pytest.mark.parametrize("enabled, alpha_long, candidate", [
     (False, True, CAR.MAZDA_CX5_2022),
@@ -92,6 +101,8 @@ class TestOptIn:
     CP, CP_SP = filter_params(enabled, alpha_long, candidate)
     assert not CP_SP.flags & MazdaFlagsSP.CAN_FILTER
     assert not CP_SP.safetyParam & MazdaSafetyFlagsSP.CAN_FILTER
+    if CP.openpilotLongitudinalControl:
+      assert CP.radarUnavailable  # alpha long without the filter tears the radar down
     assert CarController({Bus.pt: DBC_NAME}, CP, CP_SP).can_filter is None
 
 

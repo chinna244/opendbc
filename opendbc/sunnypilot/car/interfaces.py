@@ -223,3 +223,7 @@ def _initialize_mazda(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params_
        CP.openpilotLongitudinalControl:
       CP_SP.flags |= MazdaFlagsSP.CAN_FILTER.value
       CP_SP.safetyParam |= MazdaSafetyFlagsSP.CAN_FILTER
+      # The radar stays online behind the filter, so its tracks (0x361-0x366) feed radard again.
+      # The G46L never publishes them and stays vision-only.
+      if not CP.flags & MazdaFlags.G46L_RADAR:
+        CP.radarUnavailable = False
