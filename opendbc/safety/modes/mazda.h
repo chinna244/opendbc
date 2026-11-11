@@ -276,14 +276,17 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     }
 
     // ACC_ACTIVE requires prior controls permission established from the physical SET edge.
+    // So do the standstill bits sent only with it: STOPPING, STOPPING_2 and RESUME_UNLATCHING (a hold release).
     bool acc_active = GET_BIT(msg, 33U);
-    if (!controls_allowed && acc_active) {
+    bool standstill_bits = GET_BIT(msg, 42U) || GET_BIT(msg, 52U) || GET_BIT(msg, 54U);
+    if (!controls_allowed && (acc_active || standstill_bits)) {
       tx = false;
     }
   }
 
   if (mazda_longitudinal && long_replacement_bus && (msg->addr == MAZDA_CRZ_CTRL)) {
-    bool cruise_active = GET_BIT(msg, 3U);
+    // CRZ_ACTIVE and ACC_ACTIVE_2, which is sent only with it
+    bool cruise_active = GET_BIT(msg, 3U) || GET_BIT(msg, 52U);
     if (!controls_allowed && cruise_active) {
       tx = false;
     }

@@ -466,6 +466,23 @@ class TestMazdaLongitudinalSafety(TestMazdaEpsSafety, common.LongitudinalAccelSa
         self.safety.set_controls_allowed(True)
         self.assertTrue(self._tx(msg))
 
+  def test_engaged_only_bits_gated_on_controls(self):
+    # the controller sets the standstill bits only with ACC_ACTIVE and ACC_ACTIVE_2 only with CRZ_ACTIVE, so
+    # neither alone may flow while controls are not allowed: a stray RESUME_UNLATCHING could release a body
+    # hold. ACC_SET_ALLOWED is armed-idle standby state and stays open.
+    for bus in (0, 2):
+      for sig in ("STOPPING", "STOPPING_2", "RESUME_UNLATCHING", "ACC_SET_ALLOWED"):
+        msg = self.packer.make_can_msg_safety("CRZ_INFO", bus, {"ACCEL_CMD": self.INACTIVE_ACCEL, sig: 1})
+        self.safety.set_controls_allowed(False)
+        self.assertEqual(sig == "ACC_SET_ALLOWED", self._tx(msg), sig)
+        self.safety.set_controls_allowed(True)
+        self.assertTrue(self._tx(msg), sig)
+      msg = self.packer.make_can_msg_safety("CRZ_CTRL", bus, {"ACC_ACTIVE_2": 1})
+      self.safety.set_controls_allowed(False)
+      self.assertFalse(self._tx(msg))
+      self.safety.set_controls_allowed(True)
+      self.assertTrue(self._tx(msg))
+
 
 FILTER_MAGIC = bytes([0xce, 0xfa, 0xad, 0xde])
 
