@@ -44,6 +44,9 @@ STATUS_FRESH_FRAMES = int(0.5 / DT_CTRL)
 CONFIRM_SILENCE_FRAMES = int(0.04 / DT_CTRL)
 # The board's own mode timeout: a mode-off unanswered this long is a failed hand-back.
 RELEASE_LIMIT_FRAMES = int(5.0 / DT_CTRL)
+# A request unconfirmed this long is given up for the drive, as the UDS takeover's attempt budget: MODE idles
+# the radar's buttons, so holding it unowned would leave the driver no cruise at all.
+CONFIRM_LIMIT_FRAMES = int(10.0 / DT_CTRL)
 
 
 def create_filter_ctrl(ctrl: int) -> CanData:
@@ -77,13 +80,21 @@ class CanFilterSession:
     return self.failed or self.handback
 
   @property
+  def lost(self) -> bool:
+    """Ownership lost or never confirmed: the drive is without the board, unlike a hand-back."""
+    return self.failed
+
+  @property
   def stock_ecu_state(self) -> StockEcuState:
     if not self.mode_sent:
       return StockEcuState.NOT_NEEDED
     if self.releasing:
       if self.released:
         return StockEcuState.RESTORED
-      return StockEcuState.FAILED if self.release_frames >= RELEASE_LIMIT_FRAMES else StockEcuState.RESTORING
+      if self.release_frames < RELEASE_LIMIT_FRAMES:
+        return StockEcuState.RESTORING
+      # no status all drive: no board answered, and its mode timeout has run out past the last MODE anyway
+      return StockEcuState.FAILED if self.last_state is not None else StockEcuState.NOT_NEEDED
     # the board may be rewriting the radar's buttons: ours, or not yet
     return StockEcuState.READY if self.control_active else StockEcuState.STARTING
 
@@ -147,6 +158,9 @@ class CanFilterSession:
       self.request_frames = -1
       self.acked_frames = -1
       return []
+    elif self.request_frames >= CONFIRM_LIMIT_FRAMES:
+      self._lose("ownership not confirmed", self.last_state)
+      ctrl = 0
     else:
       if self.acked_frames >= 0:
         self.acked_frames += 1

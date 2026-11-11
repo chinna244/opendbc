@@ -271,6 +271,12 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       return False
     return self.radar_off_prev or self.radar_restart_frames > 0
 
+  @property
+  def stock_ecu_lost(self) -> bool:
+    """The Smart CAN Filter lost (or never confirmed) ownership for the drive. card publishes it for the
+    loss alert: under the filter a loss is a quiet cruise drop, not a fault (carstate keeps MADS lateral)."""
+    return self.can_filter is not None and self.can_filter.lost
+
   def _track_radar_session(self, session_state: RadarSessionState, CS, CC_SP) -> None:
     """Per-frame bookkeeping after the session manager ran: what carstate is told, and the timers
     that follow a hand-back (SET warm-up, AEB restart) and a takeover (the hand-back hold)."""

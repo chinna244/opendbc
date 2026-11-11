@@ -8,7 +8,7 @@ import pytest
 
 from opendbc.car import Bus, DT_CTRL
 from opendbc.car.mazda import mazdacan
-from opendbc.car.mazda.can_filter import CONFIRM_SILENCE_FRAMES, CTRL_FILTER, CTRL_MODE, FACTORY_CRUISE, FILTER_CTRL_ADDR, \
+from opendbc.car.mazda.can_filter import CONFIRM_LIMIT_FRAMES, CONFIRM_SILENCE_FRAMES, CTRL_FILTER, CTRL_MODE, FACTORY_CRUISE, FILTER_CTRL_ADDR, \
   FILTER_CTRL_STEP, FILTER_STATE_ADDR, RELEASE_LIMIT_FRAMES, STATE_FILTERING, STATE_MODE, STATUS_FRESH_FRAMES, create_filter_ctrl
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.interface import CarInterface
@@ -198,6 +198,57 @@ class TestFactoryCruiseActive:
     sends = run(fcc, fcs, n=2 * FILTER_CTRL_STEP, state=CONFIRMED, cruise_engaged=True)
     assert frames(sends, FILTER_CTRL_ADDR) == []
     assert not fcc.can_filter.control_active
+
+
+class TestConfirmLimit:
+  """A request the board never confirms is given up after CONFIRM_LIMIT_FRAMES, like a loss: MODE=0 returns the
+  radar's buttons so the driver keeps the car's own cruise, and the drive is flagged lost for the alert."""
+
+  def test_limit_is_the_uds_takeovers_budget(self):
+    from opendbc.car.mazda.radar_session import RADAR_SESSION_LIMIT_FRAMES
+    assert CONFIRM_LIMIT_FRAMES == RADAR_SESSION_LIMIT_FRAMES == int(10.0 / DT_CTRL)
+
+  @pytest.mark.parametrize("state", [None, STATE_MODE, STATE_FILTERING])
+  def test_unconfirmed_request_gives_up(self, fcc, fcs, state):
+    sends = run(fcc, fcs, n=CONFIRM_LIMIT_FRAMES + 1, state=state)
+    assert set(frames(sends, FILTER_CTRL_ADDR)) == {REQUEST}
+    assert fcc.stock_ecu_state == StockEcuState.STARTING and not fcc.stock_ecu_lost
+    sends = run(fcc, fcs, state=state)
+    assert frames(sends, FILTER_CTRL_ADDR) == [MODE_OFF] and cruise_frames(sends) == []
+    assert fcc.stock_ecu_lost and fcc.stock_ecu_state == StockEcuState.RESTORING
+    # no new request for the drive
+    sends = run(fcc, fcs, n=3 * FILTER_CTRL_STEP, state=state)
+    assert set(frames(sends, FILTER_CTRL_ADDR)) == {MODE_OFF} and cruise_frames(sends) == []
+
+  def test_confirmed_before_the_limit_is_kept(self, fcc, fcs):
+    run(fcc, fcs, n=CONFIRM_LIMIT_FRAMES - CONFIRM_SILENCE_FRAMES - 2)
+    run(fcc, fcs, state=CONFIRMED)
+    run(fcc, fcs, n=CONFIRM_SILENCE_FRAMES, state=CONFIRMED, age=1)
+    assert fcc.can_filter.control_active
+    run(fcc, fcs, n=2 * FILTER_CTRL_STEP, state=CONFIRMED, age=1)
+    assert fcc.can_filter.control_active and not fcc.stock_ecu_lost
+
+  def test_the_cars_cruise_restarts_the_count(self, fcc, fcs):
+    run(fcc, fcs, n=CONFIRM_LIMIT_FRAMES - 1)
+    run(fcc, fcs, cruise_engaged=True)
+    run(fcc, fcs, n=CONFIRM_LIMIT_FRAMES - 1)
+    assert not fcc.stock_ecu_lost and fcc.stock_ecu_state == StockEcuState.STARTING
+
+  def test_no_board_settles_not_needed(self, fcc, fcs):
+    # no status all drive: nothing was ever owned, so no false "Stock Cruise Failed" on the next drive
+    run(fcc, fcs, n=CONFIRM_LIMIT_FRAMES + 2)
+    assert fcc.stock_ecu_lost
+    run(fcc, fcs, n=RELEASE_LIMIT_FRAMES - 1)
+    assert fcc.stock_ecu_state == StockEcuState.RESTORING
+    run(fcc, fcs)
+    assert fcc.stock_ecu_state == StockEcuState.NOT_NEEDED and fcc.stock_ecu_lost
+
+  def test_no_board_handback_settles_not_needed(self, fcc, fcs):
+    run(fcc, fcs)
+    run(fcc, fcs, n=RELEASE_LIMIT_FRAMES - 1, handback=True, long_active=False)
+    assert fcc.stock_ecu_state == StockEcuState.RESTORING
+    run(fcc, fcs, handback=True, long_active=False)
+    assert fcc.stock_ecu_state == StockEcuState.NOT_NEEDED and not fcc.stock_ecu_lost
 
 
 class TestDropout:
