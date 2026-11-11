@@ -192,6 +192,11 @@ class TestForeignRadar:
     assert CP.alphaLongitudinalAvailable
     assert not CP.flags & MazdaFlags.G46L_RADAR
 
+  def test_radar_delay_aligns_tracks_with_ego_speed(self):
+    # track range rates lag carState vEgo by 0.10-0.14 s; radard pairs vRel with vEgo that old
+    for alpha_long in (False, True):
+      assert car_params(CAR.MAZDA_CX5_2022, alpha_long=alpha_long).radarDelay == pytest.approx(0.1)
+
 
 class TestCamLaneinfoLatch:
   """CI.update() latches the camera's raw CAM_LANEINFO frame, so it must accept every shape callers pass."""

@@ -46,6 +46,8 @@ class CarInterface(CarInterfaceBase):
     if g46l_radar:
       ret.flags |= MazdaFlags.G46L_RADAR.value
     ret.radarUnavailable = Bus.radar not in DBC[candidate] or g46l_radar
+    # Track range rates lag carState vEgo by 0.10-0.14 s (stationary objects vs -vEgo while accelerating).
+    ret.radarDelay = 0.1
 
     # Every gen1 Mazda EPS is the same hardware; only the firmware differs. Steer-to-zero follows
     # the EPS firmware, so a donor-EPS swap carries it and older firmware in a 2022 body loses it.
