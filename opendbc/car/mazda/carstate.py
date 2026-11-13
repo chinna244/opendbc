@@ -340,7 +340,7 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
     # Stock LKAS must be switched on: the EPS applies no LKAS torque otherwise. Off is LANE_LINES 0
     # (the LAS switch) or both CAM_SETTINGS intervention bits clear; a car that never sends
     # CAM_SETTINGS reads on (docs/zoompilot/mazda-lateral.md). A faulted camera also sends LANE_LINES 0,
-    # with its error bits set; that is the camera fault (steerFaultPermanent), not the switch.
+    # with its error bits set; that is the camera fault, not the switch.
     if len(cp_cam.vl_all["CAM_SETTINGS"]["LKAS_INERVENTION_ON1"]) > 0:
       self.lkas_setting_on = any(cp_cam.vl["CAM_SETTINGS"][s] for s in ("LKAS_INERVENTION_ON1", "ILKAS_NTERVENTION_ON2"))
     camera_faulted = cp_cam.vl["CAM_LANEINFO"]["ERR_BIT"] == 1 or cp_cam.vl["CAM_LKAS"]["ERR_BIT_1"] == 1
@@ -377,7 +377,8 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
     # camera signals
     self.cam_lkas = cp_cam.vl["CAM_LKAS"]
     self.cam_laneinfo = cp_cam.vl["CAM_LANEINFO"]
-    ret.steerFaultPermanent = cp_cam.vl["CAM_LKAS"]["ERR_BIT_1"] == 1
+    # The EPS's own fault; the camera's ERR_BIT_1 follows it (docs/zoompilot/mazda-lateral.md).
+    ret.steerFaultPermanent = cp.vl["STEER_RATE"]["LKAS_FAULT"] == 1
     self.hbc_request = cam_laneinfo_fresh and self.cam_laneinfo["BIT2"] == 1
 
     # Decode distance, set-speed, resume, cancel, and main-button events.
