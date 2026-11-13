@@ -561,11 +561,11 @@ class UndeliveredRig:
     self.packer = packer()
     self.frame = 0
 
-  def step(self, request, effective, blocked, speed_kph=40., driver_torque=0, track_state=0):
+  def step(self, request, effective, blocked, speed_kph=40., driver_torque=0, track_state=0, lkas_fault=0, extra=()):
     self.frame += 1
-    ret, _ = feed(self.CI, self.frame,
+    ret, _ = feed(self.CI, self.frame, *extra,
                   self.packer.make_can_msg("STEER_RATE", 0, {"LKAS_REQUEST": request, "LKAS_EFFECTIVE": effective, "LKAS_BLOCK": blocked,
-                                                             "LKAS_TRACK_STATE": track_state}),
+                                                             "LKAS_TRACK_STATE": track_state, "LKAS_FAULT": lkas_fault}),
                   self.packer.make_can_msg("WHEEL_SPEEDS", 0, {"FL": speed_kph, "FR": speed_kph, "RL": speed_kph, "RR": speed_kph}),
                   self.packer.make_can_msg("STEER_TORQUE", 0, {"STEER_TORQUE_SENSOR": driver_torque}))
     return ret
@@ -880,13 +880,34 @@ def test_faulted_camera_is_not_the_las_switch():
   assert feed(CI, 0, (CAM_LANEINFO, las_off, 2))[0].invalidLkasSetting
   assert not feed(CI, 1, (CAM_LANEINFO, faulted, 2))[0].invalidLkasSetting
 
-  # CAM_LKAS ERR_BIT_1 alone (steerFaultPermanent) also marks the camera as faulted; same route's frames
+  # CAM_LKAS ERR_BIT_1 alone also marks the camera as faulted; same route's frames
   CI = car_interface(alpha_long=False)
   feed(CI, 0, (CAM_LKAS, bytes.fromhex("f8000960020000a7"), 2))
   feed(CI, 1, (CAM_LKAS, bytes.fromhex("08000960020000b6"), 2))
   ret = feed(CI, 2, (CAM_LANEINFO, las_off, 2))[0]
-  assert ret.steerFaultPermanent
   assert not ret.invalidLkasSetting
+
+
+class TestPermanentFault:
+  """steerFaultPermanent is the EPS's LKAS_FAULT; the camera's ERR_BIT_1 alone is sun glare."""
+
+  @staticmethod
+  def camera(rig, fault):
+    return [rig.packer.make_can_msg("CAM_LKAS", 2, {"ERR_BIT_1": fault, "ERR_BIT_2": fault})]
+
+  @pytest.mark.parametrize("blocked", [0, 1])
+  def test_camera_glare_is_not_a_permanent_fault(self, blocked):
+    rig = UndeliveredRig()
+    rig.step(0, 0, 0)
+    ret = rig.step(0, 0, blocked, extra=self.camera(rig, 1))
+    assert rig.CS.cam_lkas["ERR_BIT_1"] == 1
+    assert not ret.steerFaultPermanent
+
+  def test_eps_fault_is_permanent_before_the_camera_follows(self):
+    rig = UndeliveredRig()
+    rig.step(0, 0, 0)
+    assert rig.step(0, 0, 1, lkas_fault=1).steerFaultPermanent
+    assert rig.step(0, 0, 1, lkas_fault=1, extra=self.camera(rig, 1)).steerFaultPermanent
 
 
 class TestLkasRearm:
