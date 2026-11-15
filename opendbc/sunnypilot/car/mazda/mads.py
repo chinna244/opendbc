@@ -202,7 +202,7 @@ class MadsCarController:
     """Whether the alert frame carries the white wheel.
 
     On a TJA-declared car with MADS active and cruise fully off, or with openpilot steering and
-    cruising under alpha long with the radar held silent, the white-wheel TJA=2 state
+    cruising under alpha long that owns cruise (radar held silent, or the Smart CAN Filter), the white-wheel TJA=2 state
     is XORed into the camera's current payload, but only onto an exact allowlisted idle base:
     TJA=2 is not display-only, the body reads the same frame. Every cruise interaction fails
     closed, and a white wheel HUD state that became unsafe is withdrawn immediately, outside
@@ -211,10 +211,13 @@ class MadsCarController:
     session_ambiguous = handback_active or CC_SP.stockEcuHandBack
     mrcc_off = (not session_ambiguous and not CS.mrcc_armed_raw and
                 not CS.cruise_available and not CS.cruise_enabled)
-    # Alpha long engaged with the radar held silent: the radar that reads TJA from this frame is
-    # off the bus, so openpilot steering and cruising carries the white state too, and with it
-    # the dash's lane lines (routes 00000097 to 0000013e drew them only from TJA=2 frames).
-    cruising = (not session_ambiguous and CC.enabled and CC.latActive and self.radar_session.control_active and
+    # Alpha long engaged with openpilot owning cruise: openpilot steering and cruising carries the
+    # white state too, and with it the dash's lane lines (routes 00000097 to 0000013e drew them only
+    # from TJA=2 frames). Owned = the radar held silent (UDS), or the Smart CAN Filter's confirmed
+    # mode: that radar stays online and reads this frame with its main on in standby, its cruise
+    # frames kept off the car by the board (the user's 2026-11-15 choice).
+    owned = self.can_filter.control_active if self.can_filter is not None else self.radar_session.control_active
+    cruising = (not session_ambiguous and CC.enabled and CC.latActive and owned and
                 CS.radar_bus_healthy and CS.out.canValid)
 
     # Every button a TJA wheel carries: TJA, MRCC, SET+/-, RES, DISTANCE, plus the
