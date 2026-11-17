@@ -662,55 +662,131 @@ class TestMazdaTjaMads(MazdaTjaButtonBase):
     self.assertTrue(self.safety.get_acc_main_on())
 
 
-class TestMazdaTjaHiddenFromCamera(TestMazdaTjaMads):
-  """The camera (FSC) reads the TJA button from the forwarded CRZ_BTNS and arms its own TJA on it
-  whenever MRCC main is on, alongside MADS. Declared, the bus 0 -> bus 2 copy loses bit 11; the
-  car's side and the panda's own RX keep the press."""
+class TestMazdaTjaReachesCamera(MazdaTjaButtonBase):
+  """Every physical TJA press reaches the camera unmodified, cruise on or off, as before
+  2026-10-13: the camera arms its lane-keep display state (CAM_LANEINFO byte 3) on it, which is
+  what draws the dash lane lines. The camera's own TJA that a press can latch with MRCC main on is
+  pressed off by the controller (TestMazdaCameraTjaPressOff)."""
 
-  def _fwd_copy(self, src_bus, msg):
+  TJA_BUTTON = True
+
+  def _btns(self, tja=False, **over):
+    return self.packer.make_can_msg_safety("CRZ_BTNS", 0, {"TJA_BUTTON": tja, **over})
+
+  def _fwd_copy(self, msg):
     orig = bytes(msg[0].data[0:8])
     clone = libsafety_py.make_CANPacket(int(msg[0].addr), int(msg[0].bus), orig)
-    self.safety.safety_fwd_modify(src_bus, clone)
+    self.safety.safety_fwd_modify(0, clone)
     return orig, bytes(clone[0].data[0:8])
 
-  def test_declared_button_is_cleared_and_nothing_else(self):
-    self._init(tja_button=True)
-    for over in ({}, {"SET_P": 1}, {"RES": 1}, {"CAN_OFF": 1}, {"CTR": 9}):
-      orig, fwd = self._fwd_copy(0, self.packer.make_can_msg_safety("CRZ_BTNS", 0, {"TJA_BUTTON": 1, **over}))
-      self.assertTrue(orig[1] & 0x08)
-      expected = bytearray(orig)
-      expected[1] &= 0xf7
-      self.assertEqual(bytes(expected), fwd, f"{over=}")
-
-  def test_a_frame_without_the_press_is_untouched(self):
-    self._init(tja_button=True)
-    orig, fwd = self._fwd_copy(0, self._btns(False))
-    self.assertEqual(orig, fwd)
+  def test_press_forwarded_unmodified_in_every_state(self):
+    for param in (0, MazdaSafetyFlags.LONG | MazdaSafetyFlags.EPS_HW):
+      for mads in (False, True):
+        for acc_off, acc_active, controls in ((0, 0, False), (1, 0, False), (1, 1, True)):
+          self._init(tja_button=True, param=param)
+          self.safety.set_mads_params(mads, False, False)
+          self.safety.safety_rx_hook(self.packer.make_can_msg_safety("PEDALS", 0, {"ACC_OFF": acc_off, "ACC_ACTIVE": acc_active}))
+          self.safety.set_controls_allowed(controls)
+          for over in ({}, {"SET_P": 1}, {"CTR": 9}):
+            orig, fwd = self._fwd_copy(self._btns(True, **over))
+            self.assertTrue(orig[1] & 0x08)
+            self.assertEqual(orig, fwd, f"{param=} {mads=} {acc_off=} {acc_active=} {over=}")
+          self.assertEqual(2, self.safety.safety_fwd_hook(0, 0x9d))
 
   def test_the_panda_still_sees_the_press(self):
-    self._init(tja_button=True)
     self.safety.safety_rx_hook(self._btns(False))
     self.safety.safety_rx_hook(self._btns(True))
     self.assertTrue(self.safety.get_controls_allowed_lateral())
 
-  def test_undeclared_or_mads_off_passes_the_press_through(self):
-    self._init(tja_button=False)
-    orig, fwd = self._fwd_copy(0, self._btns(True))
-    self.assertEqual(orig, fwd)
-    self._init(tja_button=True)
-    self.safety.set_mads_params(False, False, False)
-    orig, fwd = self._fwd_copy(0, self._btns(True))
-    self.assertEqual(orig, fwd)
 
-  def test_other_buses_and_addresses_are_untouched(self):
-    self._init(tja_button=True)
-    orig, fwd = self._fwd_copy(2, self._btns(True))
-    self.assertEqual(orig, fwd)
-    dat = bytes([0xff] * 8)
-    for addr in (0x9c, 0x9e, 0x165, 0x21c, 0x440):
-      clone = libsafety_py.make_CANPacket(addr, 0, dat)
-      self.safety.safety_fwd_modify(0, clone)
-      self.assertEqual(dat, bytes(clone[0].data[0:8]), f"{addr=:#x}")
+class TestMazdaCameraTjaPressOff(MazdaTjaButtonBase):
+  """The camera-only TJA press (route 00000097: camera TJA 2 -> 0 in 0.28 s, lane-keep state kept):
+  the exact press frame on bus 2, only while openpilot steers, >= 0.9 s apart, at most 4 in a burst
+  that ends after 5 s without one."""
+
+  TJA_BUTTON = True
+  PRESS_VALUES = {
+    "TJA_BUTTON": 1, "CAN_OFF_INV": 1, "SET_P_INV": 1, "RES_INV": 1, "SET_M_INV": 1,
+    "DISTANCE_LESS_INV": 1, "DISTANCE_MORE_INV": 1, "MODE_X_INV": 1, "MODE_Y_INV": 1,
+    "BIT1": 1, "BIT2": 1, "BIT3": 1, "CTR": 3,
+  }
+  MODES = ((0, False), (MazdaSafetyFlags.LONG | MazdaSafetyFlags.EPS_HW, True))
+
+  def _press(self, bus=2, **over):
+    values = dict(self.PRESS_VALUES)
+    values.update(over)
+    return self.packer.make_can_msg_safety("CRZ_BTNS", bus, values)
+
+  def _tx_at(self, t_us, msg=None):
+    self.safety.set_timer(t_us)
+    return self.safety.safety_tx_hook(msg if msg is not None else self._press())
+
+  def test_press_matches_the_logged_frame(self):
+    self.assertEqual(bytes.fromhex("0009ffcc00000000"), bytes(self._press()[0].data[0:8]))
+
+  def test_allowed_only_while_openpilot_steers(self):
+    for param, _ in self.MODES:
+      self._init(tja_button=True, param=param)
+      self.safety.set_controls_allowed_lateral(False)
+      self.assertFalse(self._tx_at(1000000))
+      self.safety.set_controls_allowed_lateral(True)
+      self.assertTrue(self._tx_at(2000000))
+
+  def test_blocked_undeclared(self):
+    self._init(tja_button=False)
+    self.safety.set_controls_allowed_lateral(True)
+    self.assertFalse(self._tx_at(1000000))
+
+  def test_allowed_in_every_safety_config(self):
+    # the Smart CAN Filter config has its own TX table; the car runs it with alpha long
+    long = MazdaSafetyFlags.LONG | MazdaSafetyFlags.EPS_HW
+    for sp, param in ((MazdaSafetyFlagsSP.TJA_BUTTON, 0), (MazdaSafetyFlagsSP.TJA_BUTTON, long),
+                      (MazdaSafetyFlagsSP.TJA_BUTTON | MazdaSafetyFlagsSP.CAN_FILTER, long)):
+      self.safety.set_current_safety_param_sp(sp)
+      self.safety.set_safety_hooks(CarParams.SafetyModel.mazda, param)
+      self.safety.init_tests()
+      self.safety.set_mads_params(True, False, False)
+      self.safety.set_controls_allowed_lateral(True)
+      self.assertTrue(self._tx_at(1000000), f"{sp=} {param=}")
+      self.safety.set_controls_allowed_lateral(False)
+      self.assertFalse(self._tx_at(3000000), f"{sp=} {param=}")
+
+  def test_only_the_exact_press(self):
+    self.safety.set_controls_allowed_lateral(True)
+    bad = ({"TJA_BUTTON": 0}, {"SET_P": 1}, {"CAN_OFF": 1}, {"RES": 1}, {"MODE_Y": 1}, {"MODE_X": 1},
+           {"DISTANCE_LESS": 1}, {"BIT1": 0}, {"MODE_X_INV": 0}, {"CAN_OFF_INV": 0})
+    for i, over in enumerate(bad):
+      self.assertFalse(self._tx_at(1000000 + i * 1000000, self._press(**over)), f"{over=}")
+    for ctr in range(16):
+      self._init(tja_button=True)
+      self.safety.set_controls_allowed_lateral(True)
+      self.assertTrue(self._tx_at(1000000, self._press(CTR=ctr)), f"{ctr=}")
+
+  def test_tja_on_the_car_side_stays_blocked(self):
+    self.safety.set_controls_allowed_lateral(True)
+    self.safety.set_controls_allowed(True)
+    self.assertFalse(self._tx_at(1000000, self._press(bus=0)))
+
+  def test_pacing_and_burst_cap(self):
+    self.safety.set_controls_allowed_lateral(True)
+    self.assertTrue(self._tx_at(1000000))
+    self.assertFalse(self._tx_at(1000000 + 899999))
+    self.assertTrue(self._tx_at(1000000 + 900000))
+    self.assertTrue(self._tx_at(1000000 + 1800000))
+    self.assertTrue(self._tx_at(1000000 + 2700000))
+    # a fifth in the burst is refused however it is paced
+    self.assertFalse(self._tx_at(1000000 + 3700000))
+    self.assertFalse(self._tx_at(1000000 + 7600000))
+    # 5 s after the last accepted press the burst is over
+    self.assertTrue(self._tx_at(1000000 + 2700000 + 5000000))
+
+  def test_refused_press_does_not_restart_the_clock(self):
+    self.safety.set_controls_allowed_lateral(True)
+    self.assertTrue(self._tx_at(1000000))
+    self.safety.set_controls_allowed_lateral(False)
+    self.assertFalse(self._tx_at(1500000))
+    self.safety.set_controls_allowed_lateral(True)
+    self.assertTrue(self._tx_at(1900000))
 
 
 class TestMazdaMainOnMads(MazdaTjaButtonBase):

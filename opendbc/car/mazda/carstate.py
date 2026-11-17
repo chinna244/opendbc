@@ -71,6 +71,9 @@ class CarState(CarStateBase, MadsCarState, CarStateExt):
     # as CarStateZP.lkasArming, which keeps lateral reading disabled to the driver meanwhile.
     self.lkas_arming = False
     self.lkas_arming_frames = 0
+    # The camera's own TJA stayed on after the controller's press-off budget (update_camera_tja);
+    # card publishes it as CarStateZP.cameraTjaStuck.
+    self.camera_tja_stuck = False
     # The camera's high-beam request (0x440 BIT2), relayed to CRZ_CTRL by the stock radar and, under
     # the takeover, by the controller (docs/zoompilot/mazda-longitudinal.md, "High-beam relay").
     self.hbc_request = False

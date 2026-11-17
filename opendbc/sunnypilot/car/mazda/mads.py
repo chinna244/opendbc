@@ -31,6 +31,19 @@ TJA_MRCC_ARM_WAIT_FRAMES = int(1.0 / DT_CTRL)
 # The white wheel waits this long on a fully-off, quiet cruise before it displays.
 MADS_WHITE_HUD_OFF_CONFIRM_FRAMES = int(0.5 / DT_CTRL)
 
+# The camera's own TJA (CAM_LANEINFO.TJA, native) must read nonzero this long, fresh, while
+# openpilot steers before it is pressed off: a passed press shows TJA=2 for under 0.5 s on its own.
+CAMERA_TJA_CONFIRM_FRAMES = int(1.0 / DT_CTRL)
+# Press-off pacing and budget per episode.
+CAMERA_TJA_PRESS_FRAMES = int(1.0 / DT_CTRL)
+CAMERA_TJA_PRESS_MAX = 3
+# The panda's shared budget for every camera-only press (mazda.h MAZDA_CAM_PRESS_*): >= 0.9 s apart,
+# 4 per burst, the burst over after 5 s without one. Mirrored with margin across back-to-back
+# episodes, so no press is sent that the panda would refuse.
+CAMERA_PRESS_MIN_FRAMES = int(1.0 / DT_CTRL)
+CAMERA_PRESS_BURST_MAX = 4
+CAMERA_PRESS_QUIET_FRAMES = int(5.1 / DT_CTRL)
+
 
 # The MADS white wheel: the dash draws it when the camera's own HUD frame carries TJA=2,
 # and the body reads the same frame. The white bit is only ever XORed into an exact
@@ -99,6 +112,19 @@ def create_mrcc_off_cmd(packer, counter):
   return packer.make_can_msg("CRZ_BTNS", 0, values)
 
 
+def create_camera_tja_press(packer, counter):
+  # The wheel's TJA press over its idle pattern, on the camera bus only (route 00000097:
+  # 0009ffcc00000000). The panda pins the exact bytes in mazda_cam_tja_press_msg_valid.
+  values = {
+    "TJA_BUTTON": 1,
+    "CAN_OFF_INV": 1, "SET_P_INV": 1, "RES_INV": 1, "SET_M_INV": 1,
+    "DISTANCE_LESS_INV": 1, "DISTANCE_MORE_INV": 1, "MODE_X_INV": 1, "MODE_Y_INV": 1,
+    "BIT1": 1, "BIT2": 1, "BIT3": 1,
+    "CTR": (counter + 1) % 16,
+  }
+  return packer.make_can_msg("CRZ_BTNS", 2, values)
+
+
 class MadsCarController:
   """The TJA button as the MADS switch, on the CarController (its packer, frame and
   last_button_frame): the press-induced MRCC arm undone, and the white wheel on the camera's
@@ -115,6 +141,75 @@ class MadsCarController:
     # The white wheel rides the alert frame; on_bus tracks that the white bit is on the wire.
     self.mads_white_hud_off_frames = 0
     self.mads_white_hud_on_bus = False
+    # The camera's own TJA pressed off while openpilot steers (one episode per nonzero stretch).
+    self.camera_tja_frames = 0
+    self.camera_tja_presses = 0
+    self.camera_tja_press_frame: int | None = None
+    # Every camera-only press: the panda's burst as this side counts it.
+    self.camera_press_burst = 0
+    self.camera_press_frame: int | None = None
+
+  def camera_press_ready(self) -> bool:
+    """Whether the panda's shared camera-press budget has room for one now."""
+    if self.camera_press_frame is None:
+      return True
+    since = self.frame - self.camera_press_frame
+    if since >= CAMERA_PRESS_QUIET_FRAMES:
+      self.camera_press_burst = 0
+    return since >= CAMERA_PRESS_MIN_FRAMES and self.camera_press_burst < CAMERA_PRESS_BURST_MAX
+
+  def camera_press(self, CS):
+    self.camera_press_burst += 1
+    self.camera_press_frame = self.frame
+    return create_camera_tja_press(self.packer, CS.crz_btns_counter)
+
+  def update_camera_tja(self, CC, CS):
+    """Press the camera's own TJA off, on the camera bus only, while openpilot steers.
+
+    Every TJA press reaches the camera again (cruise on or off) so its lane-keep state arms the
+    dash lane lines; with MRCC main on a press can also latch the camera's own TJA. Nothing is
+    pressed while the camera's TJA reads 0. Its TJA must not run alongside openpilot's steering (route
+    0000013b: FSC malfunction). Driven by the camera's native TJA on a fresh CAM_LANEINFO only:
+    nonzero for CAMERA_TJA_CONFIRM_FRAMES, then up to CAMERA_TJA_PRESS_MAX presses
+    CAMERA_TJA_PRESS_FRAMES apart, each sent only when the panda's shared burst has room
+    (camera_press_ready); native TJA=0 ends the episode, and still nonzero after the budget
+    raises camera_tja_stuck. Stale camera data or openpilot not steering sends nothing.
+    """
+    can_sends = []
+    if not self.CP_SP.flags & MazdaFlagsSP.TJA_BUTTON:
+      return can_sends
+
+    native_tja = int(CS.cam_laneinfo["TJA"]) if CS.cam_laneinfo_live else None
+    if native_tja == 0:
+      self.camera_tja_frames = 0
+      self.camera_tja_presses = 0
+      self.camera_tja_press_frame = None
+      CS.camera_tja_stuck = False
+      return can_sends
+
+    if native_tja is None or not CC.latActive:
+      # Unknown, or the camera steering alone (allowed): keep the episode's budget, restart the
+      # confirmation, and let the camera be.
+      self.camera_tja_frames = 0
+      if not CC.latActive:
+        CS.camera_tja_stuck = False
+      return can_sends
+
+    self.camera_tja_frames = min(self.camera_tja_frames + 1, CAMERA_TJA_CONFIRM_FRAMES)
+    # Never inside the driver's own held press.
+    if self.camera_tja_frames < CAMERA_TJA_CONFIRM_FRAMES or CS.tja_button:
+      return can_sends
+
+    due = self.camera_tja_press_frame is None or self.frame - self.camera_tja_press_frame >= CAMERA_TJA_PRESS_FRAMES
+    if due and self.camera_tja_presses < CAMERA_TJA_PRESS_MAX:
+      # An attempt counts only when it is sent; a full panda burst means wait, not a spent attempt.
+      if self.camera_press_ready():
+        can_sends.append(self.camera_press(CS))
+        self.camera_tja_presses += 1
+        self.camera_tja_press_frame = self.frame
+    elif due:
+      CS.camera_tja_stuck = True
+    return can_sends
 
   def update_mrcc_cleanup(self, CC, CC_SP, CS, handback_active: bool):
     # Undo the MRCC arm a physical TJA press causes: the wheel's press reaches every bus-0

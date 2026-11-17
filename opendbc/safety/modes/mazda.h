@@ -44,6 +44,12 @@
 // MAIN_OFF_DEBOUNCE_SAMPLES, which carstate counts the same way.
 #define MAZDA_MAIN_OFF_DEBOUNCE 10U
 
+// The camera-only TJA press-off: at least this far apart, at most MAZDA_CAM_PRESS_MAX in a burst,
+// and the burst ends after MAZDA_CAM_PRESS_QUIET_US without one.
+#define MAZDA_CAM_PRESS_MIN_US 900000U
+#define MAZDA_CAM_PRESS_MAX 4U
+#define MAZDA_CAM_PRESS_QUIET_US 5000000U
+
 static bool mazda_longitudinal = false;
 // Declared by the driver: the TJA button owns lateral and MRCC no longer drives the main edge.
 static bool mazda_tja_button = false;
@@ -52,12 +58,24 @@ static bool mazda_eps_hw = false;
 static bool mazda_acc_armed = false;
 static uint32_t mazda_engage_btn_frames = 0U;
 static uint32_t mazda_main_off_samples = 0U;
+// The camera-only TJA press-off burst.
+static uint32_t mazda_cam_press_ts = 0U;
+static uint32_t mazda_cam_press_count = 0U;
 
 static bool mazda_mrcc_off_msg_valid(const CANPacket_t *msg) {
   // Exact active-low MRCC master tap. CTR occupies the variable bits in byte 3;
   // all other buttons and payload bits remain pinned.
   return (GET_LEN(msg) == 8U) && (msg->data[0] == 0x00U) &&
          (msg->data[1] == 0x81U) && (msg->data[2] == 0xfeU) &&
+         ((msg->data[3] & 0xc3U) == 0xc0U) && (msg->data[4] == 0x00U) &&
+         (msg->data[5] == 0x00U) && (msg->data[6] == 0x00U) && (msg->data[7] == 0x00U);
+}
+
+static bool mazda_cam_tja_press_msg_valid(const CANPacket_t *msg) {
+  // Exact wheel TJA press over the idle pattern (route 00000097: 0009ffcc00000000): every other
+  // button bit 0, its inversions 1, CTR the only free bits in byte 3.
+  return (GET_LEN(msg) == 8U) && (msg->data[0] == 0x00U) &&
+         (msg->data[1] == 0x09U) && (msg->data[2] == 0xffU) &&
          ((msg->data[3] & 0xc3U) == 0xc0U) && (msg->data[4] == 0x00U) &&
          (msg->data[5] == 0x00U) && (msg->data[6] == 0x00U) && (msg->data[7] == 0x00U);
 }
@@ -340,6 +358,25 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     }
   }
 
+  if ((msg->bus == (unsigned char)MAZDA_CAM) && (msg->addr == MAZDA_CRZ_BTNS)) {
+    // Camera-only TJA press (mads update_camera_tja: press the camera's own TJA off): the exact
+    // press, only while openpilot steers, paced and capped per burst.
+    // It reaches the camera alone, never the body or the panda's own MADS button.
+    uint32_t ts = microsecond_timer_get();
+    uint32_t since = safety_get_ts_elapsed(ts, mazda_cam_press_ts);
+    if ((mazda_cam_press_count > 0U) && (since >= MAZDA_CAM_PRESS_QUIET_US)) {
+      mazda_cam_press_count = 0U;
+    }
+    bool paced = (mazda_cam_press_count == 0U) || (since >= MAZDA_CAM_PRESS_MIN_US);
+    if (mazda_tja_button && mazda_cam_tja_press_msg_valid(msg) && mazda_openpilot_controlling() &&
+        paced && (mazda_cam_press_count < MAZDA_CAM_PRESS_MAX)) {
+      mazda_cam_press_count += 1U;
+      mazda_cam_press_ts = ts;
+    } else {
+      tx = false;
+    }
+  }
+
   return tx;
 }
 
@@ -355,26 +392,20 @@ static bool mazda_fwd_hook(int bus_num, int addr) {
   return block_msg;
 }
 
-// Mutate only the bus0->bus2 forward copy of CRZ_BTNS. Panda RX and the OEM body/MRCC
-// keep the original bus0 frame, including physical TJA. Requires the declared TJA button and
-// the MADS feature (system_enabled), not heartbeat_engaged_mads, so the first button edge
-// cannot leak to the FSC during a USB-heartbeat transition.
-static void mazda_fwd_modify(int bus_num, CANPacket_t *msg) {
-  if (mazda_tja_button && m_mads_state.system_enabled && (bus_num == MAZDA_MAIN) &&
-      (msg->addr == MAZDA_CRZ_BTNS) && (GET_LEN(msg) >= 2U)) {
-    msg->data[MAZDA_TJA_BUTTON_BIT / 8U] &= (uint8_t)~(1U << (MAZDA_TJA_BUTTON_BIT % 8U));
-  }
-}
-
 static safety_config mazda_init(uint16_t param) {
   mazda_engage_btn_frames = 0U;
   mazda_main_off_samples = 0U;
   mazda_acc_armed = false;
+  mazda_cam_press_ts = 0U;
+  mazda_cam_press_count = 0U;
 
+  // CRZ_BTNS on the camera bus is the camera-only TJA press; no relay check, so the real wheel
+  // stream, the driver's TJA press included, keeps forwarding to the camera.
   static const CanMsg MAZDA_TX_MSGS[] = {
     {MAZDA_LKAS, 0, 8, .check_relay = true, .disable_static_blocking = true},
     {MAZDA_CRZ_BTNS, 0, 8, .check_relay = false},
     {MAZDA_LKAS_HUD, 0, 8, .check_relay = true, .disable_static_blocking = true},
+    {MAZDA_CRZ_BTNS, MAZDA_CAM, 8, .check_relay = false},
   };
 
 // Replaced-radar addresses omit relay checks because the radar remains live during boot and
@@ -393,6 +424,7 @@ static safety_config mazda_init(uint16_t param) {
     {MAZDA_RADAR_TRACK_5, 0, 8, .check_relay = false},
     {MAZDA_RADAR_TRACK_6, 0, 8, .check_relay = false},
     {MAZDA_RADAR_UDS, 0, 8, .check_relay = false},
+    {MAZDA_CRZ_BTNS, MAZDA_CAM, 8, .check_relay = false},
     {MAZDA_CRZ_INFO, MAZDA_CAM, 8, .check_relay = false},
     {MAZDA_CRZ_CTRL, MAZDA_CAM, 8, .check_relay = false},
     {MAZDA_RADAR_STATIC, MAZDA_CAM, 8, .check_relay = false},
@@ -413,6 +445,7 @@ static safety_config mazda_init(uint16_t param) {
     {MAZDA_CRZ_INFO, 0, 8, .check_relay = false},
     {MAZDA_CRZ_CTRL, 0, 8, .check_relay = false},
     {MAZDA_CAN_FILTER_CTRL, 0, 8, .check_relay = false},
+    {MAZDA_CRZ_BTNS, MAZDA_CAM, 8, .check_relay = false},
     {MAZDA_CRZ_INFO, MAZDA_CAM, 8, .check_relay = false},
     {MAZDA_CRZ_CTRL, MAZDA_CAM, 8, .check_relay = false},
   };
@@ -456,5 +489,4 @@ const safety_hooks mazda_hooks = {
   .rx = mazda_rx_hook,
   .tx = mazda_tx_hook,
   .fwd = mazda_fwd_hook,
-  .fwd_modify = mazda_fwd_modify,
 };

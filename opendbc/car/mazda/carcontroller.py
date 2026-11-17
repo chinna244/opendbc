@@ -210,6 +210,7 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         can_sends.append(mazdacan.create_button_cmd(self.packer, self.CP, CS.crz_btns_counter, Buttons.RESUME))
 
     can_sends.extend(self.update_mrcc_cleanup(CC, CC_SP, CS, self.radar_session.handback_active))
+    can_sends.extend(self.update_camera_tja(CC, CS))
 
     self.apply_torque_last = apply_torque
 
