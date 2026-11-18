@@ -50,6 +50,10 @@ def make_msg(bus, addr, length=8, dat=None):
   return libsafety_py.make_CANPacket(addr, bus, dat)
 
 
+def state_buffer(copy):
+  return libsafety_py.ffi.buffer(libsafety_py.ffi.addressof(libsafety_py.libsafety, copy))
+
+
 class CANPackerSafety(CANPacker):
   def make_can_msg_safety(self, name_or_addr, bus, values, fix_checksum=None):
     msg = self.make_can_msg(name_or_addr, bus, values)
@@ -95,6 +99,10 @@ class SafetyTestBase(unittest.TestCase):
     if self.SAFETY_MODEL is not None:
       self.safety.set_safety_hooks(self.SAFETY_MODEL, self.SAFETY_PARAM)
     self.safety.init_tests()
+
+  def tearDown(self):
+    self.assertFalse(self.safety.safety_redundancy_fault)
+    self.assertEqual(state_buffer("safety_a")[:], state_buffer("safety_b")[:])
 
   @classmethod
   def setUpClass(cls):
@@ -999,8 +1007,6 @@ class SafetyTest(SafetyTestBase):
               continue
             if attr.startswith('TestHyundaiCanfd') and current_test.startswith('TestHyundaiCanfd'):
               continue
-            if attr.startswith('TestMazda') and current_test.startswith('TestMazda'):
-              continue
             if {attr, current_test}.issubset({'TestHyundaiLongitudinalSafety', 'TestHyundaiLongitudinalSafetyCameraSCC', 'TestHyundaiSafetyFCEVLong'}):
               continue
             base_tests = {'TestHyundaiLongitudinalSafety', 'TestHyundaiLongitudinalSafetyCameraSCC', 'TestHyundaiSafetyFCEVLong',
@@ -1016,6 +1022,11 @@ class SafetyTest(SafetyTestBase):
               tx = list(filter(lambda m: m[0] not in [0x160, ], tx))
             if attr.startswith('TestHyundaiCanfdLFASteeringCCNC') and current_test.startswith('TestSubaruPreglobal'):
               tx = list(filter(lambda m: m[0] not in [0x161, ], tx))
+
+            # the Mazda modes share the steering, HUD and button messages, and the Smart CAN Filter mode
+            # (this fork) the cruise messages of the longitudinal mode: a message the current mode sends itself
+            if attr.startswith('TestMazda') and current_test.startswith('TestMazda'):
+              tx = list(filter(lambda m: m[0] not in [0x243, 0x440, 0x09d] and [m[0], m[1]] not in self.TX_MSGS, tx))
 
             # Volkswagen MQB longitudinal actuating message overlaps with the Subaru lateral actuating message
             if attr == 'TestVolkswagenMqbLongSafety' and current_test.startswith('TestSubaru'):
@@ -1246,7 +1257,8 @@ class CarSafetyTest(SafetyTest, MadsSafetyTestBase, RxChecksSafetyTestBase):
 
   def test_safety_tick_mode_transition(self):
     # the first tick after a mode change can land before a slow message's first frame:
-    # it blocks controls either way, but reports only what was seen until the transition is over
+    # it blocks controls either way, but reports only what was seen until the transition is over.
+    # the tick counts itself into safety_mode_cnt before the checks, so mode_cnt is the count before it
     for mode_cnt in range(3):
       for seen in (False, True):
         with self.subTest(mode_cnt=mode_cnt, seen=seen):
@@ -1261,4 +1273,20 @@ class CarSafetyTest(SafetyTest, MadsSafetyTestBase, RxChecksSafetyTestBase):
           self.safety.safety_tick()
           self.assertFalse(self.safety.get_controls_allowed())
           self.assertFalse(self.safety.get_controls_allowed_lateral())
-          self.assertEqual(self.safety.get_safety_rx_checks_invalid(), seen or mode_cnt > 1)
+          self.assertEqual(self.safety.get_safety_rx_checks_invalid(), seen or mode_cnt > 0)
+
+  def test_rx_lagging(self):
+    # a check lags after 10 missed messages or 1 s, whichever is longer. checks are at least 10 Hz, so it is always 1 s
+    # except ignore_frequency_check checks, which can be slower
+    self.assertGreater(self.safety.get_rx_checks_len(), 0)
+    for stale in range(self.safety.get_rx_checks_len()):
+      lag_us = max(10 * (1000000 // self.safety.get_rx_check_frequency(stale)), 1000000)
+      for age, allowed in ((lag_us, True), (lag_us + 1, False)):
+        with self.subTest(stale=stale, age=age):
+          self._reset_safety_hooks()
+          self.safety.set_timer(2 * lag_us)
+          self.safety.set_rx_checks_received(stale, age)
+          self.assertTrue(self.safety.safety_config_valid())
+          self.safety.set_controls_allowed(True)
+          self.safety.safety_tick()
+          self.assertEqual(allowed, self.safety.get_controls_allowed())
