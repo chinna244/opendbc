@@ -31,32 +31,16 @@ def _create_radar_can_parser(car_fingerprint):
 class RadarInterface(RadarInterfaceBase):
   def __init__(self, CP, CP_SP):
     super().__init__(CP, CP_SP)
-    self.track_id = 0
-    self.updated_messages = set()
     self.trigger_msg = RADAR_TRIGGER_MSG
     self.rcp = None if CP.radarUnavailable else _create_radar_can_parser(CP.carFingerprint)
 
-  def update(self, can_strings):
-    if self.rcp is None:
-      return super().update(None)
-
-    vls = self.rcp.update(can_strings)
-    self.updated_messages.update(vls)
-
-    if self.trigger_msg not in self.updated_messages:
-      return None
-
-    rr = self._update(self.updated_messages)
-    self.updated_messages.clear()
-    return rr
-
-  def _update(self, updated_messages):
+  def _update(self, rcp, updated_messages):
     ret = structs.RadarData()
-    if not self.rcp.can_valid:
+    if not rcp.can_valid:
       ret.errors.canError = True
 
     for addr in RADAR_TRACK_ADDRS:
-      msg = self.rcp.vl[addr]
+      msg = rcp.vl[addr]
 
       dist = msg['DIST_OBJ']
       ang = msg['ANG_OBJ']
