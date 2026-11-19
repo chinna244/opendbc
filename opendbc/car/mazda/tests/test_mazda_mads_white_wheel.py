@@ -190,3 +190,17 @@ class TestCruisingWhiteWheel:
     assert withdrawn and all(f % CADENCE != 0 for f, _ in withdrawn)
     assert all(not is_white(d) for _, d in withdrawn)
     assert not cc.mads_white_hud_on_bus
+
+
+@pytest.mark.parametrize("cam", ["4103000c00004040", "4104000a00004040", "4104000000004040"])
+def test_night_one_line_frames_carry_the_white_state(cam):
+  # camera frames seen at night above 40 mph with one lane line (routes 00000072/75), byte 3 armed or not
+  raw = bytes.fromhex(cam)
+  base = white_hud_allowlist_base(raw)
+  assert base == raw[:3] + b"\x00" + raw[4:]
+  assert apply_mads_white_hud(raw, base, True) == base[:4] + bytes([base[4] | 0x20]) + base[5:]
+
+
+def test_ldw_frames_never_carry_the_white_state():
+  # byte 7 0x04 (LDW_WARN_RL) on the camera's frame: no allowlisted base
+  assert white_hud_allowlist_base(bytes.fromhex("4103000c00001044")) is None

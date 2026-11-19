@@ -171,15 +171,19 @@ def test_every_controller_press_passes_the_panda():
 
 
 def test_laneinfo_frame_untouched_by_the_press_off():
-  # the HUD frame (byte 3 included) is not part of this change
-  cc, cs = controller()
-  sends = []
-  cs.cam_laneinfo["TJA"] = 3
-  for _ in range(CAMERA_TJA_CONFIRM_FRAMES + 60):
-    _, s = step(cc, cs, lat_active=True, enabled=True, long_active=False, cam_laneinfo_live=True, cam_laneinfo_raw=IDLE_LANEINFO)
-    sends += s
-  assert frames(sends, CAM_LANEINFO)
-  assert all((d[4] >> 4) & 7 == 0 for d in frames(sends, CAM_LANEINFO))
+  # the HUD frame (byte 3 included) is not part of this change: same frames with or without a press-off
+  def run(native_tja):
+    cc, cs = controller()
+    sends = []
+    cs.cam_laneinfo["TJA"] = native_tja
+    for _ in range(CAMERA_TJA_CONFIRM_FRAMES + 60):
+      _, s = step(cc, cs, lat_active=True, enabled=True, long_active=False, cam_laneinfo_live=True, cam_laneinfo_raw=IDLE_LANEINFO)
+      sends += s
+    return sends
+  pressed, quiet = run(3), run(0)
+  assert frames(pressed, CRZ_BTNS, bus=2) and not frames(quiet, CRZ_BTNS, bus=2)
+  assert frames(pressed, CAM_LANEINFO)
+  assert frames(pressed, CAM_LANEINFO) == frames(quiet, CAM_LANEINFO)
 
 
 # Shared panda burst budget across episodes and both paths, on continuous frame timing
