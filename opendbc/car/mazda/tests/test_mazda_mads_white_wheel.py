@@ -135,3 +135,58 @@ class TestWhiteWheelGate:
     assert all(f % CADENCE != 0 for f in frames_out)
     assert all(not is_white(d) for _, d in withdrawn)
     assert not cc.mads_white_hud_on_bus
+
+
+class TestCruisingWhiteWheel:
+  """openpilot steering and cruising under alpha long, the radar held silent: the white state rides
+  the camera frame with cruise on, which brings the dash's lane lines. Every other case is unchanged."""
+
+  def kwargs(self, **over):
+    kw = dict(enabled=True, long_active=True, lat_active=True, mads_active=True, cam_laneinfo_raw=BASE,
+              cam_laneinfo_live=True, available=True, cruise_engaged=True, mrcc_armed_raw=True, v_ego=20.)
+    kw.update(over)
+    return kw
+
+  def test_steering_and_cruising_displays_white(self):
+    cc, cs = tja_controller()
+    hud, _ = drive(cc, cs, 3 * CADENCE, **self.kwargs())
+    assert cc.radar_session.control_active
+    assert any(d == bytes.fromhex("4201000020001040") for _, d in hud)
+    assert cc.mads_white_hud_on_bus
+
+  @pytest.mark.parametrize("deny,over", [
+    ("not steering", dict(lat_active=False)),
+    ("not cruising", dict(enabled=False, long_active=False)),
+    ("radar bus unhealthy", dict(radar_bus_healthy=False)),
+    ("stock ECU hand-back", dict(handback=True)),
+    ("stale camera frame", dict(cam_laneinfo_live=False)),
+    ("unknown camera payload", dict(cam_laneinfo_raw=b"\xff" * 8)),
+    ("visual alert", dict(visual_alert=VisualAlert.steerRequired)),
+    ("cruise button", dict(accel_button=1)),
+  ])
+  def test_every_deny_blocks_the_cruising_white(self, deny, over):
+    cc, cs = tja_controller()
+    hud, _ = drive(cc, cs, 3 * CADENCE, **self.kwargs(**over))
+    assert not any(is_white(d) for _, d in hud), deny
+
+  def test_live_stock_radar_stays_off(self):
+    # alpha long before the takeover: the stock radar is still on the bus and reads this frame
+    cc, cs = tja_controller()
+    hud, _ = drive(cc, cs, 3 * CADENCE, **self.kwargs(stock_radar_alive=True))
+    assert not cc.radar_session.control_active
+    assert not any(is_white(d) for _, d in hud)
+
+  def test_stock_long_cruise_stays_off(self):
+    # stock MRCC owns cruise: its radar reads this frame, so cruising never carries white
+    cc, cs = tja_controller(alpha_long=False)
+    hud, _ = drive(cc, cs, 3 * CADENCE, **self.kwargs())
+    assert not any(is_white(d) for _, d in hud)
+
+  def test_disengage_withdraws_immediately(self):
+    cc, cs = tja_controller()
+    drive(cc, cs, 3 * CADENCE + 5, **self.kwargs())
+    assert cc.mads_white_hud_on_bus
+    withdrawn, _ = drive(cc, cs, 3, **self.kwargs(enabled=False, long_active=False))
+    assert withdrawn and all(f % CADENCE != 0 for f, _ in withdrawn)
+    assert all(not is_white(d) for _, d in withdrawn)
+    assert not cc.mads_white_hud_on_bus

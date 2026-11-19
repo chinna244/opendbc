@@ -12,8 +12,8 @@ from opendbc.car.mazda.can_filter import CONFIRM_LIMIT_FRAMES, CONFIRM_SILENCE_F
   FILTER_CTRL_STEP, FILTER_STATE_ADDR, RELEASE_LIMIT_FRAMES, STATE_FILTERING, STATE_MODE, STATUS_FRESH_FRAMES, create_filter_ctrl
 from opendbc.car.mazda.carcontroller import CarController
 from opendbc.car.mazda.interface import CarInterface
-from opendbc.car.mazda.tests.conftest import CRZ_CTRL, CRZ_INFO, DBC_NAME, RADAR_STATIC, RADAR_UDS, SESSION_PROG_DAT, \
-  car_params, car_params_sp, frames, mazda_car_state, packer, step_long
+from opendbc.car.mazda.tests.conftest import CAM_LANEINFO, CRZ_CTRL, CRZ_INFO, DBC_NAME, RADAR_STATIC, RADAR_UDS, SESSION_PROG_DAT, \
+  VisualAlert, car_params, car_params_sp, frames, mazda_car_state, packer, step, step_long
 from opendbc.car.mazda.tests.test_mazda_carstate import feed
 from opendbc.car.mazda.values import CAR, MazdaFlags
 from opendbc.sunnypilot.car.interfaces import _initialize_mazda
@@ -516,3 +516,74 @@ def test_status_timeout_latches_on_receive_without_a_control_frame():
     sends = step_long(CI.CC, CI.CS)
     assert cruise_frames(sends) == [] and set(frames(sends, FILTER_CTRL_ADDR)) <= {MODE_OFF}
   assert session.failed
+
+
+class TestCruisingWhiteWheel:
+  """Steering and cruising under the filter's confirmed mode carries the white TJA=2 state (the dash's
+  lane lines), as it does with the radar held silent; never before the board confirms, and withdrawn
+  at once on a loss or the lifecycle's hand-back."""
+  WHITE = bytes.fromhex("4201000020001040")
+  CADENCE = 50
+
+  def kwargs(self, **over):
+    kw = dict(enabled=True, long_active=True, lat_active=True, mads_active=True,
+              cam_laneinfo_raw=bytes.fromhex("4201000000001040"), cam_laneinfo_live=True,
+              available=True, cruise_engaged=True, mrcc_armed_raw=True, v_ego=20.)
+    kw.update(over)
+    return kw
+
+  @staticmethod
+  def drive(cc, cs, n, state=CONFIRMED, age=0, **kw):
+    """n full update() frames with the board's status; returns (frame, payload) of every bus-0 HUD frame."""
+    hud = []
+    for _ in range(n):
+      cs.can_filter_state, cs.can_filter_age = state, (age if state is not None else STATUS_FRESH_FRAMES)
+      cc.can_filter.receive([state] if state is not None and age == 0 else [], cs.can_filter_age)
+      _, sends = step(cc, cs, **kw)
+      hud += [(cc.frame - 1, d) for a, d, b in sends if a == CAM_LANEINFO and b == 0]
+    return hud
+
+  @pytest.fixture
+  def tcc(self, fcc):
+    fcc.CP_SP.flags |= MazdaFlagsSP.TJA_BUTTON
+    return fcc
+
+  def test_confirmed_filter_displays_white(self, tcc, fcs):
+    confirm(tcc, fcs)
+    hud = self.drive(tcc, fcs, 3 * self.CADENCE, **self.kwargs())
+    assert tcc.can_filter.control_active and not tcc.radar_session.control_active
+    assert any(d == self.WHITE for _, d in hud) and tcc.mads_white_hud_on_bus
+
+  def test_no_white_before_the_board_confirms(self, tcc, fcs):
+    hud = self.drive(tcc, fcs, 3 * self.CADENCE, state=None, **self.kwargs())
+    assert not tcc.can_filter.control_active
+    assert hud and not any(d == self.WHITE for _, d in hud)
+
+  @pytest.mark.parametrize("deny,over", [
+    ("not steering", dict(lat_active=False)),
+    ("not cruising", dict(enabled=False, long_active=False)),
+    ("bus unhealthy", dict(radar_bus_healthy=False)),
+    ("visual alert", dict(visual_alert=VisualAlert.steerRequired)),
+    ("cruise button", dict(accel_button=1)),
+  ])
+  def test_every_deny_blocks_white(self, tcc, fcs, deny, over):
+    confirm(tcc, fcs)
+    hud = self.drive(tcc, fcs, 3 * self.CADENCE, **self.kwargs(**over))
+    assert not any(d == self.WHITE for _, d in hud), deny
+
+  @pytest.mark.parametrize("why,drop", [
+    ("status lost a bit", dict(state=STATE_MODE)),
+    ("status went stale", dict(state=CONFIRMED, age=STATUS_FRESH_FRAMES)),
+    ("lifecycle hand-back", dict(handback=True)),
+  ])
+  def test_loss_or_handback_withdraws_at_once_and_stays_off(self, tcc, fcs, why, drop):
+    confirm(tcc, fcs)
+    self.drive(tcc, fcs, 3 * self.CADENCE + 5, **self.kwargs())
+    assert tcc.mads_white_hud_on_bus
+    kw = self.kwargs(**{k: v for k, v in drop.items() if k not in ("state", "age")})
+    st = {k: v for k, v in drop.items() if k in ("state", "age")}
+    withdrawn = self.drive(tcc, fcs, 3, **st, **kw)
+    assert withdrawn and all(f % self.CADENCE != 0 for f, _ in withdrawn), why
+    assert not any(d == self.WHITE for _, d in withdrawn) and not tcc.mads_white_hud_on_bus
+    later = self.drive(tcc, fcs, 3 * self.CADENCE, state=CONFIRMED, **self.kwargs())
+    assert not any(d == self.WHITE for _, d in later), why
