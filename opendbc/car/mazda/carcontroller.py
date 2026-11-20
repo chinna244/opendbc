@@ -452,7 +452,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         can_sends.append(mazdacan.create_acc_command(self.packer, bus, self.long_counter, accel,
                                                      long_active=long_engaged, acc_available=acc_available,
                                                      brake_pressed=CS.out.brakePressed,
-                                                     stopping=sm.stop_bits, resume_unlatching=sm.resume_unlatching))
+                                                     stopping=sm.stop_bits, resume_unlatching=sm.resume_unlatching,
+                                                     hud_tja2=self.mads_white_hud_on_bus))
         # The cruise frame is ours under alpha long, so it also carries the white wheel while openpilot steers
         # (MADS) with cruise on, engaged or not, when the camera frame's white state stays off (it fails closed on
         # any cruise). The camera frame itself is untouched, and the car's own cruise never sees this frame.

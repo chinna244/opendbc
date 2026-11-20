@@ -262,14 +262,15 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   }
 
   if (safety_setup.mazda_longitudinal && long_replacement_bus && (msg->addr == MAZDA_CRZ_INFO)) {
-    // Allow byte-exact stock standby patterns with the raw 8190 command sentinel.
+    // Allow byte-exact stock standby patterns with the raw 8190 command sentinel. Byte 5 bit 0 is the
+    // radar's echo of the dash frame's white TJA=2, outside the factory checksum (Sept-Oct captures).
     bool stock_standby = (msg->data[0] == 0x01U) && (msg->data[1] == 0xffU) &&
                          (msg->data[2] == 0xe3U) && (msg->data[3] == 0xffU) &&
                          ((msg->data[4] & 0xfbU) == 0xc0U) &&
-                         ((msg->data[5] & 0x7fU) == 0x00U) &&
+                         ((msg->data[5] & 0x7eU) == 0x00U) &&
                          ((msg->data[6] & 0xf0U) == 0x00U) &&
                          (msg->data[7] == ((0xffU - ((msg->data[0] + msg->data[1] + msg->data[2] + msg->data[3] +
-                                                     msg->data[4] + msg->data[5] + msg->data[6]) & 0xffU)) & 0xffU));
+                                                     msg->data[4] + (msg->data[5] & 0xfeU) + msg->data[6]) & 0xffU)) & 0xffU));
 
     // Assemble the 13-bit ACCEL_CMD unsigned for MISRA 10.1, then remove its 4096 offset.
     uint32_t accel_raw = (((uint32_t)msg->data[2] & 0x3U) << 11) | ((uint32_t)msg->data[3] << 3) | ((uint32_t)msg->data[4] >> 5);

@@ -316,6 +316,20 @@ class TestMazdaLongitudinalSafety(TestMazdaEpsSafety, common.LongitudinalAccelSa
         # and pegged with stop bits set is not a stock pattern either
         self.assertFalse(self._tx(common.make_msg(bus, 0x21b, 8, pegged_frame(0xc0, 0x84, 0x00))))
 
+        # the radar's echo of the dash's white TJA=2 (byte 5 bit 0) sits outside the factory checksum
+        self.assertTrue(self._tx(common.make_msg(bus, 0x21b, 8, bytes.fromhex("01ffe3ffc0010e4f"))))
+        for d4, d5 in ((0xc0, 0x01), (0xc0, 0x81), (0xc4, 0x81)):
+          for counter in range(16):
+            dat = bytes([0x01, 0xff, 0xe3, 0xff, d4, d5, counter])
+            echo = dat + bytes([(0xff - (sum(dat) - 1)) & 0xff])
+            self.assertTrue(self._tx(common.make_msg(bus, 0x21b, 8, echo)), echo.hex())
+            # the bit counted into the checksum is not the factory frame
+            self.assertFalse(self._tx(common.make_msg(bus, 0x21b, 8, pegged_frame(d4, d5, counter))))
+        # the echo never widens the standby allowance to ACC_ACTIVE or stop bits
+        for d4, d5 in ((0xc6, 0x81), (0xc0, 0x85)):
+          dat = bytes([0x01, 0xff, 0xe3, 0xff, d4, d5, 0x00])
+          self.assertFalse(self._tx(common.make_msg(bus, 0x21b, 8, dat + bytes([(0xff - (sum(dat) - 1)) & 0xff]))))
+
   def test_empty_radar_tracks_allowed(self):
     radar_messages = {
       0x499: bytes.fromhex("0008e00000000000"),
