@@ -3,7 +3,8 @@ from opendbc.car.mazda.values import Buttons, CarControllerParams, MazdaFlags
 
 # Captured empty radar tracks required by the body ECU for stop-and-go. Only the counter
 # nibble changes.
-RADAR_STATIC_MSG = (0x499, bytes.fromhex("0008c00000000000"))
+# The real radar sends byte 2 0xe0 in every log, cruising or not (Sept-Nov captures); 0xc0 was never stock.
+RADAR_STATIC_MSG = (0x499, bytes.fromhex("0008e00000000000"))
 RADAR_TRACK_MSGS = {
   0x361: bytes.fromhex("fff7fefe1fc00080"),
   0x362: bytes.fromhex("fff7fefe1fc78c80"),

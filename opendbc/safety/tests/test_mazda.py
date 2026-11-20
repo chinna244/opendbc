@@ -318,7 +318,7 @@ class TestMazdaLongitudinalSafety(TestMazdaEpsSafety, common.LongitudinalAccelSa
 
   def test_empty_radar_tracks_allowed(self):
     radar_messages = {
-      0x499: bytes.fromhex("0008c00000000000"),
+      0x499: bytes.fromhex("0008e00000000000"),
       0x361: bytes.fromhex("fff7fefe1fc00080"),
       0x362: bytes.fromhex("fff7fefe1fc78c80"),
       0x363: bytes.fromhex("fff7fefe1fc00000"),
@@ -340,6 +340,12 @@ class TestMazdaLongitudinalSafety(TestMazdaEpsSafety, common.LongitudinalAccelSa
         counted = dat[:7] + bytes([dat[7] | counter])
         self.assertEqual(addr != 0x499, self._tx(common.make_msg(0, addr, 8, counted)), f"{addr=:#x} {counter=}")
 
+  def test_old_radar_static_refused(self):
+    # 0008c0 was our frame before 2026-11-19, never the real radar's: no longer a capture
+    self.safety.set_controls_allowed(True)
+    for bus in (0, 2):
+      self.assertFalse(self._tx(common.make_msg(bus, 0x499, 8, bytes.fromhex("0008c00000000000"))))
+
   def test_g46l_radar_static_allowed(self):
     # the 2016.5 G46L body's own static capture; the 2022 one above is not its frame, and
     # the G46L never sends track messages at all
@@ -354,7 +360,7 @@ class TestMazdaLongitudinalSafety(TestMazdaEpsSafety, common.LongitudinalAccelSa
 
   def test_unexpected_radar_tracks_blocked(self):
     bad_messages = {
-      0x499: bytes.fromhex("0008c00100000000"),
+      0x499: bytes.fromhex("0008e00100000000"),
       0x361: bytes.fromhex("fff7fefe1fc00180"),
       0x362: bytes.fromhex("fff7fefe1fc00080"),
       0x363: bytes.fromhex("fff7fefe1fc00080"),
@@ -539,7 +545,7 @@ class TestMazdaCanFilterSafety(TestMazdaLongitudinalSafety):
   # the UDS takeover and its synthetic radar frames are blocked outright
   def test_empty_radar_tracks_allowed(self):
     for bus in (0, 2):
-      self.assertFalse(self._tx(make_msg(bus, 0x499, 8, bytes.fromhex("0008c00000000000"))))
+      self.assertFalse(self._tx(make_msg(bus, 0x499, 8, bytes.fromhex("0008e00000000000"))))
       self.assertFalse(self._tx(make_msg(bus, 0x361, 8, bytes.fromhex("fff7fefe1fc00080"))))
 
   def test_g46l_radar_static_allowed(self):

@@ -142,7 +142,7 @@ def test_crz_ctrl_relays_hbc_arming(packer, long_active, acc_available, gap, acc
 
 def test_radar_frames_match_stock():
   expected = [
-    (0x499, "0008c00000000000"),
+    (0x499, "0008e00000000000"),
     (0x361, "fff7fefe1fc00080"),
     (0x362, "fff7fefe1fc78c80"),
     (0x363, "fff7fefe1fc00000"),
