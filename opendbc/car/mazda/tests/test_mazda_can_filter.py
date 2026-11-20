@@ -554,6 +554,13 @@ class TestCruisingWhiteWheel:
     assert tcc.can_filter.control_active and not tcc.radar_session.control_active
     assert any(d == self.WHITE for _, d in hud) and tcc.mads_white_hud_on_bus
 
+  def test_cruising_white_carries_the_cameras_lane_keep_byte3(self, tcc, fcs):
+    # routes 7c/7d: camera armed (byte 3 0x0a), our TJA=2 frame went out with byte 3 zeroed
+    confirm(tcc, fcs)
+    hud = self.drive(tcc, fcs, 3 * self.CADENCE, **self.kwargs(cam_laneinfo_raw=bytes.fromhex("4201000a00001040")))
+    assert any(d == bytes.fromhex("4201000a20001040") for _, d in hud), [d.hex() for _, d in hud]
+    assert all(d[3] == 0x0A for _, d in hud)
+
   def test_no_white_before_the_board_confirms(self, tcc, fcs):
     hud = self.drive(tcc, fcs, 3 * self.CADENCE, state=None, **self.kwargs())
     assert not tcc.can_filter.control_active

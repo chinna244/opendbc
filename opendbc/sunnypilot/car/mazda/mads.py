@@ -101,6 +101,18 @@ def apply_mads_white_hud(fsc_raw: bytes | None, packed_dat: bytes, enabled: bool
   return bytes(a ^ b for a, b in zip(packed_dat, MADS_HUD_WHITE_TJA_XOR, strict=True))
 
 
+def with_camera_lane_keep(dat: bytes, fsc_raw: bytes | None) -> bytes:
+  """The camera's lane-keep state (byte 3 low nibble: TJA_TRANSITION 0x0C, unnamed 0x03) on our frame.
+
+  Routes 0000006e/6f: camera armed, our byte 3 zeroed, no dash lines; with the C4 unplugged the
+  dash gets the camera's frame and draws them. A stale or missing camera frame sends 0.
+  EXPERIMENT, not a confirmed cause: Sept drives also sent byte 3 zeroed, unexplained.
+  """
+  if fsc_raw is None or len(fsc_raw) != 8 or len(dat) != 8:
+    return dat
+  return dat[:3] + bytes([(dat[3] & 0xF0) | (fsc_raw[3] & 0x0F)]) + dat[4:]
+
+
 def create_mrcc_off_cmd(packer, counter):
   # The wheel's MRCC master press, active-low: every button bit 0 with its inversion 1,
   # the master signature in BIT1/BIT1_INV plus BIT2/BIT3, counter plus one. Only the
@@ -343,7 +355,8 @@ class MadsCarController:
     fsc_raw = CS.cam_laneinfo_raw
     payload = white_hud_allowlist_base(fsc_raw) if white else alert[1]
     self.mads_white_hud_on_bus = white
-    return alert[0], apply_mads_white_hud(fsc_raw, payload, white), alert[2]
+    dat = apply_mads_white_hud(fsc_raw, payload, white)
+    return alert[0], with_camera_lane_keep(dat, fsc_raw if CS.cam_laneinfo_live else None), alert[2]
 
 
 class MadsCarState(MadsCarStateBase):
