@@ -232,7 +232,7 @@ class AccelShaper:
     # drop and return, which would loop it
     cooling = self.kick_cooldown > 0 and (self.kick_cooldown_firm or cap is None or plan_accel < cap + P.KICK_COOLDOWN_BYPASS)
     if self.kick_from or not long_active or not holding or cooling or not catching_up or \
-       plan_accel < cap + P.KICK_MARGIN:
+       plan_accel < cap + P.KICK_MARGIN or (self.gear == 6 and plan_accel < P.KICK_SIXTH_ASK):
       # a partial count does not wait out a softer stretch
       self.kick_frames = 0
     else:

@@ -173,6 +173,12 @@ class CarControllerParams:
   # easing within 3 s (this driver's own downshifts from 6th: 32% back up within 3 s); more time or deficit before
   # the kick cut kicks without changing that share.
   KICK_MARGIN = 0.15  # m/s2 over the gear's cap
+  # From 6th only an ask of KICK_SIXTH_ASK or more, held for KICK_FRAMES, kicks. Route 00000086 (42-53 mph behind a
+  # lead, set 59): 6 kicks in 5 min (5 from 6th, 1 from 5th) on asks of 0.42-0.68 that eased within a few seconds,
+  # most back up in 4-8 s. Replay of routes 00000043-00000086 (354 engaged min): 63 kicks, about half back up within
+  # 6 s whatever the lead or the ask. This rule removes 38, all from 6th: 33 asked under 0.55 when they fired, 5 did
+  # not hold 0.55 for the full second. They gained a median 4.0 mph in 10 s, about what 6th's own 0.2 gives (4.5).
+  KICK_SIXTH_ASK = 0.55  # m/s2
   KICK_DEFICIT = 2.2  # m/s, 5 mph under the set speed
   KICK_SET_SPEED_MAX = 69.  # m/s; over this the set speed is unset (255 km/h)
   KICK_ACCEL = {6: 0.4, 5: FOURTH_GEAR_ACCEL}  # m/s2 by the gear kicked from; from 4th, the ceiling
