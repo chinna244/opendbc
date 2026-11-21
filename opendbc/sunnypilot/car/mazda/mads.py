@@ -181,20 +181,20 @@ class MadsCarController:
     """Press the camera's own TJA off, on the camera bus only, while openpilot steers.
 
     Every TJA press reaches the camera again (cruise on or off) so its lane-keep state arms the
-    dash lane lines; with MRCC main on a press can also latch the camera's own TJA. Nothing is
-    pressed while the camera's TJA reads 0. Its TJA must not run alongside openpilot's steering (route
-    0000013b: FSC malfunction). Driven by the camera's native TJA on a fresh CAM_LANEINFO only:
-    nonzero for CAMERA_TJA_CONFIRM_FRAMES, then up to CAMERA_TJA_PRESS_MAX presses
-    CAMERA_TJA_PRESS_FRAMES apart, each sent only when the panda's shared burst has room
-    (camera_press_ready); native TJA=0 ends the episode, and still nonzero after the budget
-    raises camera_tja_stuck. Stale camera data or openpilot not steering sends nothing.
+    dash lane lines; with MRCC main on a press can also latch the camera's own TJA. Leave native
+    TJA=2 (standby) alone to preserve the camera's HUD state. Active camera TJA must not run
+    alongside openpilot's steering (route 0000013b: FSC malfunction). Confirm a fresh native state
+    other than 0 or 2 for CAMERA_TJA_CONFIRM_FRAMES, then send up to CAMERA_TJA_PRESS_MAX presses
+    CAMERA_TJA_PRESS_FRAMES apart, each only when the panda's shared burst has room
+    (camera_press_ready). Native TJA=0 or 2 ends the episode. A persistent active state after the
+    budget raises camera_tja_stuck. Stale camera data or openpilot not steering sends nothing.
     """
     can_sends = []
     if not self.CP_SP.flags & MazdaFlagsSP.TJA_BUTTON:
       return can_sends
 
     native_tja = int(CS.cam_laneinfo["TJA"]) if CS.cam_laneinfo_live else None
-    if native_tja == 0:
+    if native_tja in (0, 2):
       self.camera_tja_frames = 0
       self.camera_tja_presses = 0
       self.camera_tja_press_frame = None

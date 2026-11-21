@@ -46,15 +46,15 @@ def test_undeclared_never_presses():
   assert not press_frames(run(cc, cs, 500, tja=3))
 
 
-@pytest.mark.parametrize("tja", [0])
-def test_native_zero_never_presses(tja):
+@pytest.mark.parametrize("tja", [0, 2])
+def test_native_off_or_standby_never_presses(tja):
   cc, cs = controller()
   assert not press_frames(run(cc, cs, 500, tja=tja))
   assert not cs.camera_tja_stuck
 
 
-@pytest.mark.parametrize("tja", [2, 3, 4, 5])
-def test_confirmed_nonzero_presses_paced_capped_then_alerts(tja):
+@pytest.mark.parametrize("tja", [3, 4, 5])
+def test_confirmed_active_tja_presses_paced_capped_then_alerts(tja):
   cc, cs = controller()
   out = run(cc, cs, CAMERA_TJA_CONFIRM_FRAMES + CAMERA_TJA_PRESS_FRAMES * (CAMERA_TJA_PRESS_MAX + 2), tja=tja)
   presses = press_frames(out)
@@ -75,7 +75,7 @@ def test_alert_waits_a_full_period_after_the_last_press():
 
 def test_press_bytes_on_the_camera_bus():
   cc, cs = controller()
-  out = run(cc, cs, CAMERA_TJA_CONFIRM_FRAMES, tja=2, counter=2)
+  out = run(cc, cs, CAMERA_TJA_CONFIRM_FRAMES, tja=3, counter=2)
   assert out[-1] == [bytes.fromhex("0009ffcc00000000")]
 
 
@@ -105,11 +105,12 @@ def test_not_steering_leaves_the_camera_alone_and_clears_the_alert():
   assert not cs.camera_tja_stuck
 
 
-def test_back_to_zero_ends_the_episode():
+@pytest.mark.parametrize("tja", [0, 2])
+def test_off_or_standby_ends_the_episode(tja):
   cc, cs = controller()
   run(cc, cs, CAMERA_TJA_CONFIRM_FRAMES + CAMERA_TJA_PRESS_FRAMES * CAMERA_TJA_PRESS_MAX, tja=3)
   assert cs.camera_tja_stuck
-  run(cc, cs, 1, tja=0)
+  run(cc, cs, 1, tja=tja)
   assert not cs.camera_tja_stuck
   # a fresh budget of three, paced by the panda's shared burst (test_back_to_back_episodes_*)
   out = run(cc, cs, 1500, tja=3)
@@ -118,7 +119,7 @@ def test_back_to_zero_ends_the_episode():
 
 def test_one_press_ends_it():
   cc, cs = controller()
-  out = run(cc, cs, CAMERA_TJA_CONFIRM_FRAMES, tja=2) + run(cc, cs, 500, tja=0)
+  out = run(cc, cs, CAMERA_TJA_CONFIRM_FRAMES, tja=3) + run(cc, cs, 500, tja=0)
   assert len(press_frames(out)) == 1
   assert not cs.camera_tja_stuck
 
