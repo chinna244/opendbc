@@ -38,8 +38,6 @@ def _create_radar_can_parser(car_fingerprint):
 class RadarInterface(RadarInterfaceBase):
   def __init__(self, CP, CP_SP):
     super().__init__(CP, CP_SP)
-    self.track_id = 0
-    self.updated_messages = set()
     self.trigger_msg = RADAR_TRIGGER_MSG
     self.rcp = None if CP.radarUnavailable else _create_radar_can_parser(CP.carFingerprint)
     self.camera_fallback = bool(CP_SP.flags & MazdaFlagsSP.CAN_FILTER)
@@ -61,7 +59,7 @@ class RadarInterface(RadarInterfaceBase):
       return self._lost()
 
     self.silent_frames = 0
-    rr = self._update(self.updated_messages)
+    rr = self._update(self.rcp, self.updated_messages)
     self.updated_messages.clear()
     return rr
 
@@ -74,12 +72,12 @@ class RadarInterface(RadarInterfaceBase):
     ret.errors.radarUnavailableTemporary = True
     return ret
 
-  def _update(self, updated_messages):
-    if not self.rcp.can_valid and self.camera_fallback:
+  def _update(self, rcp, updated_messages):
+    if not rcp.can_valid and self.camera_fallback:
       return self._lost()
 
     ret = structs.RadarData()
-    if not self.rcp.can_valid:
+    if not rcp.can_valid:
       ret.errors.canError = True
 
     for addr in RADAR_TRACK_ADDRS:
@@ -89,7 +87,7 @@ class RadarInterface(RadarInterfaceBase):
         self.pts.pop(addr, None)
         continue
 
-      msg = self.rcp.vl[addr]
+      msg = rcp.vl[addr]
 
       dist = msg['DIST_OBJ']
       ang = msg['ANG_OBJ']

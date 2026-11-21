@@ -330,6 +330,18 @@ class TestMazdaLongitudinalSafety(TestMazdaEpsSafety, common.LongitudinalAccelSa
           dat = bytes([0x01, 0xff, 0xe3, 0xff, d4, d5, 0x00])
           self.assertFalse(self._tx(common.make_msg(bus, 0x21b, 8, dat + bytes([(0xff - (sum(dat) - 1)) & 0xff]))))
 
+  def test_stock_crz_info_standby_is_byte_exact(self):
+    # one byte off the stock standby frame, checksum valid: the pegged command is read as a
+    # command and fails the accel limits
+    standby = bytes([0x01, 0xff, 0xe3, 0xff, 0xc0, 0x00, 0x00])
+    self.safety.set_controls_allowed(True)
+    for bus in (0, 2):
+      for i, val in ((0, 0x00), (1, 0xfe), (2, 0xe7), (3, 0xfe), (6, 0x10)):
+        dat = bytearray(standby)
+        dat[i] = val
+        dat.append((0xff - sum(dat)) & 0xff)
+        self.assertFalse(self._tx(common.make_msg(bus, 0x21b, 8, bytes(dat))), f"{bus=} byte {i}")
+
   def test_empty_radar_tracks_allowed(self):
     radar_messages = {
       0x499: bytes.fromhex("0008e00000000000"),
@@ -403,6 +415,7 @@ class TestMazdaLongitudinalSafety(TestMazdaEpsSafety, common.LongitudinalAccelSa
   def test_radar_uds_allowlist(self):
     # tester present and session control only, main bus only
     self.assertTrue(self._tx(common.make_msg(0, 0x764, 8, bytes.fromhex("023e800000000000"))))
+    self.assertTrue(self._tx(common.make_msg(0, 0x764, 8, bytes.fromhex("0210010000000000"))))
     self.assertTrue(self._tx(common.make_msg(0, 0x764, 8, bytes.fromhex("0210020000000000"))))
     self.assertFalse(self._tx(common.make_msg(0, 0x764, 8, bytes.fromhex("0210030000000000"))))
     self.assertFalse(self._tx(common.make_msg(0, 0x764, 8, bytes.fromhex("0227010000000000"))))
@@ -460,6 +473,14 @@ class TestMazdaLongitudinalSafety(TestMazdaEpsSafety, common.LongitudinalAccelSa
       self._main_off(1, brake)
       self.assertFalse(self.safety.get_acc_main_on())
       self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+  def test_main_stays_off_past_the_debounce(self):
+    self._armed()
+    self._main_off(3 * DEBOUNCE, brake=False)
+    self.assertFalse(self.safety.get_acc_main_on())
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+    self._rx(self._pedals_msg(True))
+    self.assertTrue(self.safety.get_acc_main_on())
 
   def test_short_dropout_is_held(self):
     self._armed()
@@ -984,6 +1005,26 @@ class TestMazdaMrccOffCleanup(MazdaTjaButtonBase):
         # only the CTR variation stays valid; anything else is a composite command
         allowed = over == {"CTR": 12}
         self.assertEqual(allowed, self.safety.safety_tx_hook(msg))
+
+  def test_tap_is_byte_exact(self):
+    # the packed tap, then one bit off in each byte the counter does not own
+    tap = bytes([0x00, 0x81, 0xfe, 0xc0 | (self.MRCC_OFF_VALUES["CTR"] << 2), 0x00, 0x00, 0x00, 0x00])
+    self.safety.safety_rx_hook(self._pedals(True))
+    self.assertTrue(self.safety.safety_tx_hook(common.make_msg(0, 0x9d, 8, tap)))
+    for i, val in ((3, tap[3] | 0x01), (3, tap[3] | 0x02), (3, tap[3] & 0x7f), (3, tap[3] & 0xbf), (4, 0x01), (5, 0x01), (6, 0x01), (7, 0x01)):
+      dat = bytearray(tap)
+      dat[i] = val
+      self.assertFalse(self.safety.safety_tx_hook(common.make_msg(0, 0x9d, 8, bytes(dat))), f"byte {i} = {val:#x}")
+
+  def test_master_button_at_rest_is_not_a_tap(self):
+    # BIT1 high is the MRCC master button at rest, as the controller's own button frames carry it
+    self.safety.safety_rx_hook(self._crz_ctrl(False))
+    for bit1_inv in (0, 1):
+      msg = self.packer.make_can_msg_safety("CRZ_BTNS", 0, {"CAN_OFF": 1, "BIT1": 1, "BIT1_INV": bit1_inv})
+      self.assertTrue(self.safety.safety_tx_hook(msg))
+    # pressed beside a cancel it is a composite command
+    msg = self.packer.make_can_msg_safety("CRZ_BTNS", 0, {"CAN_OFF": 1, "BIT1": 0, "BIT1_INV": 1})
+    self.assertFalse(self.safety.safety_tx_hook(msg))
 
   def test_cancel_still_allowed_while_not_controlling(self):
     self.safety.safety_rx_hook(self._crz_ctrl(False))

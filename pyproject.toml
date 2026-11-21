@@ -95,20 +95,24 @@ flake8-implicit-str-concat.allow-multiline=false
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "numpy.mean".msg = "Sum and divide. np.mean is slow"
 
+
+# sunnypilot: upstream dropped these exceptions (#4016); the fork is not clean under them yet
 [tool.ty.rules]
 # Ignore rules that produce false positives due to:
 # - Dynamic attributes on LibSafety (loaded from compiled C library)
 # - External dependencies not installed (panda, cereal, openpilot)
 # - capnp dynamically generated types
 possibly-missing-attribute = "ignore"
-unresolved-attribute = "ignore"
-unresolved-import = "ignore"
+missing-attribute = "ignore"
+missing-union-attribute = "ignore"
+import-not-found = "ignore"
 
 # Intentional LSP violations in subclass method signatures
-invalid-method-override = "ignore"
+incompatible-method-override = "ignore"
+incompatible-mutable-override = "ignore"
 
 # Optional callables called without None checks in test code
-call-non-callable = "ignore"
+not-callable = "ignore"
 
 # Complex type narrowing ty doesn't handle well (isinstance with abstract types)
 invalid-argument-type = "ignore"
@@ -118,13 +122,28 @@ not-subscriptable = "ignore"
 unsupported-operator = "ignore"
 
 # Return types with complex callable signatures
-invalid-return-type = "ignore"
+invalid-explicit-return = "ignore"
 
 # unittest TestSuite iteration (TestCase | TestSuite is always iterable in practice)
 not-iterable = "ignore"
 
 # Test class method signature differences
 too-many-positional-arguments = "ignore"
+
+[tool.ty.environment]
+# examples are scripts that import their siblings
+extra-paths = ["examples"]
+
+[tool.ty.analysis]
+# compiled extension without type information
+replace-imports-with-any = ["capnp", "capnp.**"]
+# optional, not installed here
+allowed-unresolved-imports = ["panda", "openpilot.**"]
+
+# test helpers that build messages narrow or rename the base class's parameters
+[[tool.ty.overrides]]
+include = ["opendbc/safety/tests/**"]
+rules = { incompatible-method-override = "ignore", lost-keyword-for-regular-parameter = "ignore" }
 
 [tool.setuptools]
 include-package-data = true
