@@ -1,4 +1,5 @@
-#pragma once
+#ifndef SAFETY_MODES_MAZDA_H
+#define SAFETY_MODES_MAZDA_H
 
 #include "opendbc/safety/declarations.h"
 
@@ -42,8 +43,8 @@
 
 static bool mazda_mrcc_off_msg_valid(const CANPacket_t *msg) {
   // Exact active-low MRCC master tap. CTR occupies the variable bits in byte 3;
-  // all other buttons and payload bits remain pinned.
-  return (GET_LEN(msg) == 8U) && (msg->data[0] == 0x00U) &&
+  // all other buttons and payload bits remain pinned. The TX whitelist pins the length.
+  return (msg->data[0] == 0x00U) &&
          (msg->data[1] == 0x81U) && (msg->data[2] == 0xfeU) &&
          ((msg->data[3] & 0xc3U) == 0xc0U) && (msg->data[4] == 0x00U) &&
          (msg->data[5] == 0x00U) && (msg->data[6] == 0x00U) && (msg->data[7] == 0x00U);
@@ -90,19 +91,19 @@ static bool mazda_radar_capture_msg_valid(const CANPacket_t *msg) {
 static void mazda_rx_hook(const CANPacket_t *msg) {
   if (msg_matches(msg, MAZDA_ENGINE_DATA, MAZDA_MAIN)) {
     // sample speed: scale by 0.01 to get kph
-    int speed = (msg->data[2] << 8) | msg->data[3];
-    safety.vehicle_moving = speed > 10;  // moving when speed > 0.1 kph
+    uint32_t speed = GET_BYTES_BE(msg, 2, 2);
+    safety.vehicle_moving = speed > 10U;  // moving when speed > 0.1 kph
   }
 
   if (msg_matches(msg, MAZDA_STEER_TORQUE, MAZDA_MAIN)) {
-    int torque_driver_new = msg->data[0] - 127U;
+    int torque_driver_new = (int)msg->data[0] - 127;
     // update array of samples
     update_sample(&safety.torque_driver, torque_driver_new);
   }
 
   // enter controls on rising edge of ACC, exit controls on ACC off
-  if (msg_matches(msg, MAZDA_CRZ_CTRL, MAZDA_MAIN) && !safety_setup.mazda_longitudinal) {
-    bool cruise_engaged = msg->data[0] & 0x8U;
+  if (!safety_setup.mazda_longitudinal && msg_matches(msg, MAZDA_CRZ_CTRL, MAZDA_MAIN)) {
+    bool cruise_engaged = GET_BIT(msg, 3U);
     pcm_cruise_check(cruise_engaged);
     // With the TJA button owning lateral, MRCC no longer drives the MADS main edge: its
     // falling edge would exit the panda's lateral while the software's MADS stays on.
@@ -114,7 +115,9 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
   if (msg_matches(msg, MAZDA_CRZ_BTNS, MAZDA_MAIN)) {
     // TJA-declared cars keep their own lateral switch. Otherwise ON rearms lateral in standby,
     // since a main that stayed on through boot can expire before selfdrived is ready.
-    bool lateral_button = safety_setup.mazda_tja_button ? GET_BIT(msg, MAZDA_TJA_BUTTON_BIT) : (safety.acc_main_on && GET_BIT(msg, MAZDA_MODE_Y_BIT));
+    const bool tja_button = GET_BIT(msg, MAZDA_TJA_BUTTON_BIT);
+    const bool mode_y_button = safety.acc_main_on && GET_BIT(msg, MAZDA_MODE_Y_BIT);
+    bool lateral_button = safety_setup.mazda_tja_button ? tja_button : mode_y_button;
     safety.mads_button_press = lateral_button ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
   }
 
@@ -137,7 +140,7 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
   }
 
   if (msg_matches(msg, MAZDA_PEDALS, MAZDA_MAIN)) {
-    safety.brake_pressed = (msg->data[0] & 0x10U);
+    safety.brake_pressed = GET_BIT(msg, 4U);
     // The live MRCC arm from the body's own PEDALS bits, the sample mrcc_armed_raw reads, so the
     // MRCC-off exception opens on the frame the controller first sends (CRZ_CTRL lags it).
     safety.mazda_acc_armed = GET_BIT(msg, 2U) || GET_BIT(msg, 3U);
@@ -221,18 +224,16 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   };
 
   bool tx = true;
-  // longitudinal replaces the radar's frames on both sides of the harness
-  bool long_replacement_bus = (msg->bus == (unsigned char)MAZDA_MAIN) || (msg->bus == (unsigned char)MAZDA_CAM);
   // Check if msg is sent on the main BUS
   // steer cmd checks
   if (msg_matches(msg, MAZDA_LKAS, MAZDA_MAIN)) {
-    int desired_torque = (((msg->data[0] & 0x0FU) << 8) | msg->data[1]) - 2048U;
+    int desired_torque = from_offset(GET_BYTES_BE(msg, 0, 2) & 0xFFFU, 2048);
 
     const TorqueSteeringLimits *limits = &MAZDA_STEERING_LIMITS;
     if (safety_setup.mazda_eps_hw) {
       limits = &MAZDA_EPS_HW_STEERING_LIMITS;
     }
-    if (steer_torque_cmd_checks(desired_torque, -1, *limits)) {
+    if (steer_torque_cmd_checks(desired_torque, true, *limits)) {
       tx = false;
     }
   }
@@ -242,7 +243,9 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     tx = false;
   }
 
-  if (safety_setup.mazda_longitudinal && long_replacement_bus && (msg->addr == MAZDA_CRZ_INFO)) {
+  // longitudinal replaces the radar's frames on both sides of the harness: MAZDA_LONG_TX_MSGS
+  // admits them on the main and the camera bus only, and the same checks apply on both
+  if (safety_setup.mazda_longitudinal && (msg->addr == MAZDA_CRZ_INFO)) {
     // Allow byte-exact stock standby patterns with the raw 8190 command sentinel.
     bool stock_standby = (msg->data[0] == 0x01U) && (msg->data[1] == 0xffU) &&
                          (msg->data[2] == 0xe3U) && (msg->data[3] == 0xffU) &&
@@ -266,7 +269,7 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     }
   }
 
-  if (safety_setup.mazda_longitudinal && long_replacement_bus && (msg->addr == MAZDA_CRZ_CTRL)) {
+  if (safety_setup.mazda_longitudinal && (msg->addr == MAZDA_CRZ_CTRL)) {
     bool cruise_active = GET_BIT(msg, 3U);
     if (!safety.controls_allowed && cruise_active) {
       tx = false;
@@ -274,7 +277,7 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   }
 
   bool radar_frame = (msg->addr == MAZDA_RADAR_STATIC) || ((msg->addr >= MAZDA_RADAR_TRACK_1) && (msg->addr <= MAZDA_RADAR_TRACK_6));
-  if (safety_setup.mazda_longitudinal && long_replacement_bus && radar_frame) {
+  if (safety_setup.mazda_longitudinal && radar_frame) {
     if (!mazda_radar_capture_msg_valid(msg)) {
       tx = false;
     }
@@ -396,10 +399,12 @@ static safety_config mazda_init(uint16_t param) {
                               BUILD_SAFETY_CFG(mazda_rx_checks, MAZDA_TX_MSGS);
 }
 
-const safety_hooks mazda_hooks = {
+static const safety_hooks mazda_hooks = {
   .init = mazda_init,
   .rx = mazda_rx_hook,
   .tx = mazda_tx_hook,
   .fwd = mazda_fwd_hook,
   .fwd_modify = mazda_fwd_modify,
 };
+
+#endif  // SAFETY_MODES_MAZDA_H

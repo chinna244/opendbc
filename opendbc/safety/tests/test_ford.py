@@ -274,6 +274,23 @@ class TestFordSafetyBase(common.CarSafetyTest):
                                     curvature=float(curvature)):
                     self.assertEqual(should_tx, self._tx(self._lat_ctl_msg(steer_control_enabled, path_offset, path_angle, curvature, curvature_rate)))
 
+  def test_steer_allowed_mads_lateral(self):
+    speed = self.CURVATURE_ERROR_MIN_SPEED + 1
+    self.safety.set_controls_allowed(False)
+    for controls_allowed_lateral in (False, True):
+      self.safety.set_controls_allowed_lateral(controls_allowed_lateral)
+      self._set_prev_desired_angle(0)
+      self._reset_curvature_measurement(0, speed)
+      self.assertEqual(controls_allowed_lateral, self._tx(self._lat_ctl_msg(True, 0, 0, 0, 0)))
+      self.assertTrue(self._tx(self._lat_ctl_msg(False, 0, 0, 0, 0)))
+
+  def test_acc_main_on(self):
+    # CcStat_D_Actl: 3 standby, 4 and 5 engaged
+    for cruise_state in range(8):
+      msg = self.packer.make_can_msg_safety("EngBrakeData", 0, {"BpedDrvAppl_D_Actl": 1, "CcStat_D_Actl": cruise_state})
+      self.assertTrue(self._rx(msg))
+      self.assertEqual(cruise_state in (3, 4, 5), self.safety.get_acc_main_on(), f"{cruise_state=}")
+
   def test_curvature_rate_limits(self):
     """
     When the curvature error is exceeded, commanded curvature must start moving towards meas respecting rate limits.
@@ -453,10 +470,10 @@ class TestFordLongitudinalSafetyBase(TestFordSafetyBase):
   INACTIVE_GAS = -5.0
 
   # ACC command
-  def _acc_command_msg(self, gas: float, brake: float, brake_actuation: bool, cmbb_deny: bool = False):
+  def _acc_command_msg(self, gas: float, brake: float, brake_actuation: bool, cmbb_deny: bool = False, gas_pred: float | None = None):
     values = {
       "AccPrpl_A_Rq": gas,                              # [-5|5.23] m/s^2
-      "AccPrpl_A_Pred": gas,                            # [-5|5.23] m/s^2
+      "AccPrpl_A_Pred": gas if gas_pred is None else gas_pred,  # [-5|5.23] m/s^2
       "AccBrkTot_A_Rq": brake,                          # [-20|11.9449] m/s^2
       "AccBrkPrchg_B_Rq": 1 if brake_actuation else 0,  # Pre-charge brake request: 0=No, 1=Yes
       "AccBrkDecel_B_Rq": 1 if brake_actuation else 0,  # Deceleration request: 0=Inactive, 1=Active
@@ -481,6 +498,9 @@ class TestFordLongitudinalSafetyBase(TestFordSafetyBase):
         gas = round(gas, 2)  # floats might not hit exact boundary conditions without rounding
         should_tx = (controls_allowed and self.MIN_GAS <= gas <= self.MAX_GAS) or gas == self.INACTIVE_GAS
         self.assertEqual(should_tx, self._tx(self._acc_command_msg(gas, self.INACTIVE_ACCEL, controls_allowed)))
+        # both gas signals are checked on their own
+        self.assertEqual(should_tx, self._tx(self._acc_command_msg(gas, self.INACTIVE_ACCEL, controls_allowed, gas_pred=self.INACTIVE_GAS)))
+        self.assertEqual(should_tx, self._tx(self._acc_command_msg(self.INACTIVE_GAS, self.INACTIVE_ACCEL, controls_allowed, gas_pred=gas)))
 
   def test_brake_safety_check(self):
     brake_values = self._boundary_values([self.MIN_ACCEL, self.MAX_ACCEL, self.INACTIVE_ACCEL],
