@@ -179,9 +179,19 @@ class CarControllerParams:
   # 6 s whatever the lead or the ask. This rule removes 38, all from 6th: 33 asked under 0.55 when they fired, 5 did
   # not hold 0.55 for the full second. They gained a median 4.0 mph in 10 s, about what 6th's own 0.2 gives (4.5).
   KICK_SIXTH_ASK = 0.55  # m/s2
+  # With no lead shown the ask is KICK_SIXTH_ASK_NO_LEAD. Route 00000089 (55-62 mph, set 66, no lead): the plan asked
+  # 0.43-0.50 for 20 s and 6th's cap gave about 0.15. Replay of routes 00000043-00000089 (6.3 h engaged): 2 more
+  # kicks, both route 00000089, neither easing within 3 s; none added on route 00000086. At 0.40 it was 5 more, 3
+  # easing within 3 s.
+  KICK_SIXTH_ASK_NO_LEAD = 0.45  # m/s2
   KICK_DEFICIT = 2.2  # m/s, 5 mph under the set speed
   KICK_SET_SPEED_MAX = 69.  # m/s; over this the set speed is unset (255 km/h)
   KICK_ACCEL = {6: 0.4, 5: FOURTH_GEAR_ACCEL}  # m/s2 by the gear kicked from; from 4th, the ceiling
+  # A kick from 6th with no lead shown pushes KICK_SIXTH_ACCEL_NO_LEAD: route 00000089's on-ramp kicked 6-5-4 at 45-50
+  # mph and pulled at the 0.4 to 65 mph while the plan asked 0.50-0.58 (45->65 mph in 26 s). All logs, engaged in 4th
+  # over 35 mph: 0 of 17 pushes under 0.55 kicked down to 3rd, 1 of 22 at 0.55-0.60. The gear's own cap still applies
+  # under it (5th under 40 mph 0.35). Behind a lead the kick keeps KICK_ACCEL.
+  KICK_SIXTH_ACCEL_NO_LEAD = 0.5  # m/s2
   KICK_RELEASE = 0.25  # m/s2
   KICK_FRAMES = int(1.0 / DT_CTRL)
   KICK_COOLDOWN_FRAMES = int(15.0 / DT_CTRL)
@@ -189,6 +199,13 @@ class CarControllerParams:
   # at 28-33 mph right after the 4-5 upshift and got 0.35 for 9 s until the driver pressed (and took it 5-4-3). Replay
   # of 128 routes (9.2 h): 8 more kicks, all asking 0.8-1.2, 1 easing within 3 s (30% of all kicks do).
   KICK_COOLDOWN_BYPASS = 0.4  # m/s2 over the gear's cap
+  # In 6th with no lead shown the cooldown after any upshift into 6th, a kick's return or an ordinary one, is
+  # KICK_SIXTH_COOLDOWN_NO_LEAD_FRAMES. Route 00000089 t=505: a kick 6-4 ended at 55 mph on a short dip in the ask, 11
+  # mph under the set speed, and the 15 s cooldown held 6th's 0.2 to 61 mph; its on-ramp kick (an ordinary 5-6
+  # upshift) came at 46.8 mph instead of 48.9. Replay of routes 00000043-00000089 (6.3 h engaged), 6th only: 3 more kicks (route 00000048 t=623,
+  # 00000089 t=276 and t=509), none easing within 3 s, no three kicks within 60 s; none on route 00000086. For all
+  # gears it added 23, most in 4th in town.
+  KICK_SIXTH_COOLDOWN_NO_LEAD_FRAMES = int(3.0 / DT_CTRL)
   # 1.2 m/s3 in town with the raised ceiling, our 0.8 from 36 mph.
   ACCEL_BUILD_BP = [3., 6., 12., 16.]   # m/s
   ACCEL_BUILD_V = [ACCEL_RELEASE_RAMP, 1.2, 1.2, 0.8]  # m/s3

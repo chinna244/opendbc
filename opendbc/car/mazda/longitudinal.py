@@ -166,6 +166,9 @@ class AccelShaper:
     self.gas_override = False  # engaged, with the gas holding control off since it was last active
     self.launch = False  # op pulling away from a stop or a straight crawl, not yet at LAUNCH_SPEED, no brake request since
     self.straight = True  # the wheel within LAUNCH_STEER_MAX
+    self.kick_lead = True  # a lead shown at the last kick update
+    self.kick_light = False  # the current kick started only under the no-lead rules
+    self.kick_frames_full = 0  # frames the kick conditions held under the rules a lead shown keeps
 
   def _update_gear(self, gear_box: int, v_ego: float) -> None:
     if self.upshift_hold_frames > 0:
@@ -218,12 +221,11 @@ class AccelShaper:
     P = CarControllerParams
     return min(float(np.interp(v_ego, P.ACCEL_CEILING_BP, P.ACCEL_CEILING_V)), P.KICK_ACCEL.get(gear, P.ACCEL_MAX))
 
-  def _update_kick(self, long_active: bool, plan_accel: float, v_ego: float, v_set: float) -> None:
+  def _update_kick(self, long_active: bool, plan_accel: float, v_ego: float, v_set: float,
+                   lead_visible: bool = True) -> None:
     P = CarControllerParams
-    easing_before_the_shift = self.gear == self.kick_from and not self.shifting and plan_accel < P.KICK_RELEASE
-    if not long_active or plan_accel < 0. or easing_before_the_shift:
-      # a brake request or losing control ends a kick, and an ask that eases before the downshift starts does
-      self.kick_from = 0
+    self.kick_lead = lead_visible
+    sixth_ask = P.KICK_SIXTH_ASK if lead_visible else P.KICK_SIXTH_ASK_NO_LEAD
     cap = self._gear_cap(self.gear, v_ego)
     # only where dropping a gear gives a real push over this gear's cap
     holding = cap is not None and self.gear >= 4 and self._kick_push(self.gear, v_ego) >= cap + P.KICK_MARGIN
@@ -231,14 +233,33 @@ class AccelShaper:
     # after an upshift only an ask far over the cap kicks: an on-ramp, not a hunt; never right after a kick's own
     # drop and return, which would loop it
     cooling = self.kick_cooldown > 0 and (self.kick_cooldown_firm or cap is None or plan_accel < cap + P.KICK_COOLDOWN_BYPASS)
+    # the count under the rules a lead shown keeps: the full 6th ask and the full cooldown
+    full_rules = long_active and holding and not cooling and catching_up and plan_accel >= cap + P.KICK_MARGIN and \
+                 not (self.gear == 6 and plan_accel < P.KICK_SIXTH_ASK)
+    self.kick_frames_full = self.kick_frames_full + 1 if full_rules else 0
+    if self.kick_from and self.kick_frames_full >= P.KICK_FRAMES:
+      self.kick_light = False  # the full rules would have kicked by now
+    if cooling and self.gear == 6 and not lead_visible and \
+       P.KICK_COOLDOWN_FRAMES - self.kick_cooldown >= P.KICK_SIXTH_COOLDOWN_NO_LEAD_FRAMES:
+      # settled in 6th on an open road still well under the set speed: a short cooldown is enough
+      cooling = False
+    before_the_shift = self.gear == self.kick_from and not self.shifting
+    easing_before_the_shift = before_the_shift and plan_accel < P.KICK_RELEASE
+    # a lead shown before the downshift starts ends a kick only the no-lead rules started (the lighter ask or the
+    # shorter cooldown) until the full rules would have kicked too
+    lead_before_the_shift = before_the_shift and self.kick_light and lead_visible
+    if not long_active or plan_accel < 0. or easing_before_the_shift or lead_before_the_shift:
+      # a brake request or losing control ends a kick, and an ask that eases before the downshift starts does
+      self.kick_from = 0
     if self.kick_from or not long_active or not holding or cooling or not catching_up or \
-       plan_accel < cap + P.KICK_MARGIN or (self.gear == 6 and plan_accel < P.KICK_SIXTH_ASK):
+       plan_accel < cap + P.KICK_MARGIN or (self.gear == 6 and plan_accel < sixth_ask):
       # a partial count does not wait out a softer stretch
       self.kick_frames = 0
     else:
       self.kick_frames += 1
       if self.kick_frames >= P.KICK_FRAMES:
         self.kick_from, self.kick_frames, self.kick_dropped = self.gear, 0, False
+        self.kick_light = self.kick_frames_full < P.KICK_FRAMES
 
   def _update_handover(self, long_engaged: bool, long_active: bool, standstill: bool, v_ego: float, a_ego: float,
                        lead_visible: bool, gas_pressed: bool, plan_accel: float) -> bool:
@@ -286,7 +307,9 @@ class AccelShaper:
       cap = None if self.kick_from and self.gear == self.kick_from else self._gear_cap(self.gear, v_ego)
       if cap is not None:
         ceiling = min(ceiling, cap)
-      if self.kick_from in P.KICK_ACCEL:
+      if self.kick_from == 6 and not self.kick_lead:
+        ceiling = min(ceiling, P.KICK_SIXTH_ACCEL_NO_LEAD)  # an open road: the pull the gear below holds
+      elif self.kick_from in P.KICK_ACCEL:
         ceiling = min(ceiling, P.KICK_ACCEL[self.kick_from])
       build = float(np.interp(v_ego, P.ACCEL_BUILD_BP, P.ACCEL_BUILD_V)) * DT_CTRL
       step_cap = max(last, 0.) + build
@@ -326,7 +349,7 @@ class AccelShaper:
     elif v_ego >= CarControllerParams.LAUNCH_SPEED or plan_accel < 0. or abs(steer_angle) > CarControllerParams.LAUNCH_STEER_MAX:
       self.launch = False  # a turn ends it: straightening out past LAUNCH_ROLL_SPEED is no pull-away
     self.straight = abs(steer_angle) <= CarControllerParams.LAUNCH_STEER_MAX
-    self._update_kick(long_active, plan_accel, v_ego, v_set)
+    self._update_kick(long_active, plan_accel, v_ego, v_set, lead_visible)
     climb = self._update_handover(long_engaged, long_active, standstill, v_ego, a_ego, lead_visible, gas_pressed, plan_accel)
     if sm.just_released:
       # Never-latched stops relax in one frame; latched holds ramp from the relaxed command.
