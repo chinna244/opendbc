@@ -43,8 +43,8 @@
 
 static bool mazda_mrcc_off_msg_valid(const CANPacket_t *msg) {
   // Exact active-low MRCC master tap. CTR occupies the variable bits in byte 3;
-  // all other buttons and payload bits remain pinned.
-  return (GET_LEN(msg) == 8U) && (msg->data[0] == 0x00U) &&
+  // all other buttons and payload bits remain pinned. The TX whitelist pins the length.
+  return (msg->data[0] == 0x00U) &&
          (msg->data[1] == 0x81U) && (msg->data[2] == 0xfeU) &&
          ((msg->data[3] & 0xc3U) == 0xc0U) && (msg->data[4] == 0x00U) &&
          (msg->data[5] == 0x00U) && (msg->data[6] == 0x00U) && (msg->data[7] == 0x00U);
@@ -102,7 +102,7 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
   }
 
   // enter controls on rising edge of ACC, exit controls on ACC off
-  if (msg_matches(msg, MAZDA_CRZ_CTRL, MAZDA_MAIN) && !safety_setup.mazda_longitudinal) {
+  if (!safety_setup.mazda_longitudinal && msg_matches(msg, MAZDA_CRZ_CTRL, MAZDA_MAIN)) {
     bool cruise_engaged = GET_BIT(msg, 3U);
     pcm_cruise_check(cruise_engaged);
     // With the TJA button owning lateral, MRCC no longer drives the MADS main edge: its
@@ -224,8 +224,6 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   };
 
   bool tx = true;
-  // longitudinal replaces the radar's frames on both sides of the harness
-  bool long_replacement_bus = (msg->bus == (unsigned char)MAZDA_MAIN) || (msg->bus == (unsigned char)MAZDA_CAM);
   // Check if msg is sent on the main BUS
   // steer cmd checks
   if (msg_matches(msg, MAZDA_LKAS, MAZDA_MAIN)) {
@@ -245,7 +243,9 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     tx = false;
   }
 
-  if (safety_setup.mazda_longitudinal && long_replacement_bus && (msg->addr == MAZDA_CRZ_INFO)) {
+  // longitudinal replaces the radar's frames on both sides of the harness: MAZDA_LONG_TX_MSGS
+  // admits them on the main and the camera bus only, and the same checks apply on both
+  if (safety_setup.mazda_longitudinal && (msg->addr == MAZDA_CRZ_INFO)) {
     // Allow byte-exact stock standby patterns with the raw 8190 command sentinel.
     bool stock_standby = (msg->data[0] == 0x01U) && (msg->data[1] == 0xffU) &&
                          (msg->data[2] == 0xe3U) && (msg->data[3] == 0xffU) &&
@@ -269,7 +269,7 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
     }
   }
 
-  if (safety_setup.mazda_longitudinal && long_replacement_bus && (msg->addr == MAZDA_CRZ_CTRL)) {
+  if (safety_setup.mazda_longitudinal && (msg->addr == MAZDA_CRZ_CTRL)) {
     bool cruise_active = GET_BIT(msg, 3U);
     if (!safety.controls_allowed && cruise_active) {
       tx = false;
@@ -277,7 +277,7 @@ static bool mazda_tx_hook(const CANPacket_t *msg) {
   }
 
   bool radar_frame = (msg->addr == MAZDA_RADAR_STATIC) || ((msg->addr >= MAZDA_RADAR_TRACK_1) && (msg->addr <= MAZDA_RADAR_TRACK_6));
-  if (safety_setup.mazda_longitudinal && long_replacement_bus && radar_frame) {
+  if (safety_setup.mazda_longitudinal && radar_frame) {
     if (!mazda_radar_capture_msg_valid(msg)) {
       tx = false;
     }
