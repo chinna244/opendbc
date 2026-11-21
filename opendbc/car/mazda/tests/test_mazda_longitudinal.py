@@ -974,6 +974,160 @@ def test_a_6th_ask_at_the_6th_ask_kicks_after_a_full_second(cc, cs):
   assert cc.accel_shaper.kick_from == 6
 
 
+def test_with_no_lead_a_lighter_6th_ask_kicks(cc, cs):
+  # route 00000089 t=510-528: 55-62 mph, set 66, no lead, the plan asked 0.43-0.50 and 6th's cap gave about 0.15
+  P = CarControllerParams
+  drive(cc, cs, seconds(10.0), P.KICK_SIXTH_ASK_NO_LEAD - 0.01, 6, 25., 29.5, lead_visible=False)
+  assert cc.accel_shaper.kick_from == 0
+  ask = P.KICK_SIXTH_ASK_NO_LEAD + 0.005  # over float32 rounding of the plan
+  drive(cc, cs, P.KICK_FRAMES - 1, ask, 6, 25., 29.5, lead_visible=False)
+  assert cc.accel_shaper.kick_from == 0
+  drive(cc, cs, 1, ask, 6, 25., 29.5, lead_visible=False)
+  assert cc.accel_shaper.kick_from == 6
+
+
+def test_a_lead_shown_keeps_the_full_6th_ask(cc, cs):
+  # route 00000086: the kicks behind a lead on asks under 0.55 that hunted
+  P = CarControllerParams
+  drive(cc, cs, seconds(10.0), P.KICK_SIXTH_ASK - 0.01, 6, 25., 29.5, lead_visible=True)
+  assert cc.accel_shaper.kick_from == 0
+
+
+def kick_on_a_light_ask_with_no_lead(cc, cs, ask):
+  P = CarControllerParams
+  drive(cc, cs, P.KICK_FRAMES, ask, 6, 25., 29.5, lead_visible=False)
+  assert cc.accel_shaper.kick_from == 6
+
+
+def test_a_lead_before_the_downshift_ends_a_light_ask_kick(cc, cs):
+  # review: a no-lead kick on 0.49 kept 6th's cap lifted after a lead appeared, ramping to 0.4 instead of 0.2
+  P = CarControllerParams
+  kick_on_a_light_ask_with_no_lead(cc, cs, 0.49)
+  drive(cc, cs, 1, 0.49, 6, 25., 29.5, lead_visible=True)
+  assert cc.accel_shaper.kick_from == 0
+  drive(cc, cs, seconds(3.0), 0.49, 6, 25., 29.5, lead_visible=True)
+  assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)
+
+
+def test_a_lead_before_the_downshift_keeps_a_full_ask_kick(cc, cs):
+  P = CarControllerParams
+  kick_on_a_light_ask_with_no_lead(cc, cs, 0.6)
+  drive(cc, cs, seconds(1.0), 0.6, 6, 25., 29.5, lead_visible=True)
+  assert cc.accel_shaper.kick_from == 6
+  assert P.KICK_SIXTH_ASK < 0.6
+
+
+def test_a_kick_started_behind_a_lead_keeps_going_on_an_easing_ask(cc, cs):
+  # review: a full-ask kick behind a lead easing to 0.49 before the downshift was cancelled to 0.2; it keeps its 0.4
+  P = CarControllerParams
+  drive(cc, cs, P.KICK_FRAMES, 0.6, 6, 25., 29.5, lead_visible=True)
+  assert cc.accel_shaper.kick_from == 6
+  drive(cc, cs, seconds(3.0), 0.49, 6, 25., 29.5, lead_visible=True)
+  assert cc.accel_shaper.kick_from == 6
+  assert cc.accel_last == pytest.approx(P.KICK_ACCEL[6], abs=1e-6)
+
+
+def test_a_full_ask_kick_with_no_lead_keeps_going_when_a_lead_appears(cc, cs):
+  # as before this change: only an ask under KICK_RELEASE ends it before the downshift
+  P = CarControllerParams
+  drive(cc, cs, P.KICK_FRAMES, 0.6, 6, 25., 29.5, lead_visible=False)
+  assert cc.accel_shaper.kick_from == 6
+  drive(cc, cs, seconds(3.0), 0.49, 6, 25., 29.5, lead_visible=True)
+  assert cc.accel_shaper.kick_from == 6
+  assert cc.accel_last == pytest.approx(P.KICK_ACCEL[6], abs=1e-6)
+
+
+def test_a_lead_after_the_downshift_keeps_the_kick_at_the_lead_push(cc, cs):
+  # once in the lower gear, ending the kick would only shift it back up: it keeps the push it has behind a lead
+  P = CarControllerParams
+  kick_on_a_light_ask_with_no_lead(cc, cs, 0.49)
+  drive(cc, cs, seconds(1.0), 0.49, 5, 25., 29.5, lead_visible=False)
+  drive(cc, cs, seconds(3.0), 0.49, 5, 25., 29.5, lead_visible=True)
+  assert cc.accel_shaper.kick_from == 6
+  assert cc.accel_last == pytest.approx(P.KICK_ACCEL[6], abs=1e-6)
+
+
+def test_a_lead_appearing_restarts_the_count_for_a_light_ask(cc, cs):
+  P = CarControllerParams
+  ask = P.KICK_SIXTH_ASK_NO_LEAD + 0.02
+  drive(cc, cs, P.KICK_FRAMES - 1, ask, 6, 25., 29.5, lead_visible=False)
+  drive(cc, cs, 1, ask, 6, 25., 29.5, lead_visible=True)
+  drive(cc, cs, P.KICK_FRAMES - 1, ask, 6, 25., 29.5, lead_visible=False)
+  assert cc.accel_shaper.kick_from == 0
+
+
+def kick_and_return_to_6th(cc, cs, v, v_set, lead_visible):
+  drive(cc, cs, seconds(2.0), 0.6, 6, v, v_set, lead_visible=lead_visible)
+  assert cc.accel_shaper.kick_from == 6
+  drive(cc, cs, seconds(3.0), 0.6, 4, v, v_set, lead_visible=lead_visible)
+  drive(cc, cs, 1, 0.5, 6, v, v_set, lead_visible=lead_visible)
+  assert cc.accel_shaper.kick_from == 0
+
+
+def test_with_no_lead_6th_kicks_again_after_the_short_cooldown(cc, cs):
+  # route 00000089 t=505: the kick ended at 55 mph, 11 mph under the set speed, and the 15 s cooldown held 6th's 0.2
+  P = CarControllerParams
+  v, v_set = 25., 29.5
+  kick_and_return_to_6th(cc, cs, v, v_set, False)
+  drive(cc, cs, P.KICK_SIXTH_COOLDOWN_NO_LEAD_FRAMES + P.KICK_FRAMES - 2, 0.5, 6, v, v_set, lead_visible=False)
+  assert cc.accel_shaper.kick_from == 0  # not inside the short cooldown and its full second of asking
+  drive(cc, cs, 2, 0.5, 6, v, v_set, lead_visible=False)
+  assert cc.accel_shaper.kick_from == 6
+
+
+def test_a_lead_before_the_downshift_ends_a_kick_only_the_short_cooldown_started(cc, cs):
+  # review: a 0.56 kick 3 s after a return, a lead shown before the downshift and the ask at 0.49: committed stays at
+  # 0.2 in 6th, the patch climbed to 0.4
+  P = CarControllerParams
+  v, v_set = 25., 29.5
+  kick_and_return_to_6th(cc, cs, v, v_set, False)
+  drive(cc, cs, P.KICK_SIXTH_COOLDOWN_NO_LEAD_FRAMES + P.KICK_FRAMES + 1, 0.56, 6, v, v_set, lead_visible=False)
+  assert cc.accel_shaper.kick_from == 6
+  drive(cc, cs, 1, 0.49, 6, v, v_set, lead_visible=True)
+  assert cc.accel_shaper.kick_from == 0
+  drive(cc, cs, seconds(3.0), 0.49, 6, v, v_set, lead_visible=True)
+  assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)
+
+
+def test_with_a_lead_6th_keeps_the_full_cooldown(cc, cs):
+  P = CarControllerParams
+  v, v_set = 25., 29.5
+  kick_and_return_to_6th(cc, cs, v, v_set, True)
+  drive(cc, cs, P.KICK_COOLDOWN_FRAMES - seconds(1.0), 0.6, 6, v, v_set, lead_visible=True)
+  assert cc.accel_shaper.kick_from == 0
+  assert cc.accel_last == pytest.approx(P.SIXTH_GEAR_ACCEL, abs=1e-6)
+
+
+def test_the_short_cooldown_is_only_for_6th(cc, cs):
+  # in town an upshift into 4th keeps the full cooldown with no lead
+  P = CarControllerParams
+  drive(cc, cs, seconds(1.0), 0.9, 3, 12., 18.)
+  drive(cc, cs, P.KICK_COOLDOWN_FRAMES - seconds(1.0), 0.9, 4, 12., 18., lead_visible=False)
+  assert cc.accel_shaper.kick_from == 0
+
+
+def test_an_on_ramp_kick_into_4th_pulls_at_the_6th_kick_push(cc, cs):
+  # route 00000089 on-ramp: 6-5-4 at 45-50 mph, the plan asked 0.50-0.58 and the kick held it to 0.4
+  P = CarControllerParams
+  v, v_set = 21., 36.
+  drive(cc, cs, seconds(2.0), 0.58, 6, v, v_set, lead_visible=False)
+  assert cc.accel_shaper.kick_from == 6
+  drive(cc, cs, seconds(5.0), 0.58, 4, v, v_set, lead_visible=False)
+  assert cc.accel_shaper.kick_from == 6
+  assert P.KICK_SIXTH_ACCEL_NO_LEAD < P.FOURTH_GEAR_HIGH_ACCEL
+  assert cc.accel_last == pytest.approx(P.KICK_SIXTH_ACCEL_NO_LEAD, abs=1e-6)
+
+
+def test_behind_a_lead_a_6th_kick_keeps_its_push(cc, cs):
+  # route 00000086: kicks behind a lead keep the 0.4
+  P = CarControllerParams
+  v, v_set = 21., 36.
+  drive(cc, cs, seconds(2.0), 0.6, 6, v, v_set, lead_visible=True)
+  assert cc.accel_shaper.kick_from == 6
+  drive(cc, cs, seconds(5.0), 0.6, 4, v, v_set, lead_visible=True)
+  assert cc.accel_last == pytest.approx(P.KICK_ACCEL[6], abs=1e-6)
+
+
 def test_a_kick_never_passes_the_plan(cc, cs):
   drive(cc, cs, seconds(2.0), 0.6, 6, 27., 31.)
   drive(cc, cs, seconds(2.0), 0.3, 5, 27., 31.)
