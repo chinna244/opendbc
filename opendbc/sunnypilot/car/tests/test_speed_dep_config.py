@@ -65,6 +65,18 @@ class TestSpeedDepConfig:
       v = entry.get('seed_version', 0)
       assert isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 2**31, name
 
+  def test_learn_min_speed_is_a_non_negative_number(self):
+    """learn_min_speed (0 when absent) is a speed in m/s the learner compares bin centers to."""
+    for name, entry in get_speed_dep_config().items():
+      v = entry.get('learn_min_speed', 0.0)
+      assert isinstance(v, (int, float)) and not isinstance(v, bool) and 0.0 <= v < 40.0, name
+
+  @pytest.mark.parametrize("platform", [CAR.MAZDA_CX5_KE, CAR.MAZDA_CX5, CAR.MAZDA_CX9, CAR.MAZDA_3, CAR.MAZDA_6])
+  def test_cx5_2022_keeps_its_crawl_bins_and_donors_follow(self, platform):
+    # the 3.5 and 6.5 m/s bins keep their seeds; a chassis behind the donor EPS takes the same
+    assert get_speed_dep_config_for_car(cx5_2022_cp())['learn_min_speed'] == 8.0
+    assert get_speed_dep_config_for_car(swapped_cp(platform))['learn_min_speed'] == 8.0
+
   def test_stock_cx9_keeps_only_the_bins_above_its_floor(self):
     cfg = get_speed_dep_config_for_car(brand_cp(**STOCK_MAZDA))
     full = get_speed_dep_config()['MAZDA_CX9_2021']
