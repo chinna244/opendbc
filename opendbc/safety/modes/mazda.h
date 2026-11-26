@@ -124,7 +124,7 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
   if (msg_matches(msg, MAZDA_CRZ_BTNS, MAZDA_MAIN) && safety_setup.mazda_longitudinal) {
     // A physical cancel press always exits controls.
     if (GET_BIT(msg, 0U)) {
-      safety.controls_allowed = false;
+      exit_controls();
     }
     // Record SET/RES intent for the engagement qualifier below.
     if (GET_BIT(msg, 2U) || GET_BIT(msg, 4U) || GET_BIT(msg, 5U)) {
@@ -170,10 +170,10 @@ static void mazda_rx_hook(const CANPacket_t *msg) {
         // Require recent SET/RES intent on the engaged edge; ACC_ACTIVE alone may acknowledge
         // synthetic traffic rather than a driver request.
         if (cruise_engaged && !safety.cruise_engaged_prev && (safety.mazda_engage_btn_frames > 0U)) {
-          safety.controls_allowed = true;
+          enter_controls();
         }
         if (!cruise_engaged) {
-          safety.controls_allowed = false;
+          exit_controls();
         }
         safety.cruise_engaged_prev = cruise_engaged;
       }

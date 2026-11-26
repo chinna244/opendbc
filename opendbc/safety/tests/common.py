@@ -1252,9 +1252,13 @@ class CarSafetyTest(SafetyTest, MadsSafetyTestBase, RxChecksSafetyTestBase):
     rx_status_start = libsafety_py.ffi.offsetof("SafetyState", "rx_status")
     rx_status_end = rx_status_start + libsafety_py.ffi.sizeof(self.safety.safety_a.state.rx_status)
 
+    # sunnypilot: MADS tracks the controls_allowed edge, which the failing msg and this test's reset both move
+    mads_start = libsafety_py.ffi.offsetof("SafetyState", "m_mads_state") + libsafety_py.ffi.offsetof("MADSState", "op_controls_allowed")
+    mads_end = mads_start + libsafety_py.ffi.sizeof("BinaryStateTracking")
+
     def state():
       buf = state_buffer("safety_a")[:]
-      return buf[:rx_status_start] + buf[rx_status_end:]
+      return buf[:rx_status_start] + buf[rx_status_end:mads_start] + buf[mads_end:]
 
     self.safety.set_controls_allowed(True)
     before = state()
