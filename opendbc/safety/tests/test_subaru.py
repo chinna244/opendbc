@@ -16,7 +16,6 @@ class SubaruMsg(enum.IntEnum):
   Steering_Torque   = 0x119
   Wheel_Speeds      = 0x13a
   ES_LKAS           = 0x122
-  ES_LKAS_ANGLE     = 0x124
   ES_Distance       = 0x221
   ES_DashStatus     = 0x321
   ES_LKAS_State     = 0x322
@@ -24,14 +23,20 @@ class SubaruMsg(enum.IntEnum):
 SUBARU_MAIN_BUS = 0
 SUBARU_ALT_BUS  = 1
 SUBARU_CAM_BUS  = 2
-def lkas_tx_msgs(alt_bus, lkas_msg=SubaruMsg.ES_LKAS):
-  return [[lkas_msg,                    SUBARU_MAIN_BUS],
+
+
+def lkas_tx_msgs(alt_bus):
+  return [[SubaruMsg.ES_LKAS,           SUBARU_MAIN_BUS],
           [SubaruMsg.ES_Distance,       alt_bus],
           [SubaruMsg.ES_DashStatus,     SUBARU_MAIN_BUS],
           [SubaruMsg.ES_LKAS_State,     SUBARU_MAIN_BUS],
           [SubaruMsg.ES_Infotainment,   SUBARU_MAIN_BUS]]
-def fwd_blacklisted_addr(lkas_msg=SubaruMsg.ES_LKAS):
-  return {SUBARU_CAM_BUS: [lkas_msg, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State, SubaruMsg.ES_Infotainment]}
+
+
+def fwd_blacklisted_addr():
+  return {SUBARU_CAM_BUS: [SubaruMsg.ES_LKAS, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State, SubaruMsg.ES_Infotainment]}
+
+
 class TestSubaruSafetyBase(common.CarSafetyTest):
   DBC = "subaru_global_2017_generated"
   SAFETY_MODEL = CarParams.SafetyModel.subaru
@@ -46,15 +51,8 @@ class TestSubaruSafetyBase(common.CarSafetyTest):
   DRIVER_TORQUE_FACTOR = 50
 
   ALT_MAIN_BUS = SUBARU_MAIN_BUS
-  ALT_CAM_BUS = SUBARU_CAM_BUS
-
-  DEG_TO_CAN = 100
 
   INACTIVE_GAS = 1818
-
-  def _set_prev_torque(self, t):
-    self.safety.set_desired_torque_last(t)
-    self.safety.set_rt_torque_last(t)
 
   def _torque_driver_msg(self, torque):
     values = {"Steer_Torque_Sensor": torque}
@@ -146,7 +144,6 @@ class TestSubaruGen1StopAndGoSafety(TestSubaruGen1TorqueStockLongitudinalSafety)
 
 class TestSubaruGen2TorqueSafetyBase(TestSubaruTorqueSafetyBase):
   ALT_MAIN_BUS = SUBARU_ALT_BUS
-  ALT_CAM_BUS = SUBARU_ALT_BUS
 
   MAX_RATE_UP = 35
   MAX_RATE_DOWN = 50

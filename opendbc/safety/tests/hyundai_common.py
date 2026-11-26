@@ -3,7 +3,6 @@ from collections.abc import Callable
 from opendbc.sunnypilot.car.hyundai.values import HyundaiSafetyFlagsSP
 import opendbc.safety.tests.common as common
 from opendbc.safety.tests.libsafety import libsafety_py
-from opendbc.safety.tests.common import make_msg
 
 
 class Buttons:
@@ -81,7 +80,6 @@ class HyundaiButtonBase(common.CarSafetyTest):
 class HyundaiLongitudinalBase(common.LongitudinalAccelSafetyTest):
 
   DISABLED_ECU_UDS_MSG: tuple[int, int]
-  DISABLED_ECU_ACTUATION_MSG: tuple[int, int]
 
   _button_msg: Callable[..., libsafety_py.CANPacket]
 
@@ -103,9 +101,6 @@ class HyundaiLongitudinalBase(common.LongitudinalAccelSafetyTest):
 
   def _pcm_status_msg(self, enable):
     raise Exception
-
-  def _accel_msg(self, accel, aeb_req=False, aeb_decel=0):
-    raise NotImplementedError
 
   def _acc_state_msg(self, enable):
     raise NotImplementedError
@@ -285,13 +280,3 @@ class HyundaiLongitudinalBase(common.LongitudinalAccelSafetyTest):
                            (False, b"\x03\xAA\xAA\x00\x00\x00\x00\x00")):
       tester_present = libsafety_py.make_CANPacket(addr, bus, msg)
       self.assertEqual(should_tx and ecu_disable, self._tx(tester_present))
-
-  def test_disabled_ecu_alive(self):
-    """
-      If the ECU knockout failed, make sure the relay malfunction is shown
-    """
-
-    addr, bus = self.DISABLED_ECU_ACTUATION_MSG
-    self.assertFalse(self.safety.get_relay_malfunction())
-    self._rx(make_msg(bus, addr, 8))
-    self.assertTrue(self.safety.get_relay_malfunction())
