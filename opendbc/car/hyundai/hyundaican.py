@@ -170,11 +170,6 @@ def create_acc_commands(packer, enabled, accel, upper_jerk, idx, lead_data: CanL
 
     return scc12_values
 
-  def calculate_scc12_checksum(values):
-    scc12_dat = packer.make_can_msg("SCC12", 0, values)[1]
-    values["CR_VSM_ChkSum"] = 0x10 - sum(sum(divmod(i, 16)) for i in scc12_dat) % 0x10
-    return values
-
   def get_scc14_values():
     return {
       "ComfortBandUpper": tuning.comfort_band_upper, # stock usually is 0 but sometimes uses higher values
@@ -203,7 +198,6 @@ def create_acc_commands(packer, enabled, accel, upper_jerk, idx, lead_data: CanL
   commands.append(packer.make_can_msg("SCC11", 0, scc11_values))
 
   scc12_values = get_scc12_values()
-  scc12_values = calculate_scc12_checksum(scc12_values)
   commands.append(packer.make_can_msg("SCC12", 0, scc12_values))
 
   scc14_values = get_scc14_values()
@@ -266,3 +260,13 @@ def create_frt_radar_opt(packer):
     "CF_FCA_Equip_Front_Radar": 1,
   }
   return packer.make_can_msg("FRT_RADAR11", 0, frt_radar11_values)
+
+
+def hyundai_can_checksum(address: int, sig, d: bytearray) -> int:
+  if address == 0x386:
+    checksum = sum((b & (0x3F if i % 2 else 0xFF)).bit_count() for i, b in enumerate(d)) ^ 9
+    return (checksum >> (2 if sig.name.endswith("_MSB") else 0)) & 0x3
+
+  if address == 0x394:
+    d = d[:7]
+  return (sig.get_raw_value(d) - sum((b >> 4) + (b & 0xF) for b in d)) & 0xF

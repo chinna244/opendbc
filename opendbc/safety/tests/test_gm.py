@@ -44,9 +44,6 @@ class GmLongitudinalBase(common.CarSafetyTest, common.LongitudinalGasBrakeSafety
     self.assertFalse(self._tx(self.packer.make_can_msg_safety("ASCMGasRegenCmd", 0, values)))
 
   # override these tests from CarSafetyTest, GM longitudinal uses button enable
-  def _pcm_status_msg(self, enable):
-    raise NotImplementedError
-
   def test_disable_control_allowed_from_cruise(self):
     pass
 
@@ -109,8 +106,8 @@ class TestGmSafetyBase(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTe
     else:
       raise NotImplementedError
 
-  def _speed_msg(self, speed, wheels=("RL", "RR")):
-    values = {"%sWheelSpd" % s: speed for s in wheels}
+  def _speed_msg(self, speed):
+    values = {"%sWheelSpd" % s: speed for s in ("RL", "RR")}
     return self.packer.make_can_msg_safety("EBCMWheelSpdRear", 0, values)
 
   def _user_brake_msg(self, brake):
@@ -138,12 +135,6 @@ class TestGmSafetyBase(common.CarSafetyTest, common.DriverTorqueSteeringSafetyTe
     values = {"ACCButtons": buttons}
     return self.packer.make_can_msg_safety("ASCMSteeringButton", self.BUTTONS_BUS, values)
 
-  def test_vehicle_moving_single_wheel(self):
-    # vehicle is moving if any checked wheel is above standstill
-    for wheel in ("RL", "RR"):
-      self.assertTrue(self._rx(self._speed_msg(self.STANDSTILL_THRESHOLD + 1, wheels=(wheel,))))
-      self.assertTrue(self.safety.get_vehicle_moving())
-
 
 class TestGmEVSafetyBase(TestGmSafetyBase):
   EXTRA_SAFETY_PARAM = GMSafetyFlags.EV
@@ -152,6 +143,11 @@ class TestGmEVSafetyBase(TestGmSafetyBase):
   def _user_regen_msg(self, regen):
     values = {"RegenPaddle": 2 if regen else 0}
     return self.packer.make_can_msg_safety("EBCMRegenPaddle", 0, values)
+
+  def test_regen_braking_bits(self):
+    self._test_signal_bits(self._user_regen_msg, self.safety.get_regen_braking_prev, 0)
+
+
 class TestGmAscmSafety(GmLongitudinalBase, TestGmSafetyBase):
   TX_MSGS = [[0x180, 0], [0x409, 0], [0x40A, 0], [0x2CB, 0], [0x370, 0],  # pt bus
              [0xA1, 1], [0x306, 1], [0x308, 1], [0x310, 1],  # obs bus
@@ -233,24 +229,16 @@ class TestGmCameraNonACCSafety(TestGmCameraSafety):
     return self.packer.make_can_msg_safety("ECMCruiseControl", 0, values)
 class TestGmCameraEVNonACCSafety(TestGmCameraNonACCSafety, TestGmEVSafetyBase):
   pass
-class TestGmIgnition(common.SafetyTestBase):
+
+
+class TestGmIgnition(common.CanIgnitionSafetyTest):
   DBC = "gm_global_a_powertrain_generated"
-  SAFETY_MODEL = None
+  IGNITION_VALUES = range(4)
+  IGNITION_ON_VALUES = {2, 3}  # SystemPowerMode 2=Run, 3=Crank Request
 
-  TX_MSGS: list = []
+  def _ignition_msg(self, value, counter=None, bus=0):
+    return self.packer.make_can_msg_safety("BCMGeneralPlatformStatus", bus, {"SystemPowerMode": value})
 
-  def _msg(self, mode):
-    return self.packer.make_can_msg_safety("BCMGeneralPlatformStatus", 0, {"SystemPowerMode": mode})
 
-  # SystemPowerMode 2=Run, 3=Crank Request
-  def test_ignition_on(self):
-    self.safety.ignition_can_hook(self._msg(2))
-    self.assertTrue(self.safety.get_ignition_can())
-
-  def test_ignition_off(self):
-    self.safety.ignition_can_hook(self._msg(2))
-    self.assertTrue(self.safety.get_ignition_can())
-    self.safety.ignition_can_hook(self._msg(0))
-    self.assertFalse(self.safety.get_ignition_can())
 if __name__ == "__main__":
   unittest.main()
