@@ -272,7 +272,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
                                                      brake_pressed=CS.out.brakePressed,
                                                      stopping=sm.stop_bits, resume_unlatching=sm.resume_unlatching))
         can_sends.append(mazdacan.create_crz_ctrl(self.packer, bus, long_engaged, acc_available, gap, acc_active_2,
-                                                  lead_distance=lead_distance, hbc_request=CS.hbc_request))
+                                                  lead_distance=lead_distance, hbc_request=CS.hbc_request,
+                                                  hands_off=self.dash_warning_on_bus))
       self.long_counter += 1
 
     return can_sends

@@ -50,11 +50,13 @@ def create_acc_command(packer, bus, counter, accel, *, long_active, acc_availabl
 
 
 def create_crz_ctrl(packer, bus, long_active, acc_available, gap_setting, acc_active_2, *, lead_distance=0,
-                    hbc_request=False):
+                    hbc_request=False, hands_off=False):
   # CRZ_CTRL replaces radar cruise state and mirrors the driver's gap selection. The cluster draws
   # the lead from RADAR_HAS_LEAD; RADAR_LEAD_RELATIVE_DISTANCE is stock's 1 to 5 closeness bucket.
   # NEW_SIGNAL_3 (bit 13) relays the camera's high-beam request (0x440 BIT2) as the stock radar
   # does; the body raises the lamps and the cluster's green HBC light on it.
+  # The hands-off pair mirrors our hands-on-wheel 0x440 as the stock radar does; without it the
+  # dash showed no hands-on-wheel text under radar takeover.
   values = {
     "MSG_1_INV": 1,
     "MSG_1_INV_COPY": 1,
@@ -66,6 +68,8 @@ def create_crz_ctrl(packer, bus, long_active, acc_available, gap_setting, acc_ac
     "RADAR_LEAD_RELATIVE_DISTANCE": lead_distance,
     "ACC_ACTIVE_2": int(acc_active_2),
     "NEW_SIGNAL_3": int(hbc_request),
+    "HANDS_OFF_STEERING": int(hands_off),
+    "HANDS_ON_STEER_WARN": 9 if hands_off else 0,
   }
   return packer.make_can_msg("CRZ_CTRL", bus, values)
 
