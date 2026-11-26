@@ -47,6 +47,9 @@ class GasInterceptorSafetyTest(CarSafetyTest):
   def test_no_disengage_on_gas(self):
     pass
 
+  def test_gas_pressed_bits(self):
+    pass
+
   def test_prev_gas_interceptor(self):
     self._rx(self._interceptor_user_gas(0x0))
     self.assertFalse(self.safety.get_gas_interceptor_prev())

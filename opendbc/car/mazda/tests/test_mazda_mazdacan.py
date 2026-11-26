@@ -159,6 +159,12 @@ def test_crz_ctrl_relays_hbc_arming(packer, long_active, acc_available, gap, acc
   assert bytes(a ^ b for a, b in zip(dat, bare, strict=True)) == bytes([0, 0x20, 0, 0, 0, 0, 0, 0])
 
 
+def test_crz_ctrl_mirrors_the_hands_off_frame(packer):
+  dat = mazdacan.create_crz_ctrl(packer, 0, True, True, 2, True, hands_off=True)[1]
+  bare = mazdacan.create_crz_ctrl(packer, 0, True, True, 2, True)[1]
+  assert bytes(a ^ b for a, b in zip(dat, bare, strict=True)) == bytes([0, 0, 0, 0, 0, 0, 0x01, 0x09])
+
+
 def test_radar_frames_match_stock():
   expected = [
     (0x499, "0008e00000000000"),
