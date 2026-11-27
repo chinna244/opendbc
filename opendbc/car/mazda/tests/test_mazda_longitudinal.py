@@ -83,6 +83,21 @@ def test_crz_ctrl_relays_hbc_arming_on_both_buses(cc, cs, engaged):
       assert parse_frame(CRZ_CTRL, frame(sends, CRZ_CTRL, bus), bus)["NEW_SIGNAL_3"] == armed
 
 
+@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize("engaged", [False, True])
+def test_crz_ctrl_mirrors_camera_lane_lines_on_both_buses(cc, cs, engaged, live):
+  # Stock radar copies 0x440 LINE_VISIBLE/LINE_NOT_VISIBLE/LANE_LINES into CRZ_CTRL; the dash draws lines from it.
+  kwargs = dict(accel=0.5) if engaged else dict(enabled=False, long_active=False, accel=0., long_state=OFF)
+  for vis, nvis, ll in ((1, 0, 2), (1, 0, 4), (0, 1, 1), (1, 0, 3)):
+    cs.cam_laneinfo["LINE_VISIBLE"], cs.cam_laneinfo["LINE_NOT_VISIBLE"], cs.cam_laneinfo["LANE_LINES"] = vis, nvis, ll
+    cc.frame = 0  # force emission
+    sends = step_long(cc, cs, available=True, cam_laneinfo_raw=b"\x00" * 8, cam_laneinfo_live=live, **kwargs)
+    want = (vis, nvis, ll) if live else (0, 1, 1)  # stale camera keeps the old fixed state
+    for bus in (0, 2):
+      dat = frame(sends, CRZ_CTRL, bus)
+      assert (dat[0] & 1, (dat[0] >> 1) & 1, dat[1] & 7) == want
+
+
 # leadDistanceBars counts up (1 closest, 3 farthest); DISTANCE_SETTING counts down (DBC:
 # 1 is 4 bars, 4 is 1 bar), so the wire carries 5 - bars. Measured on 576 stock segments:
 # DISTANCE_LESS (closer) raises the raw, DISTANCE_MORE lowers it; 0 only while unavailable.

@@ -192,3 +192,21 @@ def test_radar_frames_stamp_only_the_counter():
 def test_g46l_radar_frames_are_the_static_capture_alone():
   frames = mazdacan.create_radar_frames(0, 15, g46l=True)
   assert [(f.address, f.dat.hex(), f.src) for f in frames] == [(0x499, "0098400000000000", 0)]
+
+
+def test_crz_ctrl_default_lane_state_is_unchanged(packer):
+  # no camera frame: the old fixed "not visible, LANE_LINES 1"
+  dat = mazdacan.create_crz_ctrl(packer, 0, True, True, 2, True)[1]
+  assert (dat[0] & 3, dat[1] & 7) == (2, 1)
+  assert dat == mazdacan.create_crz_ctrl(packer, 0, True, True, 2, True, lane_info=(0, 1, 1))[1]
+
+
+@pytest.mark.parametrize("visible, not_visible, lane_lines", [(v, n, ll) for v in (0, 1) for n in (0, 1) for ll in range(8)])
+def test_crz_ctrl_mirrors_the_lane_lines_as_stock(packer, visible, not_visible, lane_lines):
+  # stock radar: CRZ_CTRL byte0 bits0-1 = 0x440 byte0 bits0-1, byte1 bits0-2 = 0x440 LANE_LINES (byte1 bits0-2)
+  cam = packer.make_can_msg("CAM_LANEINFO", 0, {"LINE_VISIBLE": visible, "LINE_NOT_VISIBLE": not_visible,
+                                                "LANE_LINES": lane_lines})[1]
+  dat = mazdacan.create_crz_ctrl(packer, 0, True, True, 2, True, lane_info=(visible, not_visible, lane_lines))[1]
+  bare = mazdacan.create_crz_ctrl(packer, 0, True, True, 2, True)[1]
+  assert (dat[0] & 3, dat[1] & 7) == (cam[0] & 3, cam[1] & 7)
+  assert dat[0] & ~3 & 0xff == bare[0] & ~3 & 0xff and dat[1] & ~7 & 0xff == bare[1] & ~7 & 0xff and dat[2:] == bare[2:]

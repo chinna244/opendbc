@@ -57,16 +57,24 @@ def create_acc_command(packer, bus, counter, accel, *, long_active, acc_availabl
 
 
 def create_crz_ctrl(packer, bus, long_active, acc_available, gap_setting, acc_active_2, *, lead_distance=0,
-                    hbc_request=False, hands_off=False, lkas_white=False):
+                    hbc_request=False, hands_off=False, lkas_white=False, lane_info=None):
   # CRZ_CTRL replaces radar cruise state and mirrors the driver's gap selection. The cluster draws
   # the lead from RADAR_HAS_LEAD; RADAR_LEAD_RELATIVE_DISTANCE is stock's 1 to 5 closeness bucket.
   # NEW_SIGNAL_3 (bit 13) relays the camera's high-beam request (0x440 BIT2) as the stock radar
   # does; the body raises the lamps and the cluster's green HBC light on it.
   # The hands-off pair mirrors our hands-on-wheel 0x440 as the stock radar does; without it the
   # dash showed no hands-on-wheel text under radar takeover.
+  # MSG_1/MSG_1_INV and MSG_1_INV_COPY/MSG_1_COPY/NEW_SIGNAL_6 are the stock radar's copy of 0x440
+  # LINE_VISIBLE/LINE_NOT_VISIBLE and the 3-bit LANE_LINES (99.9% of 488k pre-takeover frames). The
+  # dash draws the lane lines from them; the fixed "not visible, LANE_LINES 1" kept them off.
+  # lane_info is (LINE_VISIBLE, LINE_NOT_VISIBLE, LANE_LINES); None keeps that fixed state.
+  visible, not_visible, lane_lines = lane_info if lane_info is not None else (0, 1, 1)
   values = {
-    "MSG_1_INV": 1,
-    "MSG_1_INV_COPY": 1,
+    "MSG_1": int(visible),
+    "MSG_1_INV": int(not_visible),
+    "MSG_1_INV_COPY": int(lane_lines) & 1,
+    "MSG_1_COPY": (int(lane_lines) >> 1) & 1,
+    "NEW_SIGNAL_6": (int(lane_lines) >> 2) & 1,
     "NEW_SIGNAL_8": 1,
     "CRZ_ACTIVE": int(long_active),
     "CRZ_AVAILABLE": int(long_active or acc_available),

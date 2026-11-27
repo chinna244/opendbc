@@ -448,6 +448,10 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
       # Show the vision lead on the dash with stock's distance bucket: 3 behind a stopped lead,
       # 2 while following. The tracks stay empty.
       lead_distance = (3 if CS.out.standstill else 2) if lead_shown else 0
+      # The lane-line state the stock radar copies from 0x440 into CRZ_CTRL; our 0x440 carries the camera's.
+      lane_info = None
+      if CS.cam_laneinfo_live:
+        lane_info = tuple(int(CS.cam_laneinfo[s]) for s in ("LINE_VISIBLE", "LINE_NOT_VISIBLE", "LANE_LINES"))
       for bus in LONG_BUSES:
         can_sends.append(mazdacan.create_acc_command(self.packer, bus, self.long_counter, accel,
                                                      long_active=long_engaged, acc_available=acc_available,
@@ -461,7 +465,8 @@ class CarController(CarControllerBase, IntelligentCruiseButtonManagementInterfac
         lkas_white = bus == 0 and (self.mads_white_hud_on_bus or (cruise_on and CC_SP.mads.active))
         can_sends.append(mazdacan.create_crz_ctrl(self.packer, bus, long_engaged, acc_available, gap, acc_active_2,
                                                   lead_distance=lead_distance, hbc_request=CS.hbc_request,
-                                                  hands_off=self.dash_warning_on_bus, lkas_white=lkas_white))
+                                                  hands_off=self.dash_warning_on_bus, lkas_white=lkas_white,
+                                                  lane_info=lane_info))
       self.long_counter += 1
 
     return can_sends
