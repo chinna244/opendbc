@@ -25,11 +25,8 @@ def crz_info_checksum(dat: bytes) -> int:
 
 
 def create_acc_command(packer, bus, counter, accel, *, long_active, acc_available,
-                       brake_pressed=False, stopping=False, resume_unlatching=False, hud_tja2=False):
+                       brake_pressed=False, stopping=False, resume_unlatching=False):
   # CRZ_INFO replaces the disabled radar's acceleration command and armed-idle state.
-  # hud_tja2: the real radar echoes the dash frame's white TJA=2 (0x440) in byte 5 bit 0, outside
-  # its checksum (Sept-Oct captures, cruise not engaged: TJA=2 -> 1 in 19341/19355 frames, TJA=0 ->
-  # 0 in 23033/23043; lines were drawn only then). Our frame never carried it.
   values = {
     "ERROR_STATUS": 1,
     "STATIC_1": 0x7ff,
@@ -50,10 +47,7 @@ def create_acc_command(packer, bus, counter, accel, *, long_active, acc_availabl
 
   dat = packer.make_can_msg("CRZ_INFO", bus, values)[1]
   values["CHKSUM"] = crz_info_checksum(dat)
-  addr, dat, bus = packer.make_can_msg("CRZ_INFO", bus, values)
-  if hud_tja2:
-    dat = dat[:5] + bytes([dat[5] | 0x01]) + dat[6:]
-  return addr, dat, bus
+  return packer.make_can_msg("CRZ_INFO", bus, values)
 
 
 def create_crz_ctrl(packer, bus, long_active, acc_available, gap_setting, acc_active_2, *, lead_distance=0,

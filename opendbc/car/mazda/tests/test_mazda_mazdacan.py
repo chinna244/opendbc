@@ -65,25 +65,6 @@ def test_crz_info_standby_matches_stock(packer, counter):
   assert dat.hex() == expected
 
 
-@pytest.mark.parametrize("counter", range(16))
-def test_crz_info_echoes_the_hud_tja2_like_the_radar(packer, counter):
-  # The real radar's standby frame while the dash frame carries TJA=2: byte 5 bit 0 set, outside the
-  # checksum (factory capture 01ffe3ffc0010e4f, counter 0x0e).
-  checksum = (0x5d - counter) & 0xff
-  dat = mazdacan.create_acc_command(packer, 0, counter, 0.0, long_active=False, acc_available=False, hud_tja2=True)[1]
-  assert dat.hex() == f"01ffe3ffc001{counter:02x}{checksum:02x}"
-  if counter == 0x0e:
-    assert dat.hex() == "01ffe3ffc0010e4f"
-
-
-@pytest.mark.parametrize("long_active, acc_available", [(True, False), (False, True)])
-def test_crz_info_tja2_echo_changes_only_byte5_bit0(packer, long_active, acc_available):
-  kw = dict(long_active=long_active, acc_available=acc_available, stopping=long_active)
-  off = mazdacan.create_acc_command(packer, 0, 5, -0.5, **kw)[1]
-  on = mazdacan.create_acc_command(packer, 0, 5, -0.5, hud_tja2=True, **kw)[1]
-  assert bytes(a ^ b for a, b in zip(off, on, strict=True)) == bytes([0, 0, 0, 0, 0, 1, 0, 0])
-
-
 @pytest.mark.parametrize("brake_pressed, byte4, base", [(False, 0xc4, 0xd9), (True, 0xc0, 0xdd)])
 @pytest.mark.parametrize("counter", range(16))
 def test_crz_info_armed_idle_matches_stock(packer, brake_pressed, byte4, base, counter):

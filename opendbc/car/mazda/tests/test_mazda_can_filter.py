@@ -561,21 +561,21 @@ class TestCruisingWhiteWheel:
     assert any(d == bytes.fromhex("4201000a20001040") for _, d in hud), [d.hex() for _, d in hud]
     assert all(d[3] == 0x0A for _, d in hud)
 
-  def test_cruise_info_echoes_the_white_hud_like_the_radar(self, tcc, fcs):
-    # the real radar sets CRZ_INFO byte 5 bit 0 exactly while the dash frame carries TJA=2
+  def test_cruise_info_never_carries_the_white_hud_echo(self, tcc, fcs):
+    # CRZ_INFO byte 5 bit 0 (the real radar's TJA=2 echo) is not sent: the dash lane lines come from
+    # CRZ_CTRL's lane-line mirror, and the radar never set the echo while cruising.
     confirm(tcc, fcs)
-    seen = set()
+    whites = set()
     for over in (dict(), dict(lat_active=False)):
       for _ in range(3 * self.CADENCE):
         fcs.can_filter_state, fcs.can_filter_age = CONFIRMED, 0
         tcc.can_filter.receive([CONFIRMED], 0)
-        white_before = tcc.mads_white_hud_on_bus
         _, sends = step(tcc, fcs, **self.kwargs(**over))
+        whites.add(tcc.mads_white_hud_on_bus)
         for a, d, b in sends:
           if a == CRZ_INFO:
-            assert bool(d[5] & 0x01) == tcc.mads_white_hud_on_bus or bool(d[5] & 0x01) == white_before
-            seen.add(bool(d[5] & 0x01))
-    assert seen == {True, False}
+            assert not d[5] & 0x01, d.hex()
+    assert whites == {True, False}
 
   def test_no_white_before_the_board_confirms(self, tcc, fcs):
     hud = self.drive(tcc, fcs, 3 * self.CADENCE, state=None, **self.kwargs())
