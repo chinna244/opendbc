@@ -13,7 +13,7 @@ import pytest
 from opendbc.car.mazda.carcontroller import DASH_STEER_WARNING_QUIET_FRAMES, HUD_ALERT_FRAMES
 from opendbc.car.mazda.tests.conftest import CAM_LANEINFO, VisualAlert, frames, hands_code, step
 
-WARNING = (0b111, 1, 1)
+WARNING = (0b101, 0, 0)  # the OEM TJA camera's hands-on-wheel code (route 0000003c)
 IDLE = (0, 0, 0)
 ALERT = dict(visual_alert=VisualAlert.steerRequired)
 

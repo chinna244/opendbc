@@ -38,13 +38,14 @@ def test_alert_command_relays_state_but_not_the_tja_churn(packer):
 
 @pytest.mark.parametrize("steer_required", [False, True])
 def test_alert_command_sends_the_frame_the_cluster_draws(packer, steer_required):
-  # On-car map 2026-09-30: the cluster draws the hands-on-wheel text only with the 0b111 code
-  # and HANDS_ON_STEER_WARN_2 together; (0,1,0), (0,1,1), (7,1,0) and (0,0,1) draw nothing.
+  # The OEM TJA camera's hands-on-wheel code: level 5 plus byte 6 bit 0, both warn bits clear.
+  # Level 7 with HANDS_ON_STEER_WARN_2 drew the "Please hold steering wheel" text instead.
   cam_msg = {"LINE_VISIBLE": 0, "LINE_NOT_VISIBLE": 1, "LANE_LINES": 1, "BIT1": 1,
              "BIT2": 0, "BIT3": 0, "NO_ERR_BIT": 0, "ERR_BIT": 0,
              "TJA": 0, "TJA_TRANSITION": 0, "S1": 0, "S1_HBEAM": 0}
   dat = mazdacan.create_alert_command(packer, cam_msg, ldw=False, steer_required=steer_required)[1]
-  assert hands_code(dat) == ((0b111, 1, 1) if steer_required else (0, 0, 0))
+  assert hands_code(dat) == ((0b101, 0, 0) if steer_required else (0, 0, 0))
+  assert dat[6] & 0x01 == int(steer_required)
   out = parse_frame(CAM_LANEINFO, dat)
   assert out["LDW_WARN_LL"] == 0 and out["LDW_WARN_RL"] == 0
 
@@ -143,7 +144,17 @@ def test_crz_ctrl_relays_hbc_arming(packer, long_active, acc_available, gap, acc
 def test_crz_ctrl_mirrors_the_hands_off_frame(packer):
   dat = mazdacan.create_crz_ctrl(packer, 0, True, True, 2, True, hands_off=True)[1]
   bare = mazdacan.create_crz_ctrl(packer, 0, True, True, 2, True)[1]
-  assert bytes(a ^ b for a, b in zip(dat, bare, strict=True)) == bytes([0, 0, 0, 0, 0, 0, 0x01, 0x09])
+  assert bytes(a ^ b for a, b in zip(dat, bare, strict=True)) == bytes([0, 0, 0, 0, 0, 0, 0x0b, 0])
+
+
+def test_hands_on_wheel_frames_match_the_oem_tja_capture(packer):
+  # route 0000003c (dashcam, OEM TJA), seg 6: camera 0x440 4201000030001040 -> 4201000030001b40 and
+  # radar CRZ_CTRL 0a018b4030001000 -> 0a018b4030001b00 while TJA asks for hands on the wheel
+  cam_msg = parse_frame(CAM_LANEINFO, bytes.fromhex("4201000030001040"))
+  dat = mazdacan.create_alert_command(packer, cam_msg, ldw=False, steer_required=True)[1]
+  assert dat[6:] == bytes.fromhex("1b40")
+  ctrl = mazdacan.create_crz_ctrl(packer, 0, True, True, 2, True, hands_off=True)[1]
+  assert ctrl[6] & 0x0f == 0x0b and ctrl[7] & 0x0f == 0
 
 
 def test_radar_frames_match_stock():

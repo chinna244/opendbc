@@ -56,8 +56,10 @@ def create_crz_ctrl(packer, bus, long_active, acc_available, gap_setting, acc_ac
   # the lead from RADAR_HAS_LEAD; RADAR_LEAD_RELATIVE_DISTANCE is stock's 1 to 5 closeness bucket.
   # NEW_SIGNAL_3 (bit 13) relays the camera's high-beam request (0x440 BIT2) as the stock radar
   # does; the body raises the lamps and the cluster's green HBC light on it.
-  # The hands-off pair mirrors our hands-on-wheel 0x440 as the stock radar does; without it the
-  # dash showed no hands-on-wheel text under radar takeover.
+  # hands_off: the stock radar's CRZ_CTRL while the OEM TJA camera asks for hands on the wheel
+  # (route 0000003c, dashcam, seg 6 ~380 s): byte 6 bits 0, 1 and 3 set (HANDS_OFF_STEERING and two
+  # unnamed bits), HANDS_ON_STEER_WARN 0. The 1/9 pair (our old 0x440 level 7 mirrored) drew the
+  # "Please hold steering wheel" text instead of the wheel icon.
   # MSG_1/MSG_1_INV and MSG_1_INV_COPY/MSG_1_COPY/NEW_SIGNAL_6 are the stock radar's copy of 0x440
   # LINE_VISIBLE/LINE_NOT_VISIBLE and the 3-bit LANE_LINES (99.9% of 488k pre-takeover frames). The
   # dash draws the lane lines from them; the fixed "not visible, LANE_LINES 1" kept them off.
@@ -78,11 +80,12 @@ def create_crz_ctrl(packer, bus, long_active, acc_available, gap_setting, acc_ac
     "ACC_ACTIVE_2": int(acc_active_2),
     "NEW_SIGNAL_3": int(hbc_request),
     "HANDS_OFF_STEERING": int(hands_off),
-    "HANDS_ON_STEER_WARN": 9 if hands_off else 0,
   }
   addr, dat, bus = packer.make_can_msg("CRZ_CTRL", bus, values)
   if lkas_white:
     dat = dat[:4] + bytes([dat[4] | 0x20]) + dat[5:]
+  if hands_off:
+    dat = dat[:6] + bytes([dat[6] | 0x0a]) + dat[7:]
   return addr, dat, bus
 
 
@@ -174,22 +177,24 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool)
     "S1_HBEAM",
   ]}
   values.update({
-    # Mapped on the car (2026-09-30, route 00000267): the cluster draws the hands-on-wheel text
-    # only with HANDS_WARN_3_BITS=7 and HANDS_ON_STEER_WARN_2 together. Either alone, or
-    # HANDS_ON_STEER_WARN alone, is mirrored by the radar into CRZ_CTRL but draws nothing.
-    # The 0b111 code is also what puts the radar into its hands-off state, so the two cannot be
-    # separated. The camera's own frames with HANDS_ON_STEER_WARN are lane-departure warnings
-    # (LDW_WARN_LL / _RL set alongside), not a hands-off warning.
-    "HANDS_WARN_3_BITS": 0b111 if steer_required else 0,
-    "HANDS_ON_STEER_WARN": steer_required,
-    "HANDS_ON_STEER_WARN_2": steer_required,
+    # The OEM TJA camera's own hands-on-wheel request (route 0000003c, dashcam, seg 6 ~380 s):
+    # HANDS_WARN_3_BITS 5 plus byte 6 bit 0 (no DBC signal), both HANDS_ON_STEER_WARN bits clear.
+    # Level 7 with HANDS_ON_STEER_WARN_2 (route 00000267) draws the "Please hold steering wheel"
+    # text instead of the wheel icon. The camera's own frames with HANDS_ON_STEER_WARN are
+    # lane-departure warnings (LDW_WARN_LL / _RL set alongside), not a hands-off warning.
+    "HANDS_WARN_3_BITS": 0b101 if steer_required else 0,
+    "HANDS_ON_STEER_WARN": 0,
+    "HANDS_ON_STEER_WARN_2": 0,
 
     # TODO: right lane works, left doesn't
     # TODO: need to do something about L/R
     "LDW_WARN_LL": 0,
     "LDW_WARN_RL": 0,
   })
-  return packer.make_can_msg("CAM_LANEINFO", 0, values)
+  addr, dat, bus = packer.make_can_msg("CAM_LANEINFO", 0, values)
+  if steer_required:
+    dat = dat[:6] + bytes([dat[6] | 0x01]) + dat[7:]
+  return addr, dat, bus
 
 
 def create_button_cmd(packer, CP, counter, button):
